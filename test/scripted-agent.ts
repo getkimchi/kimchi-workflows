@@ -1,0 +1,77 @@
+import type { AgentRequest, AgentSession } from "../src/engine/types.ts";
+
+/** A scripted turn: a plain string reply, a thrown `Error`, or a reply with token usage for budgeting. */
+export type ScriptedTurn = string | Error | { text: string; totalTokens: number };
+
+export interface ScriptedAgent {
+  startAgent: (request: AgentRequest) => AgentSession;
+  /** Every message sent (prompt + corrections + answers) across all sessions, in order. */
+  readonly messages: string[];
+  /** The `model` seen by each opened session, in order. */
+  readonly models: (string | undefined)[];
+  /** The `history` seed seen by each opened session, in order (undefined for a fresh session). */
+  readonly histories: (readonly unknown[] | undefined)[];
+  /** Number of sessions opened (one per `startAgent`, i.e. per outer attempt / resume). */
+  readonly opened: number;
+  /** Number of `dispose()` calls. */
+  readonly disposed: number;
+}
+
+/**
+ * A scripted `startAgent` for offline agent-step tests. Each opened session replays its own script
+ * turn-by-turn: the Nth `sendAndAwaitEnd` returns (or throws) `script[N]`. An `Error` entry is
+ * thrown (transport error); a `string` is returned as the reply; a `{ text, totalTokens }` entry
+ * additionally reports usage (for token-budget tests).
+ *
+ * Pass one script per expected session: `[[a, b], [c]]` scripts a first session that replies `a`
+ * then `b` (e.g. across a steering repair), and a second fresh session (after an outer retry) that
+ * replies `c`.
+ */
+export function scriptedAgent(sessionScripts: ReadonlyArray<ReadonlyArray<ScriptedTurn>>): ScriptedAgent {
+  const messages: string[] = [];
+  const models: (string | undefined)[] = [];
+  const histories: (readonly unknown[] | undefined)[] = [];
+  let opened = 0;
+  let disposed = 0;
+  let sessionIndex = 0;
+
+  const startAgent = (request: AgentRequest): AgentSession => {
+    opened += 1;
+    models.push(request.model);
+    histories.push(request.history);
+    const script = sessionScripts[sessionIndex++] ?? [];
+    const conversation: unknown[] = [...(request.history ?? [])];
+    let turn = 0;
+    return {
+      async sendAndAwaitEnd(message: string) {
+        messages.push(message);
+        conversation.push({ role: "user", content: message });
+        const response = script[turn++];
+        if (response === undefined) throw new Error("scripted session ran out of responses");
+        if (response instanceof Error) throw response;
+        const text = typeof response === "string" ? response : response.text;
+        conversation.push({ role: "assistant", content: text });
+        return typeof response === "string" ? { text } : { text, usage: { totalTokens: response.totalTokens } };
+      },
+      getConversation() {
+        return conversation;
+      },
+      dispose() {
+        disposed += 1;
+      },
+    };
+  };
+
+  return {
+    startAgent,
+    messages,
+    models,
+    histories,
+    get opened() {
+      return opened;
+    },
+    get disposed() {
+      return disposed;
+    },
+  };
+}

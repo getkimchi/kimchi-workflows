@@ -1,0 +1,95 @@
+import { Type } from "typebox";
+import { describe, expect, it } from "vitest";
+import { createStep, createWorkflow } from "../src/flow/index.ts";
+import { resumeWorkflow } from "../src/engine/resume-workflow.ts";
+import { runWorkflow } from "../src/engine/run-workflow.ts";
+import { createTestHost } from "./helpers.ts";
+
+const counterSchema = Type.Object({ n: Type.Integer() });
+
+/**
+ * `before -> dountil(loop body)`. The loop body is `observer -> producer`:
+ *  - `observer` reads `ctx.getStepResult("producer")` and records what it saw (per call);
+ *  - `producer` increments the counter and, on the *first* run, throws when it would reach n=2.
+ *
+ * "producer" only exists inside the loop node. After the first (interrupted) run, "producer" has a
+ * recorded completion (from iteration 1). On resume, iteration 1's `observer` must see `undefined`
+ * for `getStepResult("producer")` — exactly like a fresh run — NOT the stale iteration-1 value.
+ */
+function buildProbeWorkflow(failProducer: boolean) {
+  const observed: unknown[] = [];
+  const calls = { before: 0 };
+
+  const before = createStep({
+    name: "before",
+    output: counterSchema,
+    run: () => {
+      calls.before += 1;
+      return { n: 0 };
+    },
+  });
+
+  const observer = createStep({
+    name: "observer",
+    input: counterSchema,
+    output: counterSchema,
+    run: ({ input, ctx }) => {
+      observed.push(ctx.getStepResult("producer")); // forward reference within the same node
+      return input; // pass the counter through to `producer`
+    },
+  });
+
+  const producer = createStep({
+    name: "producer",
+    input: counterSchema,
+    output: counterSchema,
+    run: ({ input }) => {
+      const next = input.n + 1;
+      if (failProducer && next === 2) throw new Error("boom in producer");
+      return { n: next };
+    },
+  });
+
+  const body = createWorkflow({ name: "probe-body" }).then(observer).then(producer).commit();
+  const workflow = createWorkflow({ name: "probe" })
+    .then(before)
+    .dountil(body, (_ctx, last) => (last as { n: number }).n >= 2, { name: "probe-loop", maxIterations: 10 })
+    .commit();
+
+  return { workflow, observed, calls };
+}
+
+describe("fresh ≡ resume invariant (spec §8): resume state matches an interrupted fresh run", () => {
+  it("a re-run body step reading a not-yet-completed inner name sees undefined, not a stale prior value", async () => {
+    // Baseline: a fully fresh run records what `observer` sees each iteration.
+    const fresh = buildProbeWorkflow(false);
+    const freshHost = createTestHost();
+    const freshResult = await runWorkflow(fresh.workflow, undefined, freshHost.host);
+    expect(freshResult.status).toBe("completed");
+    expect(freshResult.output).toEqual({ n: 2 });
+    // iter1 observer sees undefined (producer not yet run); iter2 sees iter1's producer output.
+    expect(fresh.observed).toEqual([undefined, { n: 1 }]);
+
+    // Interrupt: producer throws when it would reach n=2 (iteration 2), leaving the loop incomplete.
+    const run = buildProbeWorkflow(true);
+    const { host, store } = createTestHost();
+    const first = await runWorkflow(run.workflow, undefined, host);
+    expect(first.status).toBe("crashed");
+    // producer completed once (iteration 1) → it IS recorded in the log.
+    const priorEvents = await store.loadEvents(first.runId);
+    expect(priorEvents.some((e) => e.type === "step-completed" && e.stepName === "producer")).toBe(true);
+    expect(priorEvents.some((e) => e.type === "node-completed" && e.nodeName === "probe-loop")).toBe(false);
+
+    // Resume with a fixed producer; `resumeRun` has its own fresh `observed` array (empty at start).
+    const resumeRun = buildProbeWorkflow(false);
+    const resumed = await resumeWorkflow(resumeRun.workflow, priorEvents, host);
+
+    expect(resumed.status).toBe("completed");
+    expect(resumed.output).toEqual({ n: 2 });
+    // THE INVARIANT: identical to the fresh run — iter1 sees undefined (not the stale {n:1}).
+    expect(resumeRun.observed).toEqual([undefined, { n: 1 }]);
+    expect(resumeRun.observed[0]).toBeUndefined();
+    // `before` (completed prefix) is not re-run.
+    expect(resumeRun.calls.before).toBe(0);
+  });
+});
