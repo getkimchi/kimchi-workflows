@@ -81,9 +81,10 @@ export async function execute(workflow: WorkflowDefinition, host: HostPort, curs
       stepName: outcome.stepName,
       questionnaire: outcome.questionnaire,
       conversation: outcome.conversation,
+      violation: outcome.violation,
       time: iso(host),
     });
-    return { runId: state.runId, status: "parked", stepName: outcome.stepName, questionnaire: outcome.questionnaire };
+    return { runId: state.runId, status: "parked", stepName: outcome.stepName, questionnaire: outcome.questionnaire, violation: outcome.violation };
   }
   await host.emit({ type: "run-cancelled", runId: state.runId, stepName: outcome.stepName, time: iso(host) });
   return { runId: state.runId, status: "cancelled" };
@@ -210,7 +211,7 @@ function inputQuestionnaire(step: InputStep) {
 function answerInputStep(step: InputStep, answers: Record<string, unknown>): StepOutcome {
   const output = answersToOutput(step.outputSchema, answers);
   const check = validateAnswers(step.outputSchema, output);
-  return check.ok ? { kind: "ok", output } : { kind: "parked", questionnaire: inputQuestionnaire(step), conversation: [] };
+  return check.ok ? { kind: "ok", output } : { kind: "parked", questionnaire: inputQuestionnaire(step), conversation: [], violation: check.violation };
 }
 
 /** Turn a step's `StepOutcome` into an `ExecOutcome`: emit `step-completed` on success; attach identity otherwise. */
@@ -220,7 +221,7 @@ async function finishStep(step: StepDefinition, index: number, host: HostPort, s
       await host.emit({ type: "step-completed", runId: state.runId, stepIndex: index, stepName: step.name, output: outcome.output, time: iso(host) });
       return { kind: "ok", output: outcome.output };
     case "parked":
-      return { kind: "parked", stepName: step.name, questionnaire: outcome.questionnaire, conversation: outcome.conversation };
+      return { kind: "parked", stepName: step.name, questionnaire: outcome.questionnaire, conversation: outcome.conversation, violation: outcome.violation };
     case "crashed":
       return { kind: "crashed", error: outcome.error, stepName: step.name };
     case "cancelled":

@@ -13,10 +13,7 @@ import { extractJson } from "./extract-json.ts";
 export type AgentOutputCheck = { ok: true; value: unknown } | { ok: false; violation: string };
 
 /** Result of checking a Q&A reply (spec §10.1): a validated result, a validated questionnaire batch, or a violation. */
-export type QaOutputCheck =
-  | { ok: true; kind: "result"; value: unknown }
-  | { ok: true; kind: "questionnaire"; questionnaire: unknown }
-  | { ok: false; violation: string };
+export type QaOutputCheck = { ok: true; kind: "result"; value: unknown } | { ok: true; kind: "questionnaire"; questionnaire: unknown } | { ok: false; violation: string };
 
 /** Extract JSON from `text` (tolerantly) and validate it against `schema`. */
 export function validateAgentOutput(schema: TSchema, text: string): AgentOutputCheck {
