@@ -1,9 +1,9 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { createAgentStep, createWorkflow } from "../src/flow/index.ts";
 import { buildCorrectionMessage } from "../src/engine/agent-output.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunEvent } from "../src/engine/types.ts";
+import { createAgentStep, createWorkflow } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 import { scriptedAgent } from "./scripted-agent.ts";
 
@@ -39,7 +39,9 @@ describe("output steering (Phase 4b, spec §9.2)", () => {
   });
 
   it("crashes after exhausting the repair budget, emitting exactly maxOutputRepairs steers and no outer retry", async () => {
-    const workflow = createWorkflow({ name: "steer-exhaust" }).then(agentStepWith({ maxOutputRepairs: 2 })).commit();
+    const workflow = createWorkflow({ name: "steer-exhaust" })
+      .then(agentStepWith({ maxOutputRepairs: 2 }))
+      .commit();
     // Always invalid: first reply + 2 corrections = 3 replies, all bad.
     const agent = scriptedAgent([['{"summary":"x"}', '{"summary":"y"}', '{"summary":"z"}']]);
     const { host, store } = createTestHost({ startAgent: agent.startAgent });
@@ -60,7 +62,9 @@ describe("output steering (Phase 4b, spec §9.2)", () => {
   });
 
   it("does not steer when maxOutputRepairs is 0 (immediate crash on invalid output)", async () => {
-    const workflow = createWorkflow({ name: "steer-none" }).then(agentStepWith({ maxOutputRepairs: 0 })).commit();
+    const workflow = createWorkflow({ name: "steer-none" })
+      .then(agentStepWith({ maxOutputRepairs: 0 }))
+      .commit();
     const agent = scriptedAgent([['{"summary":"x"}']]);
     const { host, store } = createTestHost({ startAgent: agent.startAgent });
 

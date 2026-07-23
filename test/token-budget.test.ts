@@ -1,8 +1,8 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { createAgentStep, createWorkflow } from "../src/flow/index.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunEvent } from "../src/engine/types.ts";
+import { createAgentStep, createWorkflow } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 import { scriptedAgent } from "./scripted-agent.ts";
 
@@ -70,7 +70,7 @@ describe("token budget (Phase 7a, spec §9.3)", () => {
   it("ignores usage entirely when no maxTokens is set", async () => {
     const step = createAgentStep({ name: "unbudgeted", output: outputSchema, prompt: () => "go" });
     const workflow = createWorkflow({ name: "no-budget" }).then(step).commit();
-    const agent = scriptedAgent([[validReply(999999)]]);
+    const agent = scriptedAgent([[validReply(999_999)]]);
     const { host } = createTestHost({ startAgent: agent.startAgent });
 
     const result = await runWorkflow(workflow, undefined, host);

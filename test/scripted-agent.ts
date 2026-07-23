@@ -27,7 +27,7 @@ export interface ScriptedAgent {
  * then `b` (e.g. across a steering repair), and a second fresh session (after an outer retry) that
  * replies `c`.
  */
-export function scriptedAgent(sessionScripts: ReadonlyArray<ReadonlyArray<ScriptedTurn>>): ScriptedAgent {
+export function scriptedAgent(sessionScripts: readonly (readonly ScriptedTurn[])[]): ScriptedAgent {
   const messages: string[] = [];
   const models: (string | undefined)[] = [];
   const histories: (readonly unknown[] | undefined)[] = [];
