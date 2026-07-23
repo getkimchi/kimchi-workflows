@@ -231,8 +231,14 @@ Generation is **non-destructive and contained**: the target must resolve inside 
 project, and an existing file is never written over. Both are hard failures — the
 run crashes naming the offending path — rather than accommodations. Quietly writing
 to a different name would be worse than failing, since the run would report success
-while the file the user named still held something else. The clash is detected at
-validation, before anything is written.
+while the file the user named still held something else.
+
+Both are settled **immediately after the opening form**, before the interview runs,
+because both are knowable as soon as the filename is given. Deferring them to the
+write would spend an interview and a generation round first, and could not be
+recovered: the form is already a completed step, so a resume re-runs the write with
+the same name (§8.2). The guard is re-applied at the write against the filesystem
+as it is then.
 
 Validation loads the candidate **from its destination directory**, since imports
 resolve relative to the importing file (§1.4); validating elsewhere rejects every

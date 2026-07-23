@@ -4,9 +4,10 @@
  * It is an ordinary `WorkflowDefinition` — same authoring API, same engine, same event log — which
  * means it parks, resumes, retries, and is testable exactly like any workflow a user writes.
  *
- * Shape (four top-level nodes):
+ * Shape (five top-level nodes):
  *
  *   brief          input step   — what to build, and what to call the file
+ *   target         function     — settle the destination, failing fast on a bad or taken name
  *   design         Q&A agent    — interview → propose plan → approve, all by re-batching
  *   until-valid    loop         — generate the source, load it back, retry on failure
  *   write          function     — write the validated source into .pi/workflows/
@@ -107,20 +108,37 @@ const brief = createInputStep({
 });
 
 /**
- * Step 2 — the interview. The framework injects the asking protocol, so this prompt is task-only; it
+ * Step 2 — settle the destination before spending anything on it.
+ *
+ * `resolveTarget` rejects a name that escapes the project or is already taken, and both are knowable
+ * the moment the form is answered. Checking here costs milliseconds; checking at the write (where the
+ * guard also runs, against a filesystem that may have changed since) would burn the whole interview
+ * and a generation round first — and could not be recovered, since `brief` is already complete and a
+ * resume would re-run the write with the same name.
+ */
+const settleTarget = createStep({
+  name: "target",
+  description: "Settle where the workflow will be written",
+  output: Type.Object({ path: Type.String() }),
+  run: ({ ctx }) => ({ path: resolveTarget(ctx) }),
+});
+
+/**
+ * Step 3 — the interview. The framework injects the asking protocol, so this prompt is task-only; it
  * describes *when* to ask, *what* to propose, and the bar for emitting a result.
  */
 const design = createAgentStep({
   name: "design",
   description: "Interview the user, propose a plan, and get approval",
-  input: briefSchema,
+  // No input schema (spec §3.6): the preceding node is `target`, so the brief is read from run
+  // context rather than the linear hand-off.
   output: specSchema,
   asks: true,
-  prompt: ({ input }) =>
+  prompt: ({ ctx }) =>
     [
       "You are designing a PI workflow on the user's behalf.",
       "",
-      `Their goal: ${input.goal}`,
+      `Their goal: ${ctx.getStepResult<Static<typeof briefSchema>>("brief")?.goal ?? "(not stated)"}`,
       "",
       "Work in two phases, using questionnaires for both:",
       "1. CLARIFY — ask batched questions until you genuinely know what to build: the steps, their order,",
@@ -137,7 +155,7 @@ const design = createAgentStep({
 });
 
 /**
- * Step 3a — generate the file's TypeScript. On a retry the previous validation error is in run
+ * Step 4a — generate the file's TypeScript. On a retry the previous validation error is in run
  * context, so the agent sees precisely why its last attempt failed to load.
  */
 const generate = createAgentStep({
@@ -224,7 +242,7 @@ function assertAvailable(target: string, fileName: string): void {
 }
 
 /**
- * Step 3b — validate by actually loading it, in the directory the file will really live in.
+ * Step 4b — validate by actually loading it, in the directory the file will really live in.
  *
  * The probe MUST sit next to its final destination: module resolution is relative to the importing
  * file, so a generated `import { Type } from "typebox"` resolves only from inside the project. An
@@ -258,7 +276,7 @@ const check = createStep({
 
 const generateAndCheck = createWorkflow({ name: "generate-and-check" }).then(generate).then(check).commit();
 
-/** Step 4 — write the validated source to the destination {@link resolveTarget} picked. */
+/** Step 5 — write the validated source to the destination {@link resolveTarget} picked. */
 const write = createStep({
   name: "write",
   description: "Write the validated workflow into the project",
@@ -283,6 +301,7 @@ const createWorkflowWorkflow = createWorkflow({
   input: createInputSchema,
 })
   .then(brief)
+  .then(settleTarget)
   .then(design)
   .dountil(generateAndCheck, (ctx) => ctx.getStepResult<{ ok: boolean }>("check")?.ok === true, { name: "until-valid", maxIterations: 3 })
   .then(write)

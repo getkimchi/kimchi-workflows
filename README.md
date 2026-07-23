@@ -107,11 +107,12 @@ Only one run executes at a time; parked runs coexist and don't block new work. D
 `create` is itself a workflow (`src/host/builtin/create.workflow.ts`) — same authoring API, same engine, same event log — so it parks, resumes, and is tested like any other. It runs four nodes:
 
 1. **`brief`** — an input form: what should this do, and what should the file be called?
-2. **`design`** — a Q&A agent that asks clarifying questions in batches, then presents the plan for **Approve / Revise**, revising until you approve. The whole interview lives in this one step, because a parked step can only be answered while it is top-level — an approval loop built from `.dountil` could never be resumed.
-3. **`until-valid`** — generate the TypeScript, then load it back with the real loader; on failure the agent sees the loader's error and retries (up to 3 times). A workflow that never loads crashes the run rather than writing a broken file.
-4. **`write`** — save it. A bare name lands in `.pi/workflows/`, so the new workflow is immediately visible to `/workflow list` and runnable by name.
+2. **`target`** — settle the destination straight away, so a bad or taken name fails in milliseconds rather than after the interview.
+3. **`design`** — a Q&A agent that asks clarifying questions in batches, then presents the plan for **Approve / Revise**, revising until you approve. The whole interview lives in this one step, because a parked step can only be answered while it is top-level — an approval loop built from `.dountil` could never be resumed.
+4. **`until-valid`** — generate the TypeScript, then load it back with the real loader; on failure the agent sees the loader's error and retries (up to 3 times). A workflow that never loads crashes the run rather than writing a broken file.
+5. **`write`** — save it. A bare name lands in `.pi/workflows/`, so the new workflow is immediately visible to `/workflow list` and runnable by name.
 
-It never destroys existing work. A name that already exists fails the run and leaves the file untouched — pick a different name, or delete the old one first. A name resolving outside the project is rejected too.
+It never destroys existing work. A name that already exists fails the run and leaves the file untouched — pick a different name, or delete the old one first. A name resolving outside the project is rejected too. Both are checked at step 2, before a single model call.
 
 ---
 

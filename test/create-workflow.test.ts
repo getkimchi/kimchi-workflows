@@ -164,6 +164,32 @@ describe("/workflow create never destroys existing work (adversarial regression)
     generate: [reply({ source: validSource, verification: "ran tsc --noEmit: clean" })],
   };
 
+  it("rejects a taken name before the interview, so nothing is spent on it", async () => {
+    const root = await projectRoot();
+    await mkdir(workflowsDir(root), { recursive: true });
+    await writeFile(path.join(workflowsDir(root), "greeter.workflow.ts"), "// taken\n", "utf8");
+
+    // No agent scripts at all: if the interview were reached, the double would throw for the
+    // unscripted `design` step. Crashing cleanly proves the name is settled before any model runs.
+    const run = await createTestRun(createWorkflowWorkflow, { input: { projectRoot: root } });
+    const clash = await run.answer({ goal: "greet", fileName: "greeter.workflow.ts" });
+
+    expect(clash.status).toBe("crashed");
+    expect(clash.error).toMatch(/already exists/);
+    expect(clash.eventsOf("step-started").map((event) => event.stepName)).toEqual(["brief", "target"]);
+  });
+
+  it("rejects an escaping name before the interview too", async () => {
+    const root = await projectRoot();
+
+    const run = await createTestRun(createWorkflowWorkflow, { input: { projectRoot: root } });
+    const escaped = await run.answer({ goal: "greet", fileName: "../escaped.workflow.ts" });
+
+    expect(escaped.status).toBe("crashed");
+    expect(escaped.error).toMatch(/resolves outside the project/);
+    expect(escaped.eventsOf("step-started").map((event) => event.stepName)).toEqual(["brief", "target"]);
+  });
+
   it("fails rather than overwriting an existing file, and leaves it untouched", async () => {
     const root = await projectRoot();
     const taken = path.join(workflowsDir(root), "greeter.workflow.ts");
