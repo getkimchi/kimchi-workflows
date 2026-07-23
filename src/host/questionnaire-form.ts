@@ -12,22 +12,13 @@
  * (`@earendil-works/pi-tui` is only present inside the live harness). Visual correctness is verified
  * manually, by design.
  */
-import { ExtensionInputComponent, ExtensionSelectorComponent, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionCommandContext, ExtensionInputComponent, ExtensionSelectorComponent } from "@earendil-works/pi-coding-agent";
 import type { Question, Questionnaire } from "../flow/questionnaire.ts";
 
 /** The slice of the command context the rich form needs: the `ctx.ui.custom` overlay seam. */
 type FormContext = Pick<ExtensionCommandContext, "ui">;
-import {
-  assembleAnswers,
-  collectSingle,
-  collectText,
-  DONE_LABEL,
-  optionLabel,
-  orderedOptions,
-  type Picker,
-  questionTitle,
-  type RawSelection,
-} from "./answer-assembly.ts";
+
+import { assembleAnswers, collectSingle, collectText, DONE_LABEL, optionLabel, orderedOptions, type Picker, questionTitle, type RawSelection } from "./answer-assembly.ts";
 
 /** A {@link Picker} over `ctx.ui.custom` TUI overlays — the primitives single/text collection is shared on. */
 function tuiPicker(ctx: FormContext): Picker {
@@ -71,7 +62,7 @@ async function renderMulti(ctx: FormContext, question: Question): Promise<RawSel
   const selected = new Set<string>();
   const title = questionTitle(question);
   for (;;) {
-    const labels = options.map((option) => `${selected.has(option.value) ? "[x]" : "[ ]"} ${optionLabel(option)}`);
+    const labels = options.map((candidate) => `${selected.has(candidate.value) ? "[x]" : "[ ]"} ${optionLabel(candidate)}`);
     labels.push(DONE_LABEL);
     const picked = await selector(ctx, title, labels);
     if (picked === undefined) return undefined; // cancelled
@@ -85,26 +76,28 @@ async function renderMulti(ctx: FormContext, question: Question): Promise<RawSel
 
 /** One selector overlay: resolves to the chosen label, or `undefined` on cancel. */
 function selector(ctx: FormContext, title: string, labels: string[]): Promise<string | undefined> {
-  return ctx.ui.custom<string | undefined>((tui, _theme, _keybindings, done) =>
-    new ExtensionSelectorComponent(
-      title,
-      labels,
-      (option) => done(option),
-      () => done(undefined),
-      { tui },
-    ),
+  return ctx.ui.custom<string | undefined>(
+    (tui, _theme, _keybindings, done) =>
+      new ExtensionSelectorComponent(
+        title,
+        labels,
+        (option) => done(option),
+        () => done(undefined),
+        { tui },
+      ),
   );
 }
 
 /** One text-input overlay: resolves to the entered string, or `undefined` on cancel. */
 function textInput(ctx: FormContext, title: string, placeholder?: string): Promise<string | undefined> {
-  return ctx.ui.custom<string | undefined>((tui, _theme, _keybindings, done) =>
-    new ExtensionInputComponent(
-      title,
-      placeholder,
-      (value) => done(value),
-      () => done(undefined),
-      { tui },
-    ),
+  return ctx.ui.custom<string | undefined>(
+    (tui, _theme, _keybindings, done) =>
+      new ExtensionInputComponent(
+        title,
+        placeholder,
+        (value) => done(value),
+        () => done(undefined),
+        { tui },
+      ),
   );
 }

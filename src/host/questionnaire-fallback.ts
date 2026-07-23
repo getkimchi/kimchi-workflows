@@ -11,16 +11,7 @@
  */
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { Question, Questionnaire } from "../flow/questionnaire.ts";
-import {
-  assembleAnswers,
-  collectSingle,
-  collectText,
-  optionLabel,
-  orderedOptions,
-  type Picker,
-  questionTitle,
-  type RawSelection,
-} from "./answer-assembly.ts";
+import { assembleAnswers, collectSingle, collectText, optionLabel, orderedOptions, type Picker, questionTitle, type RawSelection } from "./answer-assembly.ts";
 
 /** The subset of `ctx.ui` the fallback needs — narrowed so tests can supply a scripted stand-in. */
 export type DialogUI = Pick<ExtensionUIContext, "select" | "confirm" | "input">;

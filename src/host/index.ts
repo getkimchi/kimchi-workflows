@@ -1,26 +1,40 @@
-export { createFsRunStore } from "./fs-run-store.ts";
-export { createMemoryRunStore } from "./memory-run-store.ts";
-export { createHostPort } from "./host-port.ts";
-export type { HostPortOptions } from "./host-port.ts";
-export { loadWorkflowFile } from "./load-workflow.ts";
-export { createPiAgentBridge } from "./pi-agent.ts";
-export type { AgentStarter } from "./pi-agent.ts";
+export type { RawSelection } from "./answer-assembly.ts";
 export {
   assembleAnswers,
+  OTHER_VALUE,
   optionLabel,
   orderedOptions,
-  OTHER_VALUE,
   questionTitle,
   useRichForm,
 } from "./answer-assembly.ts";
-export type { RawSelection } from "./answer-assembly.ts";
-export { collectViaDialogs } from "./questionnaire-fallback.ts";
+export { default as createWorkflowWorkflow } from "./builtin/create.workflow.ts";
+export type { CommandCtx, Notify, NotifyCtx, StartAgent } from "./commands/index.ts";
+export {
+  handleCancel,
+  handleCreate,
+  handleDelete,
+  handleListRuns,
+  handleListWorkflows,
+  handleResume,
+  handleRun,
+  runGuarded,
+} from "./commands/index.ts";
+export { default as piWorkflowsExtension } from "./extension.ts";
+export { createFsRunStore } from "./fs-run-store.ts";
+export type { HostPortOptions } from "./host-port.ts";
+export { createHostPort } from "./host-port.ts";
+export { loadWorkflowFile } from "./load-workflow.ts";
+export { createMemoryRunStore } from "./memory-run-store.ts";
+export type { AgentStarter } from "./pi-agent.ts";
+export { createPiAgentBridge } from "./pi-agent.ts";
 export type { DialogUI } from "./questionnaire-fallback.ts";
+export { collectViaDialogs } from "./questionnaire-fallback.ts";
 export { collectAnswers } from "./questionnaire-render.ts";
-export { resumeAction } from "./resume-router.ts";
 export type { ResumeAction, RunStatus } from "./resume-router.ts";
-export { createRunGuard } from "./run-guard.ts";
+export { resumeAction } from "./resume-router.ts";
 export type { ActiveRun, RunGuard } from "./run-guard.ts";
+export { createRunGuard } from "./run-guard.ts";
 export { summarizeRun } from "./summarize-run.ts";
 export type { RunMeta, RunStore, RunSummary } from "./types.ts";
-export { default as piWorkflowsExtension } from "./extension.ts";
+export type { BrokenWorkflow, WorkflowCatalog, WorkflowEntry, WorkflowResolution } from "./workflow-catalog.ts";
+export { discoverWorkflows, resolveWorkflow, WORKFLOW_SUFFIX, workflowsDir } from "./workflow-catalog.ts";

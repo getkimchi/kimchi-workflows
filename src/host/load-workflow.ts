@@ -2,12 +2,7 @@ import { createJiti } from "jiti";
 import type { WorkflowDefinition } from "../flow/types.ts";
 
 function isWorkflowDefinition(value: unknown): value is WorkflowDefinition {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as { name?: unknown }).name === "string" &&
-    Array.isArray((value as { nodes?: unknown }).nodes)
-  );
+  return typeof value === "object" && value !== null && typeof (value as { name?: unknown }).name === "string" && Array.isArray((value as { nodes?: unknown }).nodes);
 }
 
 /**
@@ -23,9 +18,7 @@ export async function loadWorkflowFile(absolutePath: string): Promise<WorkflowDe
 
   const candidate = moduleExports.default ?? moduleExports.workflow;
   if (!isWorkflowDefinition(candidate)) {
-    throw new Error(
-      `"${absolutePath}" does not export a workflow (expected a default export or a "workflow" named export from createWorkflow(...).commit())`,
-    );
+    throw new Error(`"${absolutePath}" does not export a workflow (expected a default export or a "workflow" named export from createWorkflow(...).commit())`);
   }
   return candidate;
 }

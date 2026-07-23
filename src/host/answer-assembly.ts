@@ -10,7 +10,7 @@
  * fully erased at runtime, so this module stays offline-testable.
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Question, QuestionOption, Questionnaire } from "../flow/questionnaire.ts";
+import type { Question, Questionnaire, QuestionOption } from "../flow/questionnaire.ts";
 
 /** PI run mode (`"tui" | "rpc" | "json" | "print"`), derived from the exported context type. */
 export type ExtensionMode = ExtensionContext["mode"];
