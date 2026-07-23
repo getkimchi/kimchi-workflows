@@ -1,9 +1,9 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { createStep, createWorkflow } from "../src/flow/index.ts";
-import type { WorkflowDefinition } from "../src/flow/types.ts";
 import { resumeWorkflow } from "../src/engine/resume-workflow.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
+import { createStep, createWorkflow } from "../src/flow/index.ts";
+import type { WorkflowDefinition } from "../src/flow/types.ts";
 import { createTestHost } from "./helpers.ts";
 
 const aSchema = Type.Object({ a: Type.Number() });

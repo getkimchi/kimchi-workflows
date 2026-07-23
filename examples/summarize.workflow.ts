@@ -27,12 +27,7 @@ const summarize = createAgentStep({
   output: summarySchema,
   model: "kimchi-dev/kimi-k2.7",
   prompt: ({ input }) =>
-    [
-      "Summarize the text below.",
-      'Reply with ONLY a JSON object of the form {"summary": string, "keywords": string[]} and nothing else.',
-      "",
-      input.text,
-    ].join("\n"),
+    ["Summarize the text below.", 'Reply with ONLY a JSON object of the form {"summary": string, "keywords": string[]} and nothing else.', "", input.text].join("\n"),
 });
 
 const summarizeWorkflow = createWorkflow({

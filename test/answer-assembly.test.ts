@@ -1,16 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Question, Questionnaire } from "../src/flow/index.ts";
-import {
-  assembleAnswers,
-  collectSingle,
-  collectText,
-  OTHER_VALUE,
-  optionLabel,
-  orderedOptions,
-  type Picker,
-  questionTitle,
-  useRichForm,
-} from "../src/host/answer-assembly.ts";
+import { assembleAnswers, collectSingle, collectText, OTHER_VALUE, optionLabel, orderedOptions, type Picker, questionTitle, useRichForm } from "../src/host/answer-assembly.ts";
 import { collectViaDialogs, type DialogUI } from "../src/host/questionnaire-fallback.ts";
 
 // -- §1 pure answer assembly ------------------------------------------------------------------------

@@ -20,9 +20,6 @@ const greet = createStep({
   run: ({ input }) => ({ message: `Hello ${input.name}, deploying to ${input.environment}.` }),
 });
 
-const surveyWorkflow = createWorkflow({ name: "survey", description: "Gather params via an input form, then greet (B2)" })
-  .then(ask)
-  .then(greet)
-  .commit();
+const surveyWorkflow = createWorkflow({ name: "survey", description: "Gather params via an input form, then greet (B2)" }).then(ask).then(greet).commit();
 
 export default surveyWorkflow;

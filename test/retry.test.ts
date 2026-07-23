@@ -1,8 +1,8 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunEvent } from "../src/engine/types.ts";
+import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 
 type StepRetryEvent = Extract<RunEvent, { type: "step-retry" }>;
@@ -75,9 +75,7 @@ describe("retry policy (spec §9)", () => {
 
     const outResult = await runWorkflow(outputWorkflow, undefined, outHost);
     expect(outResult.status).toBe("completed");
-    const outRetries = (await outStore.loadEvents(outResult.runId)).filter(
-      (event): event is StepRetryEvent => event.type === "step-retry",
-    );
+    const outRetries = (await outStore.loadEvents(outResult.runId)).filter((event): event is StepRetryEvent => event.type === "step-retry");
     expect(outRetries).toHaveLength(1);
     expect(outRetries[0]).toMatchObject({ reason: "invalid-output", attempt: 1 });
 
