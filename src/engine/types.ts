@@ -51,7 +51,9 @@ export type RunEvent =
   | { type: "run-cancelled"; runId: string; stepName?: string; time: string }
   // A Q&A suspension (spec §8.4/§10): a step asked a `questionnaire` BATCH → the run is `parked`.
   // `conversation` is the opaque agent history needed to resume the SAME loop (empty for form input).
-  | { type: "questionnaire-asked"; runId: string; stepName: string; questionnaire: Questionnaire; conversation: readonly ConversationMessage[]; time: string }
+  // `violation` is set only on a RE-park of a form input step: why the delivered answers were rejected
+  // (absent on a first ask, and on an agent's ask — which is an intentional question, not a rejection).
+  | { type: "questionnaire-asked"; runId: string; stepName: string; questionnaire: Questionnaire; conversation: readonly ConversationMessage[]; violation?: string; time: string }
   // The user's structured answers (question `key` → value); resume delivers them back (spec §8.4).
   | { type: "answers-provided"; runId: string; stepName: string; answers: Record<string, unknown>; time: string };
 
@@ -66,6 +68,8 @@ export type ConversationMessage = unknown;
 export interface AgentRequest {
   readonly model?: string;
   readonly history?: readonly ConversationMessage[];
+  /** The step this session belongs to. Lets a host attribute cost/telemetry — and lets a test double script replies per step. */
+  readonly stepName: string;
 }
 
 /** Token usage reported by a single agent turn (spec §9.3). */
@@ -133,4 +137,6 @@ export interface RunResult {
   /** Present when `parked`: the questionnaire batch the step asked, and the step that asked it. */
   readonly questionnaire?: Questionnaire;
   readonly stepName?: string;
+  /** Present when a form input step RE-parked: why the delivered answers were rejected (spec §2.4). */
+  readonly violation?: string;
 }

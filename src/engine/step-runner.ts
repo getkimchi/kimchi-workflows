@@ -149,7 +149,7 @@ async function runAgentSession(step: AgentStep, input: unknown, host: HostPort, 
   const maxRepairs = Math.max(0, step.maxOutputRepairs ?? DEFAULT_MAX_OUTPUT_REPAIRS);
   const steerSchema = step.asks ? buildQaSchema(step.outputSchema) : step.outputSchema;
   const history = entry.kind === "answer" ? entry.conversation : undefined;
-  const session = host.startAgent({ model, history });
+  const session = host.startAgent({ model, history, stepName: step.name });
 
   try {
     let message = entry.kind === "answer" ? formatAnswers(entry.answers) : freshPrompt(step, input, ctx);
