@@ -19,13 +19,13 @@ export function summarizeRun(events: readonly RunEvent[]): RunSummary | undefine
   for (const event of events) {
     if (event.type === "run-completed") {
       status = "completed";
-      completedAt = event.at;
+      completedAt = event.time;
     } else if (event.type === "run-crashed") {
       status = "crashed";
-      completedAt = event.at;
+      completedAt = event.time;
     } else if (event.type === "run-cancelled") {
       status = "cancelled";
-      completedAt = event.at;
+      completedAt = event.time;
     } else if (event.type === "questionnaire-asked") {
       status = "parked"; // suspended awaiting answers (spec §10); non-terminal, resumable
       completedAt = undefined;
@@ -38,7 +38,7 @@ export function summarizeRun(events: readonly RunEvent[]): RunSummary | undefine
   return {
     runId: started.runId,
     workflowName: started.workflowName,
-    startedAt: started.at,
+    startedAt: started.time,
     completedAt,
     status,
   };

@@ -19,12 +19,7 @@ import type { HostPort, RunEvent, RunOptions, RunResult } from "./types.ts";
 type RunStartedEvent = Extract<RunEvent, { type: "run-started" }>;
 type QuestionnaireAskedEvent = Extract<RunEvent, { type: "questionnaire-asked" }>;
 
-export async function resumeWorkflow(
-  workflow: WorkflowDefinition,
-  priorEvents: readonly RunEvent[],
-  host: HostPort,
-  options: RunOptions = {},
-): Promise<RunResult> {
+export async function resumeWorkflow(workflow: WorkflowDefinition, priorEvents: readonly RunEvent[], host: HostPort, options: RunOptions = {}): Promise<RunResult> {
   const started = requireRunStarted(priorEvents);
   const { runId, input: initialInput } = started;
 
@@ -37,7 +32,7 @@ export async function resumeWorkflow(
   const { stepOutputs, previousOutput } = seedPrefix(workflow, completedByName, startIndex, initialInput);
 
   const startNode = workflow.nodes[startIndex];
-  await host.emit({ type: "run-resumed", runId, fromStepName: startNode ? nodeName(startNode) : undefined, at: iso(host) });
+  await host.emit({ type: "run-resumed", runId, fromStepName: startNode ? nodeName(startNode) : undefined, time: iso(host) });
 
   // Per-item resume (spec §3.4): a top-level foreach resumes at the first unprocessed item.
   const foreachResume = startNode?.kind === "foreach" ? buildForeachResume(startNode.name, priorEvents) : undefined;
@@ -66,10 +61,11 @@ export async function resumeWithAnswer(
     throw new Error("cannot answer: the run is not parked (no pending questionnaire in the log)");
   }
 
+
   const parkedIndex = topLevelStepIndex(workflow, pending.stepName);
   if (parkedIndex === -1) {
     const error = `cannot answer run ${runId}: parked step "${pending.stepName}" is not a top-level step (nested Q&A resume is out of scope)`;
-    await host.emit({ type: "run-crashed", runId, stepName: pending.stepName, error, at: iso(host) });
+    await host.emit({ type: "run-crashed", runId, stepName: pending.stepName, error, time: iso(host) });
     return { runId, status: "crashed", error, stepName: pending.stepName };
   }
 
@@ -80,7 +76,7 @@ export async function resumeWithAnswer(
   // Seed the prefix before the parked step; the parked step continues via the answer hint (not re-run).
   const { stepOutputs, previousOutput } = seedPrefix(workflow, completedByName, parkedIndex, initialInput);
 
-  await host.emit({ type: "answers-provided", runId, stepName: pending.stepName, answers, at: iso(host) });
+  await host.emit({ type: "answers-provided", runId, stepName: pending.stepName, answers, time: iso(host) });
 
   return execute(
     workflow,
@@ -121,7 +117,7 @@ async function checkDrift(workflow: WorkflowDefinition, completedByName: Readonl
   for (const name of completedByName.keys()) {
     if (!currentNames.has(name)) {
       const error = `cannot resume run ${runId}: previously-completed "${name}" no longer exists in workflow "${workflow.name}" (definition drift, spec §8.5)`;
-      await host.emit({ type: "run-crashed", runId, error, at: iso(host) });
+      await host.emit({ type: "run-crashed", runId, error, time: iso(host) });
       return { runId, status: "crashed", error };
     }
   }
@@ -166,14 +162,14 @@ function topLevelStepIndex(workflow: WorkflowDefinition, name: string): number {
   return workflow.nodes.findIndex((node) => node.kind === "step" && node.step.name === name);
 }
 
-function buildForeachResume(nodeName: string, priorEvents: readonly RunEvent[]): ForeachResume | undefined {
+function buildForeachResume(targetNodeName: string, priorEvents: readonly RunEvent[]): ForeachResume | undefined {
   const items = new Map<number, unknown>();
   for (const event of priorEvents) {
-    if (event.type === "foreach-item-completed" && event.nodeName === nodeName) {
+    if (event.type === "foreach-item-completed" && event.nodeName === targetNodeName) {
       items.set(event.index, event.output);
     }
   }
-  return items.size > 0 ? { nodeName, items } : undefined;
+  return items.size > 0 ? { nodeName: targetNodeName, items } : undefined;
 }
 
 function firstIncompleteIndex(nodes: readonly WorkflowNode[], completedByName: ReadonlyMap<string, unknown>): number {

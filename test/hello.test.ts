@@ -42,8 +42,8 @@ describe("hello workflow (Phase 1 tracer bullet)", () => {
   });
 
   it("uses an injected clock and run id, so the event log is fully deterministic", async () => {
-    const at = "2026-07-12T00:00:00.000Z";
-    const { host } = createTestHost({ generateRunId: () => "run-fixed-1", now: () => new Date(at) });
+    const time = "2026-07-12T00:00:00.000Z";
+    const { host } = createTestHost({ generateRunId: () => "run-fixed-1", now: () => new Date(time) });
     const events: RunEvent[] = [];
     const spyingHost: typeof host = {
       ...host,
@@ -57,10 +57,10 @@ describe("hello workflow (Phase 1 tracer bullet)", () => {
 
     expect(result.runId).toBe("run-fixed-1");
     expect(events).toEqual([
-      { type: "run-started", runId: "run-fixed-1", workflowName: "hello", input: undefined, at },
-      { type: "step-started", runId: "run-fixed-1", stepIndex: 0, stepName: "say-hello", input: undefined, at },
-      { type: "step-completed", runId: "run-fixed-1", stepIndex: 0, stepName: "say-hello", output: { message: "Hello, PI workflows!" }, at },
-      { type: "run-completed", runId: "run-fixed-1", output: { message: "Hello, PI workflows!" }, at },
+      { type: "run-started", runId: "run-fixed-1", workflowName: "hello", input: undefined, time },
+      { type: "step-started", runId: "run-fixed-1", stepIndex: 0, stepName: "say-hello", input: undefined, time },
+      { type: "step-completed", runId: "run-fixed-1", stepIndex: 0, stepName: "say-hello", output: { message: "Hello, PI workflows!" }, time },
+      { type: "run-completed", runId: "run-fixed-1", output: { message: "Hello, PI workflows!" }, time },
     ]);
   });
 });
