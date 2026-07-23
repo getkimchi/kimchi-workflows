@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
-import type { RunEvent } from "../src/engine/types.ts";
 import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 
@@ -20,17 +19,9 @@ describe("step context (spec §2.5): { input, ctx, abortSignal, logger }", () =>
     });
     const workflow = createWorkflow({ name: "introspection" }).then(step).commit();
 
-    const { host } = createTestHost();
-    const events: RunEvent[] = [];
-    const spyingHost: typeof host = {
-      ...host,
-      emit: async (event) => {
-        events.push(event);
-        await host.emit(event);
-      },
-    };
+    const { host, events } = createTestHost();
 
-    const result = await runWorkflow(workflow, undefined, spyingHost);
+    const result = await runWorkflow(workflow, undefined, host);
 
     expect(result.status).toBe("completed");
     expect(result.output).toMatchObject({

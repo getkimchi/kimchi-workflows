@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import helloWorkflow from "../examples/hello.workflow.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
-import type { RunEvent } from "../src/engine/types.ts";
 import { createTestHost } from "./helpers.ts";
 
 describe("hello workflow (Phase 1 tracer bullet)", () => {
@@ -25,35 +24,19 @@ describe("hello workflow (Phase 1 tracer bullet)", () => {
   });
 
   it("emits the expected lifecycle event sequence", async () => {
-    const { host } = createTestHost();
-    const events: string[] = [];
-    const spyingHost: typeof host = {
-      ...host,
-      emit: async (event) => {
-        events.push(event.type);
-        await host.emit(event);
-      },
-    };
+    const { host, events } = createTestHost();
 
-    const result = await runWorkflow(helloWorkflow, undefined, spyingHost);
+    const result = await runWorkflow(helloWorkflow, undefined, host);
 
     expect(result.status).toBe("completed");
-    expect(events).toEqual(["run-started", "step-started", "step-completed", "run-completed"]);
+    expect(events.map((event) => event.type)).toEqual(["run-started", "step-started", "step-completed", "run-completed"]);
   });
 
   it("uses an injected clock and run id, so the event log is fully deterministic", async () => {
     const time = "2026-07-12T00:00:00.000Z";
-    const { host } = createTestHost({ generateRunId: () => "run-fixed-1", now: () => new Date(time) });
-    const events: RunEvent[] = [];
-    const spyingHost: typeof host = {
-      ...host,
-      emit: async (event) => {
-        events.push(event);
-        await host.emit(event);
-      },
-    };
+    const { host, events } = createTestHost({ generateRunId: () => "run-fixed-1", now: () => new Date(time) });
 
-    const result = await runWorkflow(helloWorkflow, undefined, spyingHost);
+    const result = await runWorkflow(helloWorkflow, undefined, host);
 
     expect(result.runId).toBe("run-fixed-1");
     expect(events).toEqual([

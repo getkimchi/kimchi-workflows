@@ -1,7 +1,6 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
-import type { RunEvent } from "../src/engine/types.ts";
 import { createStep, createWorkflow, nodeName } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 
@@ -51,9 +50,8 @@ describe(".map() construct (spec §3.7)", () => {
       .then(consumer)
       .commit();
 
-    const { host } = createTestHost();
-    const { events, spyingHost } = spy(host);
-    await runWorkflow(workflow, undefined, spyingHost);
+    const { host, events } = createTestHost();
+    await runWorkflow(workflow, undefined, host);
 
     expect(downstreamRan).toBe(false);
     // The map completes (it produced a value); the crash is at the downstream step's input boundary.
@@ -134,15 +132,3 @@ describe("commit() step validation (spec §2)", () => {
     expect(() => createWorkflow({ name: "good" }).then(fn).commit()).not.toThrow();
   });
 });
-
-function spy(host: ReturnType<typeof createTestHost>["host"]): { events: RunEvent[]; spyingHost: typeof host } {
-  const events: RunEvent[] = [];
-  const spyingHost: typeof host = {
-    ...host,
-    emit: async (event) => {
-      events.push(event);
-      await host.emit(event);
-    },
-  };
-  return { events, spyingHost };
-}

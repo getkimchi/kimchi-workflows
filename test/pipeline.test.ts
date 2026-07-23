@@ -1,20 +1,7 @@
 import { describe, expect, it } from "vitest";
 import pipelineWorkflow from "../examples/pipeline.workflow.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
-import type { RunEvent } from "../src/engine/types.ts";
 import { createTestHost } from "./helpers.ts";
-
-function recordEvents(host: ReturnType<typeof createTestHost>["host"]): { events: RunEvent[]; spyingHost: typeof host } {
-  const events: RunEvent[] = [];
-  const spyingHost: typeof host = {
-    ...host,
-    emit: async (event) => {
-      events.push(event);
-      await host.emit(event);
-    },
-  };
-  return { events, spyingHost };
-}
 
 describe("pipeline workflow (Phase 2: linear hand-off + .map non-adjacent data flow)", () => {
   it("runs the 3-step pipeline to completed with the combined final output", async () => {
@@ -28,20 +15,18 @@ describe("pipeline workflow (Phase 2: linear hand-off + .map non-adjacent data f
   });
 
   it("feeds parse's output into count adjacently (linear hand-off)", async () => {
-    const { host } = createTestHost();
-    const { events, spyingHost } = recordEvents(host);
+    const { host, events } = createTestHost();
 
-    await runWorkflow(pipelineWorkflow, undefined, spyingHost);
+    await runWorkflow(pipelineWorkflow, undefined, host);
 
     const countStarted = events.find((event) => event.type === "step-started" && event.stepName === "count");
     expect(countStarted).toMatchObject({ type: "step-started", input: { words: ["hello", "workflow", "pipeline"] } });
   });
 
   it("builds summarize's input from a non-adjacent step via .map", async () => {
-    const { host } = createTestHost();
-    const { events, spyingHost } = recordEvents(host);
+    const { host, events } = createTestHost();
 
-    await runWorkflow(pipelineWorkflow, undefined, spyingHost);
+    await runWorkflow(pipelineWorkflow, undefined, host);
 
     // summarize's input is the map's output: parse's firstWord (non-adjacent) + count's count.
     const summarizeStarted = events.find((event) => event.type === "step-started" && event.stepName === "summarize");
@@ -49,10 +34,9 @@ describe("pipeline workflow (Phase 2: linear hand-off + .map non-adjacent data f
   });
 
   it("records the map's execution in the event log", async () => {
-    const { host } = createTestHost();
-    const { events, spyingHost } = recordEvents(host);
+    const { host, events } = createTestHost();
 
-    await runWorkflow(pipelineWorkflow, undefined, spyingHost);
+    await runWorkflow(pipelineWorkflow, undefined, host);
 
     const mapEvents = events.filter((event) => "stepName" in event && event.stepName === "combine").map((event) => event.type);
     expect(mapEvents).toEqual(["step-started", "step-completed"]);
@@ -62,10 +46,9 @@ describe("pipeline workflow (Phase 2: linear hand-off + .map non-adjacent data f
   });
 
   it("emits the full ordered step sequence including the map step", async () => {
-    const { host } = createTestHost();
-    const { events, spyingHost } = recordEvents(host);
+    const { host, events } = createTestHost();
 
-    await runWorkflow(pipelineWorkflow, undefined, spyingHost);
+    await runWorkflow(pipelineWorkflow, undefined, host);
 
     const stepStarts = events.filter((event) => event.type === "step-started").map((event) => event.stepName);
     expect(stepStarts).toEqual(["parse", "count", "combine", "summarize"]);

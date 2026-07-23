@@ -1,6 +1,6 @@
-import type { HostPort } from "../src/engine/types.ts";
+import type { HostPort, RunEvent } from "../src/engine/types.ts";
 import { createHostPort, type HostPortOptions } from "../src/host/host-port.ts";
-import { createMemoryRunStore } from "../src/host/memory-run-store.ts";
+import { createMemoryStore } from "../src/host/memory-store.ts";
 import type { RunStore } from "../src/host/types.ts";
 
 export interface TestHost {
@@ -8,6 +8,12 @@ export interface TestHost {
   store: RunStore;
   /** Every `host.sleep(ms)` requested by the engine, in order — lets tests assert retry backoff. */
   sleepCalls: number[];
+  /**
+   * The whole log in order, across every run this host drives — live, so it can be read mid-run as
+   * well as after. Saves each test wrapping `emit` to collect a second copy of what the store holds;
+   * `store.loadEvents(runId)` is the same events narrowed to one run.
+   */
+  events: readonly RunEvent[];
 }
 
 /**
@@ -19,7 +25,7 @@ export interface TestHost {
  * `now`/`generateRunId`/`sleep` to override.
  */
 export function createTestHost(options: HostPortOptions = {}): TestHost {
-  const store = createMemoryRunStore();
+  const store = createMemoryStore();
   const sleepCalls: number[] = [];
   const host = createHostPort(store, {
     sleep: async (ms: number) => {
@@ -27,5 +33,5 @@ export function createTestHost(options: HostPortOptions = {}): TestHost {
     },
     ...options,
   });
-  return { host, store, sleepCalls };
+  return { host, store, sleepCalls, events: store.events };
 }

@@ -9,7 +9,7 @@ import type { RunMeta, RunStore, RunSummary } from "./types.ts";
  * one file per run (`<run-id>.jsonl`) plus a `<run-id>.meta.json` sidecar, so runs are
  * independently keyed and listable/resumable across sessions and process restarts.
  */
-export function createFsRunStore(projectRoot: string): RunStore {
+export function createFsStore(projectRoot: string): RunStore {
   const dir = path.join(projectRoot, ".pi", "workflows");
 
   // Serialize all appends through a single tail promise so writes land in call order regardless

@@ -35,18 +35,10 @@ describe("TypeBox validation failure", () => {
     });
     const workflow = createWorkflow({ name: "broken" }).then(tooSmall).commit();
 
-    const { host } = createTestHost();
-    const events: string[] = [];
-    const spyingHost: typeof host = {
-      ...host,
-      emit: async (event) => {
-        events.push(event.type);
-        await host.emit(event);
-      },
-    };
+    const { host, events } = createTestHost();
 
-    await runWorkflow(workflow, undefined, spyingHost);
+    await runWorkflow(workflow, undefined, host);
 
-    expect(events).toEqual(["run-started", "step-started", "run-crashed"]);
+    expect(events.map((event) => event.type)).toEqual(["run-started", "step-started", "run-crashed"]);
   });
 });

@@ -8,7 +8,7 @@
  */
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { handleCancel, handleCreate, handleDelete, handleListRuns, handleListWorkflows, handleResume, handleRun } from "./commands/index.ts";
-import { createFsRunStore } from "./fs-run-store.ts";
+import { createFsStore } from "./fs-store.ts";
 import { createPiAgentBridge } from "./pi-agent.ts";
 import { createRunGuard } from "./run-guard.ts";
 
@@ -20,7 +20,7 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     description: "Create, run, list, resume, cancel, and delete PI workflows",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
-      const store = createFsRunStore(ctx.cwd);
+      const store = createFsStore(ctx.cwd);
       const startAgent = bindAgentStarter(ctx.modelRegistry);
 
       switch (sub) {

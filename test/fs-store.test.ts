@@ -6,7 +6,7 @@ import helloWorkflow from "../examples/hello.workflow.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunEvent } from "../src/engine/types.ts";
 import { createStep, createWorkflow } from "../src/flow/index.ts";
-import { createFsRunStore } from "../src/host/fs-run-store.ts";
+import { createFsStore } from "../src/host/fs-store.ts";
 import { createHostPort } from "../src/host/host-port.ts";
 
 describe("filesystem run store (spec §8.7)", () => {
@@ -21,7 +21,7 @@ describe("filesystem run store (spec §8.7)", () => {
   });
 
   it("persists an append-only JSONL event log under .pi/workflows/<run-id>.jsonl", async () => {
-    const store = createFsRunStore(projectRoot);
+    const store = createFsStore(projectRoot);
     const host = createHostPort(store);
 
     const result = await runWorkflow(helloWorkflow, undefined, host);
@@ -38,12 +38,12 @@ describe("filesystem run store (spec §8.7)", () => {
   });
 
   it("list() reconstructs run summaries from disk, independent of the writing process", async () => {
-    const writerStore = createFsRunStore(projectRoot);
+    const writerStore = createFsStore(projectRoot);
     const writerHost = createHostPort(writerStore);
     const result = await runWorkflow(helloWorkflow, undefined, writerHost);
 
     // A fresh store instance over the same directory — simulates a new process reading the log.
-    const readerStore = createFsRunStore(projectRoot);
+    const readerStore = createFsStore(projectRoot);
     const runs = await readerStore.list();
 
     expect(runs).toHaveLength(1);
@@ -51,7 +51,7 @@ describe("filesystem run store (spec §8.7)", () => {
   });
 
   it("list() returns an empty array when no runs have been recorded", async () => {
-    const store = createFsRunStore(projectRoot);
+    const store = createFsStore(projectRoot);
     expect(await store.list()).toEqual([]);
   });
 
@@ -68,7 +68,7 @@ describe("filesystem run store (spec §8.7)", () => {
     });
     const workflow = createWorkflow({ name: "logging" }).then(logging).commit();
 
-    const store = createFsRunStore(projectRoot);
+    const store = createFsStore(projectRoot);
     const result = await runWorkflow(workflow, undefined, createHostPort(store));
     expect(result.status).toBe("completed");
 
@@ -82,7 +82,7 @@ describe("filesystem run store (spec §8.7)", () => {
     // followed by a single awaited one. Without the queue, concurrent `appendFile` calls to the
     // same file interleave and land out of order (verified); the queue guarantees FIFO, and
     // awaiting the final append flushes all prior writes.
-    const store = createFsRunStore(projectRoot);
+    const store = createFsStore(projectRoot);
     const runId = "concurrent-run";
     const count = 30;
 

@@ -17,7 +17,7 @@ import type { HostPort, RunEvent, RunResult } from "../engine/types.ts";
 import type { Questionnaire } from "../flow/questionnaire.ts";
 import type { WorkflowDefinition } from "../flow/types.ts";
 import { createHostPort } from "../host/host-port.ts";
-import { createMemoryRunStore } from "../host/memory-run-store.ts";
+import { createMemoryStore } from "../host/memory-store.ts";
 import type { RunStore } from "../host/types.ts";
 import { type AgentDouble, type AgentRecord, type AgentScripts, createAgentDouble } from "./agent-double.ts";
 
@@ -113,7 +113,7 @@ export async function createTestRun(workflow: WorkflowDefinition, options: TestR
     });
 
   const double = createAgentDouble(workflow.nodes, options.agents ?? {});
-  const store = createMemoryRunStore();
+  const store = createMemoryStore();
   const base = createHostPort(store, { generateRunId: () => runId, now, sleep, startAgent: double.startAgent });
   const canceller = createCanceller(options.cancelAt);
 

@@ -16,8 +16,8 @@ export interface HostPortOptions {
 
 /**
  * Build the engine's `HostPort` on top of any `RunStore`. Real usage backs it with the
- * filesystem store (src/host/fs-run-store.ts) plus a real `startAgent`; tests back it with the
- * in-memory store (src/host/memory-run-store.ts) and a scripted `startAgent`.
+ * filesystem store (src/host/fs-store.ts) plus a real `startAgent`; tests back it with the
+ * in-memory store (src/host/memory-store.ts) and a scripted `startAgent`.
  */
 export function createHostPort(store: RunStore, options: HostPortOptions = {}): HostPort {
   return {

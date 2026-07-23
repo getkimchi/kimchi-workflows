@@ -20,11 +20,12 @@ export {
   runGuarded,
 } from "./commands/index.ts";
 export { default as piWorkflowsExtension } from "./extension.ts";
-export { createFsRunStore } from "./fs-run-store.ts";
+export { createFsStore } from "./fs-store.ts";
 export type { HostPortOptions } from "./host-port.ts";
 export { createHostPort } from "./host-port.ts";
 export { loadWorkflowFile } from "./load-workflow.ts";
-export { createMemoryRunStore } from "./memory-run-store.ts";
+export type { MemoryStore } from "./memory-store.ts";
+export { createMemoryStore } from "./memory-store.ts";
 export type { AgentStarter } from "./pi-agent.ts";
 export { createPiAgentBridge } from "./pi-agent.ts";
 export type { DialogUI } from "./questionnaire-fallback.ts";

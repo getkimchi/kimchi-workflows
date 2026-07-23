@@ -3,7 +3,7 @@
  *
  * Authored workflows live in `<projectRoot>/.pi/workflows/` as `*.workflow.ts`, following the PI
  * convention for project resources (`.pi/extensions/`, `.pi/skills/`, `.pi/prompts/`). The run store
- * writes into the same directory as `<run-id>.jsonl` / `<run-id>.meta.json` (see fs-run-store.ts), so
+ * writes into the same directory as `<run-id>.jsonl` / `<run-id>.meta.json` (see fs-store.ts), so
  * discovery filters on the `.workflow.ts` suffix and the two never collide.
  *
  * Discovery *imports* every candidate to read its declared name, which executes project code — the
