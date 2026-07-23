@@ -48,5 +48,11 @@ export function buildToggleWorkflow(): ToggleWorkflow {
   });
 
   const workflow = createWorkflow({ name: "toggle" }).then(s1).then(s2).then(s3).commit();
-  return { workflow, calls, fixStep2: () => (failStep2 = false) };
+  return {
+    workflow,
+    calls,
+    fixStep2: () => {
+      failStep2 = false;
+    },
+  };
 }

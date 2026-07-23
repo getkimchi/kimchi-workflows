@@ -1,14 +1,6 @@
 import type { TSchema } from "typebox";
 import { createMapStep } from "./create-map-step.ts";
-import type {
-  BranchCondition,
-  ForeachSelector,
-  LoopCondition,
-  MapFn,
-  StepDefinition,
-  WorkflowDefinition,
-  WorkflowNode,
-} from "./types.ts";
+import type { BranchCondition, ForeachSelector, LoopCondition, MapFn, StepDefinition, WorkflowDefinition, WorkflowNode } from "./types.ts";
 import { forEachNode, nodeName } from "./types.ts";
 
 /** Default loop guard: a loop that neither satisfies its condition nor errors within this many iterations crashes. */
@@ -96,9 +88,7 @@ export interface WorkflowBuilder {
   commit(): WorkflowDefinition;
 }
 
-export function createWorkflow<TInputSchema extends TSchema | undefined = undefined>(
-  options: CreateWorkflowOptions<TInputSchema>,
-): WorkflowBuilder {
+export function createWorkflow<TInputSchema extends TSchema | undefined = undefined>(options: CreateWorkflowOptions<TInputSchema>): WorkflowBuilder {
   const nodes: WorkflowNode[] = [];
   let mapCount = 0;
   let branchCount = 0;
@@ -106,6 +96,9 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
   let foreachCount = 0;
 
   const builder: WorkflowBuilder = {
+    // `.then()` is the builder's sequencing verb (spec §3.1, Mastra-inspired §1.2), not a thenable:
+    // the builder is never awaited, and `.commit()` terminates it into a plain definition object.
+    // biome-ignore lint/suspicious/noThenProperty: intentional builder API, never awaited
     then(step) {
       nodes.push({ kind: "step", step });
       return builder;
@@ -145,6 +138,7 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
       if (nodes.length === 0) {
         throw new Error(`workflow "${options.name}" must declare at least one node before commit()`);
       }
+      assertWellFormed(options.name, nodes);
       assertUniqueNames(options.name, nodes);
       return {
         name: options.name,
@@ -176,6 +170,37 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
  * be unique across the whole workflow tree (including branch-arm and loop bodies). Global
  * uniqueness lets node-atomic resume identify a completed node from the log unambiguously.
  */
+/** The three things `.then()` accepts — anything else is not a step (spec §2). */
+const STEP_KINDS = new Set(["function", "agent", "input"]);
+
+/**
+ * Reject nodes that are not real steps, so `commit()` fails at authoring time rather than at run
+ * time. `.then()` takes a `StepDefinition` from `createStep`/`createAgentStep`/`createInputStep`;
+ * passing anything else — a bare function, a plain object, the result of a hallucinated builder API —
+ * used to commit successfully and only fail once the engine tried to execute it.
+ */
+function assertWellFormed(workflowName: string, nodes: readonly WorkflowNode[]): void {
+  forEachNode(nodes, (node) => {
+    if (node.kind !== "step") return;
+    const step: unknown = node.step;
+    const kind = (step as { kind?: unknown } | null)?.kind;
+    if (typeof step !== "object" || step === null || typeof kind !== "string" || !STEP_KINDS.has(kind)) {
+      throw new Error(`workflow "${workflowName}": .then() expects a step from createStep/createAgentStep/createInputStep, but received ${describeValue(step)}`);
+    }
+    if (typeof (step as { name?: unknown }).name !== "string" || (step as { name: string }).name.length === 0) {
+      throw new Error(`workflow "${workflowName}": a ${kind} step is missing its required "name"`);
+    }
+  });
+}
+
+function describeValue(value: unknown): string {
+  if (typeof value === "function") return `a function${value.name ? ` (${value.name})` : ""}`;
+  if (value === null) return "null";
+  if (typeof value !== "object") return typeof value;
+  const kind = (value as { kind?: unknown }).kind;
+  return kind === undefined ? "an object with no `kind`" : `an object with kind "${String(kind)}"`;
+}
+
 function assertUniqueNames(workflowName: string, nodes: readonly WorkflowNode[]): void {
   const seen = new Set<string>();
   forEachNode(nodes, (node) => {
