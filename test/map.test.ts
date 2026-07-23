@@ -1,8 +1,8 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { createStep, createWorkflow, nodeName } from "../src/flow/index.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunEvent } from "../src/engine/types.ts";
+import { createStep, createWorkflow, nodeName } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 
 describe(".map() construct (spec §3.7)", () => {
@@ -58,14 +58,7 @@ describe(".map() construct (spec §3.7)", () => {
     expect(downstreamRan).toBe(false);
     // The map completes (it produced a value); the crash is at the downstream step's input boundary.
     const types = events.map((event) => ("stepName" in event ? `${event.type}:${event.stepName}` : event.type));
-    expect(types).toEqual([
-      "run-started",
-      "step-started:source",
-      "step-completed:source",
-      "step-started:map-1",
-      "step-completed:map-1",
-      "run-crashed:consumer",
-    ]);
+    expect(types).toEqual(["run-started", "step-started:source", "step-completed:source", "step-started:map-1", "step-completed:map-1", "run-crashed:consumer"]);
   });
 
   it("auto-names anonymous maps map-1, map-2, ... in order", async () => {
@@ -83,6 +76,62 @@ describe(".map() construct (spec §3.7)", () => {
     const a = createStep({ name: "dup", run: () => 1 });
     const b = createStep({ name: "dup", run: () => 2 });
     expect(() => createWorkflow({ name: "collision" }).then(a).then(b).commit()).toThrow(/duplicate node\/step name "dup"/);
+  });
+});
+
+/**
+ * `.then()` takes a `StepDefinition`. Anything else used to commit successfully and only fail once
+ * the engine tried to execute it — which is how a generated workflow using a hallucinated builder
+ * API ("`.then(w => w.addStep(...))`") could import cleanly and still be nonsense.
+ */
+describe("commit() step validation (spec §2)", () => {
+  it("rejects a bare function passed to .then()", () => {
+    const notAStep = function addStep() {
+      return 1;
+    };
+    expect(() =>
+      createWorkflow({ name: "bad" })
+        .then(notAStep as never)
+        .commit(),
+    ).toThrow(/expects a step from createStep\/createAgentStep\/createInputStep, but received a function \(addStep\)/);
+  });
+
+  it("rejects a plain object that is not a step", () => {
+    expect(() =>
+      createWorkflow({ name: "bad" })
+        .then({ name: "x" } as never)
+        .commit(),
+    ).toThrow(/an object with no `kind`/);
+  });
+
+  it("rejects an object with an unknown kind", () => {
+    expect(() =>
+      createWorkflow({ name: "bad" })
+        .then({ kind: "sqlQuery", name: "x" } as never)
+        .commit(),
+    ).toThrow(/an object with kind "sqlQuery"/);
+  });
+
+  it("rejects a step missing its name", () => {
+    expect(() =>
+      createWorkflow({ name: "bad" })
+        .then({ kind: "function", run: () => 1 } as never)
+        .commit(),
+    ).toThrow(/missing its required "name"/);
+  });
+
+  it("validates steps nested inside loops and branches too", () => {
+    const body = { name: "body", nodes: [{ kind: "step", step: () => 1 }] } as never;
+    expect(() =>
+      createWorkflow({ name: "bad" })
+        .dountil(body, () => true)
+        .commit(),
+    ).toThrow(/expects a step from createStep/);
+  });
+
+  it("still accepts every real step kind", () => {
+    const fn = createStep({ name: "fn", run: () => 1 });
+    expect(() => createWorkflow({ name: "good" }).then(fn).commit()).not.toThrow();
   });
 });
 

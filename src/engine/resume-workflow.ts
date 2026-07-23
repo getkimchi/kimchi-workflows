@@ -61,6 +61,14 @@ export async function resumeWithAnswer(
     throw new Error("cannot answer: the run is not parked (no pending questionnaire in the log)");
   }
 
+  // The park must still be the run's latest word. A questionnaire in the log is not proof the run is
+  // *currently* parked: it may have been cancelled, or reached a terminal state, after asking — and a
+  // caller holding a questionnaire captured before that (an open prompt, another session) would
+  // otherwise resume a run the user already stopped, silently overwriting the cancellation.
+  const settled = settledAfter(priorEvents, pending);
+  if (settled) {
+    throw new Error(`cannot answer run ${runId}: it was ${settled} after parking; answering would undo that`);
+  }
 
   const parkedIndex = topLevelStepIndex(workflow, pending.stepName);
   if (parkedIndex === -1) {
@@ -147,6 +155,20 @@ function seedPrefix(
     if (previous) previousOutput = completedByName.get(nodeName(previous));
   }
   return { stepOutputs, previousOutput };
+}
+
+/**
+ * Whether the run reached a terminal state *after* it parked — i.e. the pending questionnaire is
+ * stale. Returns the status that settled it, or `undefined` while the park still stands.
+ */
+function settledAfter(priorEvents: readonly RunEvent[], pending: QuestionnaireAskedEvent): "cancelled" | "completed" | "crashed" | undefined {
+  const parkedAt = priorEvents.lastIndexOf(pending);
+  for (const event of priorEvents.slice(parkedAt + 1)) {
+    if (event.type === "run-cancelled") return "cancelled";
+    if (event.type === "run-completed") return "completed";
+    if (event.type === "run-crashed") return "crashed";
+  }
+  return undefined;
 }
 
 function lastQuestionnaireAsked(priorEvents: readonly RunEvent[]): QuestionnaireAskedEvent | undefined {

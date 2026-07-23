@@ -1,8 +1,8 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { resumeWorkflow } from "../src/engine/resume-workflow.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
+import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 
 const counterSchema = Type.Object({ count: Type.Integer() });
@@ -43,7 +43,13 @@ function buildResumeLoopWorkflow() {
     .dountil(body, (_ctx, last) => (last as { count: number }).count >= 2, { name: "counter-loop", maxIterations: 10 })
     .commit();
 
-  return { workflow, calls, fixBody: () => (failBody = false) };
+  return {
+    workflow,
+    calls,
+    fixBody: () => {
+      failBody = false;
+    },
+  };
 }
 
 describe("node-atomic resume (spec §8): control-flow node re-runs wholesale", () => {

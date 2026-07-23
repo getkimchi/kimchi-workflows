@@ -7,10 +7,7 @@ type InferInput<TInputSchema extends TSchema | undefined> = TInputSchema extends
 /** Static type a step's `run` must return: the schema's Static type, or `unknown` when no output schema is declared. */
 type InferOutput<TOutputSchema extends TSchema | undefined> = TOutputSchema extends TSchema ? Static<TOutputSchema> : unknown;
 
-export interface CreateStepOptions<
-  TInputSchema extends TSchema | undefined = undefined,
-  TOutputSchema extends TSchema | undefined = undefined,
-> {
+export interface CreateStepOptions<TInputSchema extends TSchema | undefined = undefined, TOutputSchema extends TSchema | undefined = undefined> {
   /** Unique step name — used for data-flow addressing and event-log matching (spec §3). */
   name: string;
   description?: string;
@@ -26,10 +23,9 @@ export interface CreateStepOptions<
 }
 
 /** Function step (spec §2.1). */
-export function createStep<
-  TInputSchema extends TSchema | undefined = undefined,
-  TOutputSchema extends TSchema | undefined = undefined,
->(options: CreateStepOptions<TInputSchema, TOutputSchema>): FunctionStep {
+export function createStep<TInputSchema extends TSchema | undefined = undefined, TOutputSchema extends TSchema | undefined = undefined>(
+  options: CreateStepOptions<TInputSchema, TOutputSchema>,
+): FunctionStep {
   return {
     kind: "function",
     name: options.name,
