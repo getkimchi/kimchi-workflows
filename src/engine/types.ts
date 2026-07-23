@@ -11,29 +11,29 @@ export type RetryReason = "thrown-error" | "invalid-output" | "budget-exceeded";
 
 /** Append-only lifecycle events (spec §8.1, §12.1), each tagged with the run id and an ISO timestamp. */
 export type RunEvent =
-  | { type: "run-started"; runId: string; workflowName: string; input: unknown; time: string }
+  | { type: "run-started"; runId: string; workflowName: string; input: unknown; at: string }
   // A resume (spec §8) continuing an existing run: appended to the same log instead of a second
   // `run-started`. `fromStepName` is the step execution resumes at (absent if nothing remained).
-  | { type: "run-resumed"; runId: string; fromStepName?: string; time: string }
-  | { type: "step-started"; runId: string; stepIndex: number; stepName: string; input: unknown; time: string }
+  | { type: "run-resumed"; runId: string; fromStepName?: string; at: string }
+  | { type: "step-started"; runId: string; stepIndex: number; stepName: string; input: unknown; at: string }
   // A failed attempt is being retried (spec §9.1). `attempt` is the 1-based attempt that just failed.
-  | { type: "step-retry"; runId: string; stepName: string; attempt: number; reason: RetryReason; error: string; time: string }
+  | { type: "step-retry"; runId: string; stepName: string; attempt: number; reason: RetryReason; error: string; at: string }
   // An in-session output-steering correction (spec §9.2): the agent's reply was invalid and a
   // correction was sent within the same session. `attempt` is the 1-based repair number.
-  | { type: "agent-steer"; runId: string; stepName: string; attempt: number; violation: string; time: string }
-  | { type: "step-completed"; runId: string; stepIndex: number; stepName: string; output: unknown; time: string }
+  | { type: "agent-steer"; runId: string; stepName: string; attempt: number; violation: string; at: string }
+  | { type: "step-completed"; runId: string; stepIndex: number; stepName: string; output: unknown; at: string }
   // Control-flow node (branch/loop/foreach, spec §3.2–§3.4) lifecycle. `node-completed` is the
   // node-atomic resume checkpoint (spec §8): its output feeds the next node and rebuilds context.
-  | { type: "node-started"; runId: string; nodeName: string; nodeKind: "branch" | "loop" | "foreach" | "workflow"; time: string }
-  | { type: "node-completed"; runId: string; nodeName: string; output: unknown; time: string }
+  | { type: "node-started"; runId: string; nodeName: string; nodeKind: "branch" | "loop" | "foreach" | "workflow"; at: string }
+  | { type: "node-completed"; runId: string; nodeName: string; output: unknown; at: string }
   // Observability (spec §12): which branch arms were taken, and each loop iteration as it starts.
-  | { type: "branch-arm"; runId: string; nodeName: string; armName: string; taken: boolean; time: string }
-  | { type: "loop-iteration"; runId: string; nodeName: string; iteration: number; time: string }
+  | { type: "branch-arm"; runId: string; nodeName: string; armName: string; taken: boolean; at: string }
+  | { type: "loop-iteration"; runId: string; nodeName: string; iteration: number; at: string }
   // Foreach (spec §3.4). `foreach-item-completed` is the per-item resume checkpoint (spec §8): a
   // top-level foreach resumes at the first item with no such event. `count` is the selected length.
-  | { type: "foreach-started"; runId: string; nodeName: string; count: number; time: string }
-  | { type: "foreach-item-started"; runId: string; nodeName: string; index: number; time: string }
-  | { type: "foreach-item-completed"; runId: string; nodeName: string; index: number; output: unknown; time: string }
+  | { type: "foreach-started"; runId: string; nodeName: string; count: number; at: string }
+  | { type: "foreach-item-started"; runId: string; nodeName: string; index: number; at: string }
+  | { type: "foreach-item-completed"; runId: string; nodeName: string; index: number; output: unknown; at: string }
   | {
       type: "step-log";
       runId: string;
@@ -41,21 +41,21 @@ export type RunEvent =
       level: "info" | "warn" | "error";
       message: string;
       data?: Record<string, unknown>;
-      time: string;
+      at: string;
     }
-  | { type: "run-completed"; runId: string; output: unknown; time: string }
+  | { type: "run-completed"; runId: string; output: unknown; at: string }
   // `stepName` is omitted when the failure is the workflow's own input validation (no step ran yet).
-  | { type: "run-crashed"; runId: string; stepName?: string; error: string; time: string }
+  | { type: "run-crashed"; runId: string; stepName?: string; error: string; at: string }
   // A cooperative cancel (spec §5, §8.6): applied side effects are NOT rolled back; the run is
   // recoverable via resume. `stepName` is the step the run was cancelled at, if one was executing.
-  | { type: "run-cancelled"; runId: string; stepName?: string; time: string }
+  | { type: "run-cancelled"; runId: string; stepName?: string; at: string }
   // A Q&A suspension (spec §8.4/§10): a step asked a `questionnaire` BATCH → the run is `parked`.
   // `conversation` is the opaque agent history needed to resume the SAME loop (empty for form input).
   // `violation` is set only on a RE-park of a form input step: why the delivered answers were rejected
   // (absent on a first ask, and on an agent's ask — which is an intentional question, not a rejection).
-  | { type: "questionnaire-asked"; runId: string; stepName: string; questionnaire: Questionnaire; conversation: readonly ConversationMessage[]; violation?: string; time: string }
+  | { type: "questionnaire-asked"; runId: string; stepName: string; questionnaire: Questionnaire; conversation: readonly ConversationMessage[]; violation?: string; at: string }
   // The user's structured answers (question `key` → value); resume delivers them back (spec §8.4).
-  | { type: "answers-provided"; runId: string; stepName: string; answers: Record<string, unknown>; time: string };
+  | { type: "answers-provided"; runId: string; stepName: string; answers: Record<string, unknown>; at: string };
 
 /** One message of an agent conversation. Opaque to the engine — the host defines the concrete shape. */
 export type ConversationMessage = unknown;

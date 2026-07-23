@@ -44,7 +44,7 @@ export async function handleCancel(ctx: NotifyCtx, guard: RunGuard, store: Pick<
   }
 
   // Cold cancel: no execution to interrupt, so record the transition directly (spec §5.3).
-  await store.appendEvent({ type: "run-cancelled", runId, time: new Date().toISOString() });
+  await store.appendEvent({ type: "run-cancelled", runId, at: new Date().toISOString() });
   ctx.ui.notify(`workflow: cancelled parked run ${runId}; resume to continue, or delete to remove it.`, "info");
 }
 

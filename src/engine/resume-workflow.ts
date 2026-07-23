@@ -32,7 +32,7 @@ export async function resumeWorkflow(workflow: WorkflowDefinition, priorEvents: 
   const { stepOutputs, previousOutput } = seedPrefix(workflow, completedByName, startIndex, initialInput);
 
   const startNode = workflow.nodes[startIndex];
-  await host.emit({ type: "run-resumed", runId, fromStepName: startNode ? nodeName(startNode) : undefined, time: iso(host) });
+  await host.emit({ type: "run-resumed", runId, fromStepName: startNode ? nodeName(startNode) : undefined, at: iso(host) });
 
   // Per-item resume (spec §3.4): a top-level foreach resumes at the first unprocessed item.
   const foreachResume = startNode?.kind === "foreach" ? buildForeachResume(startNode.name, priorEvents) : undefined;
@@ -73,7 +73,7 @@ export async function resumeWithAnswer(
   const parkedIndex = topLevelStepIndex(workflow, pending.stepName);
   if (parkedIndex === -1) {
     const error = `cannot answer run ${runId}: parked step "${pending.stepName}" is not a top-level step (nested Q&A resume is out of scope)`;
-    await host.emit({ type: "run-crashed", runId, stepName: pending.stepName, error, time: iso(host) });
+    await host.emit({ type: "run-crashed", runId, stepName: pending.stepName, error, at: iso(host) });
     return { runId, status: "crashed", error, stepName: pending.stepName };
   }
 
@@ -84,7 +84,7 @@ export async function resumeWithAnswer(
   // Seed the prefix before the parked step; the parked step continues via the answer hint (not re-run).
   const { stepOutputs, previousOutput } = seedPrefix(workflow, completedByName, parkedIndex, initialInput);
 
-  await host.emit({ type: "answers-provided", runId, stepName: pending.stepName, answers, time: iso(host) });
+  await host.emit({ type: "answers-provided", runId, stepName: pending.stepName, answers, at: iso(host) });
 
   return execute(
     workflow,
@@ -125,7 +125,7 @@ async function checkDrift(workflow: WorkflowDefinition, completedByName: Readonl
   for (const name of completedByName.keys()) {
     if (!currentNames.has(name)) {
       const error = `cannot resume run ${runId}: previously-completed "${name}" no longer exists in workflow "${workflow.name}" (definition drift, spec §8.5)`;
-      await host.emit({ type: "run-crashed", runId, error, time: iso(host) });
+      await host.emit({ type: "run-crashed", runId, error, at: iso(host) });
       return { runId, status: "crashed", error };
     }
   }

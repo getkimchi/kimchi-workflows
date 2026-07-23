@@ -17,12 +17,12 @@ export async function runWorkflow(workflow: WorkflowDefinition, initialInput: un
     const violation = describeSchemaViolations(workflow.inputSchema, initialInput);
     if (violation) {
       const error = `workflow "${workflow.name}" input: ${violation}`;
-      await host.emit({ type: "run-crashed", runId, error, time: iso(host) });
+      await host.emit({ type: "run-crashed", runId, error, at: iso(host) });
       return { runId, status: "crashed", error };
     }
   }
 
-  await host.emit({ type: "run-started", runId, workflowName: workflow.name, input: initialInput, time: iso(host) });
+  await host.emit({ type: "run-started", runId, workflowName: workflow.name, input: initialInput, at: iso(host) });
 
   return execute(workflow, host, { runId, initialInput, stepOutputs: new Map(), previousOutput: initialInput, startIndex: 0 }, options.signal);
 }

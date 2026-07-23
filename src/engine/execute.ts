@@ -67,11 +67,11 @@ export async function execute(workflow: WorkflowDefinition, host: HostPort, curs
   const outcome = await runNodeSequence(workflow.nodes, host, state, cursor.previousOutput, cursor.startIndex, stepSignal, cursor.foreachResume, cursor.answerResume);
 
   if (outcome.kind === "ok") {
-    await host.emit({ type: "run-completed", runId: state.runId, output: outcome.output, time: iso(host) });
+    await host.emit({ type: "run-completed", runId: state.runId, output: outcome.output, at: iso(host) });
     return { runId: state.runId, status: "completed", output: outcome.output };
   }
   if (outcome.kind === "crashed") {
-    await host.emit({ type: "run-crashed", runId: state.runId, stepName: outcome.stepName, error: outcome.error, time: iso(host) });
+    await host.emit({ type: "run-crashed", runId: state.runId, stepName: outcome.stepName, error: outcome.error, at: iso(host) });
     return { runId: state.runId, status: "crashed", error: outcome.error };
   }
   if (outcome.kind === "parked") {
@@ -82,11 +82,11 @@ export async function execute(workflow: WorkflowDefinition, host: HostPort, curs
       questionnaire: outcome.questionnaire,
       conversation: outcome.conversation,
       violation: outcome.violation,
-      time: iso(host),
+      at: iso(host),
     });
     return { runId: state.runId, status: "parked", stepName: outcome.stepName, questionnaire: outcome.questionnaire, violation: outcome.violation };
   }
-  await host.emit({ type: "run-cancelled", runId: state.runId, stepName: outcome.stepName, time: iso(host) });
+  await host.emit({ type: "run-cancelled", runId: state.runId, stepName: outcome.stepName, at: iso(host) });
   return { runId: state.runId, status: "cancelled" };
 }
 
@@ -177,7 +177,7 @@ async function runStepNode(
 
   // Input step, form mode (spec §2.4): does no other work — park immediately with its questionnaire batch.
   if (step.kind === "input") {
-    await host.emit({ type: "step-started", runId: state.runId, stepIndex: index, stepName: step.name, input: undefined, time: iso(host) });
+    await host.emit({ type: "step-started", runId: state.runId, stepIndex: index, stepName: step.name, input: undefined, at: iso(host) });
     return { kind: "parked", stepName: step.name, questionnaire: inputQuestionnaire(step), conversation: [] };
   }
 
@@ -193,7 +193,7 @@ async function runStepNode(
     }
   }
 
-  await host.emit({ type: "step-started", runId: state.runId, stepIndex: index, stepName: step.name, input: stepInput, time: iso(host) });
+  await host.emit({ type: "step-started", runId: state.runId, stepIndex: index, stepName: step.name, input: stepInput, at: iso(host) });
 
   const outcome = step.kind === "agent" ? await runAgentStep(step, stepInput, host, state, signal, { kind: "fresh" }) : await runFunctionStep(step, stepInput, host, state, signal);
   return finishStep(step, index, host, state, outcome);
@@ -218,7 +218,7 @@ function answerInputStep(step: InputStep, answers: Record<string, unknown>): Ste
 async function finishStep(step: StepDefinition, index: number, host: HostPort, state: RunState, outcome: StepOutcome): Promise<ExecOutcome> {
   switch (outcome.kind) {
     case "ok":
-      await host.emit({ type: "step-completed", runId: state.runId, stepIndex: index, stepName: step.name, output: outcome.output, time: iso(host) });
+      await host.emit({ type: "step-completed", runId: state.runId, stepIndex: index, stepName: step.name, output: outcome.output, at: iso(host) });
       return { kind: "ok", output: outcome.output };
     case "parked":
       return { kind: "parked", stepName: step.name, questionnaire: outcome.questionnaire, conversation: outcome.conversation, violation: outcome.violation };
@@ -231,12 +231,12 @@ async function finishStep(step: StepDefinition, index: number, host: HostPort, s
 
 /** Multi-match branch (spec §3.2): evaluate all conditions up front, run every true arm sequentially. */
 async function runBranchNode(node: BranchNode, input: unknown, host: HostPort, state: RunState, signal: AbortSignal): Promise<ExecOutcome> {
-  await host.emit({ type: "node-started", runId: state.runId, nodeName: node.name, nodeKind: "branch", time: iso(host) });
+  await host.emit({ type: "node-started", runId: state.runId, nodeName: node.name, nodeKind: "branch", at: iso(host) });
 
   const ctx = createRunContext(state);
   const decisions = node.arms.map((arm) => ({ arm, taken: arm.condition(ctx) })); // pure, side-effect-free (spec §3.2)
   for (const { arm, taken } of decisions) {
-    await host.emit({ type: "branch-arm", runId: state.runId, nodeName: node.name, armName: arm.name, taken, time: iso(host) });
+    await host.emit({ type: "branch-arm", runId: state.runId, nodeName: node.name, armName: arm.name, taken, at: iso(host) });
   }
 
   const result: Record<string, unknown> = {};
@@ -248,13 +248,13 @@ async function runBranchNode(node: BranchNode, input: unknown, host: HostPort, s
     result[arm.name] = outcome.output;
   }
 
-  await host.emit({ type: "node-completed", runId: state.runId, nodeName: node.name, output: result, time: iso(host) });
+  await host.emit({ type: "node-completed", runId: state.runId, nodeName: node.name, output: result, at: iso(host) });
   return { kind: "ok", output: result };
 }
 
 /** Loop (spec §3.3): run the body, evaluate the pure condition, repeat; guard against infinite loops. */
 async function runLoopNode(node: LoopNode, input: unknown, host: HostPort, state: RunState, signal: AbortSignal): Promise<ExecOutcome> {
-  await host.emit({ type: "node-started", runId: state.runId, nodeName: node.name, nodeKind: "loop", time: iso(host) });
+  await host.emit({ type: "node-started", runId: state.runId, nodeName: node.name, nodeKind: "loop", at: iso(host) });
 
   const ctx = createRunContext(state); // live view of stepOutputs; reflects each iteration's updates
   let iterationInput = input;
@@ -262,7 +262,7 @@ async function runLoopNode(node: LoopNode, input: unknown, host: HostPort, state
 
   for (let iteration = 1; iteration <= node.maxIterations; iteration++) {
     if (signal.aborted) return { kind: "cancelled" };
-    await host.emit({ type: "loop-iteration", runId: state.runId, nodeName: node.name, iteration, time: iso(host) });
+    await host.emit({ type: "loop-iteration", runId: state.runId, nodeName: node.name, iteration, at: iso(host) });
 
     const outcome = await runNodeSequence(node.body.nodes, host, state, iterationInput, 0, signal);
     if (outcome.kind !== "ok") return outcome;
@@ -271,7 +271,7 @@ async function runLoopNode(node: LoopNode, input: unknown, host: HostPort, state
     const conditionMet = node.condition(ctx, lastOutput);
     const stop = node.mode === "dowhile" ? !conditionMet : conditionMet;
     if (stop) {
-      await host.emit({ type: "node-completed", runId: state.runId, nodeName: node.name, output: lastOutput, time: iso(host) });
+      await host.emit({ type: "node-completed", runId: state.runId, nodeName: node.name, output: lastOutput, at: iso(host) });
       return { kind: "ok", output: lastOutput };
     }
     iterationInput = lastOutput;
@@ -291,7 +291,7 @@ async function runForeachNode(node: ForeachNode, input: unknown, host: HostPort,
   const ctx = createRunContext(state);
   const items = node.selector(ctx); // pure, deterministic — a resume re-runs it to the same array (spec §3.4)
 
-  await host.emit({ type: "foreach-started", runId: state.runId, nodeName: node.name, count: items.length, time: iso(host) });
+  await host.emit({ type: "foreach-started", runId: state.runId, nodeName: node.name, count: items.length, at: iso(host) });
 
   const results: unknown[] = new Array(items.length);
   for (let index = 0; index < items.length; index++) {
@@ -302,16 +302,16 @@ async function runForeachNode(node: ForeachNode, input: unknown, host: HostPort,
     }
 
     if (signal.aborted) return { kind: "cancelled" };
-    await host.emit({ type: "foreach-item-started", runId: state.runId, nodeName: node.name, index, time: iso(host) });
+    await host.emit({ type: "foreach-item-started", runId: state.runId, nodeName: node.name, index, at: iso(host) });
 
     const outcome = await runNodeSequence(node.body.nodes, host, state, items[index], 0, signal);
     if (outcome.kind !== "ok") return outcome;
 
     results[index] = outcome.output;
-    await host.emit({ type: "foreach-item-completed", runId: state.runId, nodeName: node.name, index, output: outcome.output, time: iso(host) });
+    await host.emit({ type: "foreach-item-completed", runId: state.runId, nodeName: node.name, index, output: outcome.output, at: iso(host) });
   }
 
-  await host.emit({ type: "node-completed", runId: state.runId, nodeName: node.name, output: results, time: iso(host) });
+  await host.emit({ type: "node-completed", runId: state.runId, nodeName: node.name, output: results, at: iso(host) });
   return { kind: "ok", output: results };
 }
 
@@ -322,11 +322,11 @@ async function runForeachNode(node: ForeachNode, input: unknown, host: HostPort,
  * workflow (no `node-completed`) re-runs wholesale like any control-flow node.
  */
 async function runNestedWorkflowNode(node: NestedWorkflowNode, input: unknown, host: HostPort, state: RunState, signal: AbortSignal): Promise<ExecOutcome> {
-  await host.emit({ type: "node-started", runId: state.runId, nodeName: node.name, nodeKind: "workflow", time: iso(host) });
+  await host.emit({ type: "node-started", runId: state.runId, nodeName: node.name, nodeKind: "workflow", at: iso(host) });
 
   const outcome = await runNodeSequence(node.workflow.nodes, host, state, input, 0, signal);
   if (outcome.kind !== "ok") return outcome;
 
-  await host.emit({ type: "node-completed", runId: state.runId, nodeName: node.name, output: outcome.output, time: iso(host) });
+  await host.emit({ type: "node-completed", runId: state.runId, nodeName: node.name, output: outcome.output, at: iso(host) });
   return { kind: "ok", output: outcome.output };
 }

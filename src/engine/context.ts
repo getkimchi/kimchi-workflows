@@ -47,7 +47,7 @@ export function createRunContext(state: RunState): RunContext {
 
 export function createStepLogger(host: HostPort, runId: string, stepName: string): StepLogger {
   const log = (level: "info" | "warn" | "error", message: string, data?: Record<string, unknown>) => {
-    void host.emit({ type: "step-log", runId, stepName, level, message, data, time: iso(host) });
+    void host.emit({ type: "step-log", runId, stepName, level, message, data, at: iso(host) });
   };
   return {
     info: (message, data) => log("info", message, data),

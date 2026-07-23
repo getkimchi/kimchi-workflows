@@ -185,7 +185,7 @@ async function runAgentSession(step: AgentStep, input: unknown, host: HostPort, 
       lastViolation = check.violation;
 
       if (repair < maxRepairs) {
-        await host.emit({ type: "agent-steer", runId: state.runId, stepName: step.name, attempt: repair + 1, violation: lastViolation, time: iso(host) });
+        await host.emit({ type: "agent-steer", runId: state.runId, stepName: step.name, attempt: repair + 1, violation: lastViolation, at: iso(host) });
         message = buildCorrectionMessage(steerSchema, lastViolation);
         continue;
       }
@@ -245,7 +245,7 @@ async function retryScheduled(
   error: string,
 ): Promise<boolean> {
   if (attempt >= maxAttempts) return false;
-  await host.emit({ type: "step-retry", runId, stepName, attempt, reason, error, time: iso(host) });
+  await host.emit({ type: "step-retry", runId, stepName, attempt, reason, error, at: iso(host) });
   if (backoffMs > 0) await host.sleep(backoffMs);
   return true;
 }

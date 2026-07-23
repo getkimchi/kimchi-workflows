@@ -94,7 +94,7 @@ describe("filesystem run store (spec §8.7)", () => {
         stepName: "s",
         level: "info",
         message: `m${i}`,
-        time: "t",
+        at: "t",
       });
     }
     await lastAppend;
