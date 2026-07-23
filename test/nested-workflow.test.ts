@@ -1,9 +1,9 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import pipelineWorkflow, { summarySchema } from "../examples/pipeline.workflow.ts";
-import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { resumeWorkflow } from "../src/engine/resume-workflow.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
+import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 
 describe("nested-workflow node (Phase 7a, spec §2.3/§11)", () => {

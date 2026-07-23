@@ -1,9 +1,9 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { createStep, createWorkflow } from "../src/flow/index.ts";
-import type { RunContext } from "../src/flow/types.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunEvent } from "../src/engine/types.ts";
+import { createStep, createWorkflow } from "../src/flow/index.ts";
+import type { RunContext } from "../src/flow/types.ts";
 import { createTestHost } from "./helpers.ts";
 
 const flagSchema = Type.Object({ a: Type.Boolean(), b: Type.Boolean() });

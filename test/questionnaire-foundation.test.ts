@@ -1,14 +1,7 @@
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
-import {
-  answersToOutput,
-  buildAskingProtocol,
-  type Question,
-  QuestionnaireSchema,
-  questionnaireFromSchema,
-  validateAnswers,
-} from "../src/flow/questionnaire.ts";
+import { answersToOutput, buildAskingProtocol, type Question, QuestionnaireSchema, questionnaireFromSchema, validateAnswers } from "../src/flow/questionnaire.ts";
 
 /** Find a question by key in a derived questionnaire. */
 function q(schema: Parameters<typeof questionnaireFromSchema>[0], key: string): Question | undefined {

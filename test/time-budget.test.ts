@@ -1,8 +1,8 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunEvent } from "../src/engine/types.ts";
+import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 import { createManualClock } from "./manual-clock.ts";
 
@@ -43,7 +43,9 @@ describe("time budget (Phase 7a, spec §9.3)", () => {
   it("counts budget-exceeded against the retry policy, then crashes when exhausted", async () => {
     const clock = createManualClock();
     const { host, store } = createTestHost({ sleep: clock.sleep });
-    const workflow = createWorkflow({ name: "timeout-retry" }).then(awaitsAbort("slow", { maxAttempts: 2 })).commit();
+    const workflow = createWorkflow({ name: "timeout-retry" })
+      .then(awaitsAbort("slow", { maxAttempts: 2 }))
+      .commit();
 
     const promise = runWorkflow(workflow, undefined, host);
     await clock.waitForTimer();

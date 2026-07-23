@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
+import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 
 describe("TypeBox validation failure", () => {

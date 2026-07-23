@@ -17,8 +17,6 @@ const sayHello = createStep({
   run: () => ({ message: "Hello, PI workflows!" }),
 });
 
-const helloWorkflow = createWorkflow({ name: "hello", description: "Say hello (Phase 1 tracer bullet)" })
-  .then(sayHello)
-  .commit();
+const helloWorkflow = createWorkflow({ name: "hello", description: "Say hello (Phase 1 tracer bullet)" }).then(sayHello).commit();
 
 export default helloWorkflow;

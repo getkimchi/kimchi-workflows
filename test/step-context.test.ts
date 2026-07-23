@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunEvent } from "../src/engine/types.ts";
+import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 
 describe("step context (spec §2.5): { input, ctx, abortSignal, logger }", () => {
