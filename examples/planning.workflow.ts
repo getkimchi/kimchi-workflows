@@ -2,24 +2,23 @@
  * B2 example: a Q&A-capable "planning" agent input step (spec §10.1). It may ask a `{questionnaire}`
  * batch (parking the run), then — on the answers — emits a structured `{result}` plan.
  *
- * `createInputStep({ agent })` produces a Q&A agent that fills `output`; the framework owns the
- * questionnaire schema and auto-injects the asking protocol, so `instructions` are task-only.
+ * `createAgentStep({ asks: true })` produces a Q&A agent that fills `output`; the framework owns the
+ * questionnaire schema and auto-injects the asking protocol, so the `prompt` is task-only.
  */
 import { Type } from "typebox";
-import { createInputStep, createStep, createWorkflow } from "../src/flow/index.ts";
+import { createAgentStep, createStep, createWorkflow } from "../src/flow/index.ts";
 
 export const planSchema = Type.Object({
   steps: Type.Array(Type.String()),
   summary: Type.String(),
 });
 
-const plan = createInputStep({
+const plan = createAgentStep({
   name: "plan",
   output: planSchema,
-  agent: {
-    model: "kimchi-dev/kimi-k2.7",
-    instructions: "Plan the software task: 'add a caching layer to the API'. Ask a clarifying question first only if something essential is ambiguous, then produce the plan.",
-  },
+  model: "kimchi-dev/kimi-k2.7",
+  asks: true,
+  prompt: () => "Plan the software task: 'add a caching layer to the API'. Ask a clarifying question first only if something essential is ambiguous, then produce the plan.",
 });
 
 /** A trivial follow-up so the example demonstrates execution continuing past the input step. */

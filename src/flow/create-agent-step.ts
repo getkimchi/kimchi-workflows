@@ -14,8 +14,11 @@ export interface CreateAgentStepOptions<TInputSchema extends TSchema | undefined
   output: TOutputSchema;
   /** Model override in `provider/modelId` form. Falls back to the workflow default, then the session (spec §9.5). */
   model?: string;
-  /** Build the user message from the validated input and run context. */
+  /** Build the user message from the validated input and run context. Task-only when `asks` is set —
+   * the framework auto-injects the asking protocol. */
   prompt: (args: AgentPromptArgs<InferInput<TInputSchema>>) => string;
+  /** Enable Q&A (spec §10.1): the agent may park with a `{questionnaire}` batch before its `{result}`. */
+  asks?: boolean;
   /** Unified repeat policy (spec §9.1): a transport/thrown error restarts a fresh agent session. */
   retry?: RetryPolicy;
   /** In-session output-steering budget (spec §9.2): corrections to attempt on invalid output. Default 2. */
@@ -37,6 +40,7 @@ export function createAgentStep<TInputSchema extends TSchema | undefined = undef
     inputSchema: options.input,
     outputSchema: options.output,
     model: options.model,
+    asks: options.asks,
     retry: options.retry,
     maxOutputRepairs: options.maxOutputRepairs,
     maxDurationMs: options.maxDurationMs,

@@ -1,9 +1,9 @@
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
-import { createInputStep, createWorkflow, QuestionnaireSchema } from "../src/flow/index.ts";
 import { resumeWithAnswer } from "../src/engine/resume-workflow.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
+import { createAgentStep, createWorkflow, QuestionnaireSchema } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 import { createKimiAgentStarter, resolveKimiApiKey } from "./kimi-agent.ts";
 
@@ -20,16 +20,16 @@ describe.skipIf(!apiKey)("planning Q&A E2E (kimchi-dev/kimi-k2.7)", () => {
   it("parks on a real questionnaire, then completes after the answers", async () => {
     if (!apiKey) throw new Error("unreachable: skipIf guards this");
 
-    const plan = createInputStep({
+    const plan = createAgentStep({
       name: "plan",
       output: planSchema,
-      agent: {
-        model: "kimchi-dev/kimi-k2.7",
-        instructions: [
+      model: "kimchi-dev/kimi-k2.7",
+      asks: true,
+      prompt: () =>
+        [
           "Task: add a caching layer to an HTTP API. You do not yet know which cache backend to use.",
           "You MUST first ask exactly ONE clarifying question about the cache backend before planning.",
         ].join("\n"),
-      },
     });
     const workflow = createWorkflow({ name: "planning-e2e" }).then(plan).commit();
 
