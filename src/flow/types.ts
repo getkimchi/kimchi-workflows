@@ -107,7 +107,7 @@ export interface AgentStep extends StepBase {
    * `{ result: <output> } | { questionnaire: <Questionnaire> }` (the framework owns the questionnaire
    * schema and auto-injects the asking protocol). A `{questionnaire}` parks the run; the collected
    * answers resume the **same** agent loop (spec §8.4). When false/absent, the reply is the bare
-   * `output` and the step can never park. Enabled via `createInputStep({ agent })`.
+   * `output` and the step can never park. Enabled via `createAgentStep({ asks: true })`.
    */
   readonly asks?: boolean;
   /**
@@ -121,8 +121,8 @@ export interface AgentStep extends StepBase {
  * Input step — form mode (spec §2.4): a first-class, LLM-free step that only collects structured
  * input. It parks with a questionnaire (derived from `outputSchema` or the explicit `questionnaire`
  * override); on answers, they are reassembled into the target shape and validated against
- * `outputSchema` to become the step's output. Invalid answers → re-park. Agent (elicitation) mode is
- * an {@link AgentStep} with `asks: true`, not this kind — both are produced by `createInputStep`.
+ * `outputSchema` to become the step's output. Invalid answers → re-park. Elicitation — an agent that
+ * composes the questions — is an {@link AgentStep} with `asks: true`, not this kind.
  */
 export interface InputStep extends StepBase {
   readonly kind: "input";
