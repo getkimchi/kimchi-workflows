@@ -1,0 +1,101 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.5/schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "files": { "experimentalScannerIgnores": ["node_modules", ".pi"] },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 180,
+    "lineEnding": "lf"
+  },
+  "javascript": {
+    "formatter": { "quoteStyle": "double", "semicolons": "always", "trailingCommas": "all" }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+
+      "correctness": "on",
+      "complexity": "on",
+      "performance": "on",
+      "security": "on",
+      "style": "on",
+      "suspicious": "on",
+      "a11y": "off",
+
+      "nursery": {
+        "noFloatingPromises": "error",
+        "noMisusedPromises": "error"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "useBlockStatements": "off",
+            "noTernary": "off",
+            "useNamingConvention": "off",
+            "useExportsLast": "off",
+            "noMagicNumbers": "off",
+            "noIncrementDecrement": "off",
+            "noContinue": "off",
+            "useDestructuring": "off",
+            "useConsistentMethodSignatures": "off",
+            "noProcessEnv": "off",
+            "noDefaultExport": "off",
+            "useDefaultSwitchClause": "off"
+          },
+          "complexity": {
+            "noUselessUndefined": "off",
+            "useMaxParams": "off",
+            "noExcessiveLinesPerFunction": "off",
+            "noVoid": "off"
+          },
+          "performance": {
+            "noAwaitInLoops": "off",
+            "useTopLevelRegex": "off",
+            "noBarrelFile": "off"
+          },
+          "suspicious": {
+            "useAwait": "off",
+            "noEmptyBlockStatements": "off",
+            "noUnnecessaryConditions": "off"
+          },
+          "correctness": {
+            "noNodejsModules": "off",
+            "noProcessGlobal": "off",
+            "noUndeclaredDependencies": "off",
+            "noUnresolvedImports": "off",
+            "useQwikValidLexicalScope": "off",
+            "useHookAtTopLevel": "off"
+          },
+          "security": {
+            "noSecrets": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/flow/**/*.ts", "src/engine/**/*.ts"],
+      "linter": {
+        "rules": {
+          "correctness": { "noNodejsModules": "error" }
+        }
+      }
+    },
+    {
+      "includes": ["test/**/*.ts"],
+      "linter": {
+        "rules": {
+          "suspicious": { "noExplicitAny": "off", "noMisplacedAssertion": "off", "noConsole": "off" },
+          "style": { "noNonNullAssertion": "off", "noExcessiveLinesPerFile": "off" }
+        }
+      }
+    }
+  ]
+}
