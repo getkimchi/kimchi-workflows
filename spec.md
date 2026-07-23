@@ -38,10 +38,13 @@ structured-output validation. *(orig. R13/R14)*
 1.4. **Loading & execution:** workflow files are loaded via PI's existing
 TypeScript loader and transpiled on `/workflow run` (esbuild/tsx/bun). There is
 no separate full `tsc` type-check gate; imports/dependencies resolve through PI's
-existing mechanism. *(decision)*
+existing mechanism. The authoring API is reachable from a workflow file by package
+subpath (`pi-workflows/src/flow`), which also resolves for files inside this
+package itself; module resolution is relative to the importing file, so a workflow
+must be validated from the directory it will actually live in (§6.6). *(decision)*
 
 1.5. **Identity & versioning.** A workflow declares a `name`/`id` in
-`createWorkflow`, used in `list` (§6.3) and the run store (§8.7). **Versioning is
+`createWorkflow`, used in the catalog (§6.7), `run list` (§6.3), and the run store (§8.7). **Versioning is
 out of scope** — the file is git-tracked (§1.1) and that is the versioning story.
 Definition changes are reconciled by step-name matching on resume (§8.5); if an
 edit breaks compatibility, the engine surfaces the error (§8.5) and the author
@@ -56,7 +59,10 @@ A step is one of:
 2.2. **Agent step** — passes a message to the PI harness and runs the agent tool
 loop until the agent ends (stops calling tools). May be declared **Q&A-capable**
 (§10) so it can both do real work *and* ask the user clarifying questions (e.g. a
-"planning" step). *(orig. R12)*
+"planning" step). Each agent session the engine opens is tagged with the **step
+name** it belongs to, so a host can attribute cost and telemetry per step — and a
+test double can script replies per step rather than per session. *(orig. R12;
+step tagging: decision)*
 
 2.3. **Nested-workflow step** — another workflow executed as a step. *(orig. R10;
 tracking in §11)*
@@ -65,7 +71,15 @@ tracking in §11)*
 from the user (e.g. to gather workflow parameters). Inherently **Q&A** (§10): it
 always suspends for the user. Unlike a Q&A-capable agent step (§2.2) it does no
 other work — it only asks. Some workflows need no input at all (e.g. a
-dependency-update flow that opens a PR unattended) and omit this step. *(decision)*
+dependency-update flow that opens a PR unattended) and omit this step.
+
+  An input step is **never cancelled by its answers**: answers that are incomplete
+  or fail the target schema re-park it with the same batch, exactly as leaving a
+  mandatory question blank leaves it pending. A re-park carries the schema
+  **violation** that rejected the answers, which is what distinguishes "asking" from
+  "asking again, and here is what was wrong" — a first ask carries none, and neither
+  does an agent's question (§10.1), which is a question rather than a rejection.
+  *(decision)*
 
 2.5. **Step context (what the harness injects).** Every step receives: its
 validated **input**; the **run context** (prior step outputs by name, workflow
@@ -79,6 +93,13 @@ message/tooling harness. *(orig. R11/R12; decision)*
 A workflow is built by chaining constructs on a builder (Mastra-inspired, §1.2)
 and finalized (`.commit()`-style). Every step has a unique **name** used both for
 data-flow addressing (§3.7) and event-log matching on resume (§8.5).
+
+`.commit()` is the authoring-time gate: it rejects a workflow with no nodes,
+duplicate names, or a node that is **not a step** — anything not produced by one of
+the step constructors (§2). Without that last check a malformed definition commits
+successfully and only fails once the engine tries to execute it, which is precisely
+how generated code (§6.6) using a plausible-but-wrong builder API slips through.
+*(decision)*
 
 **Control-flow constructs** *(orig. R2)*:
 
@@ -163,24 +184,75 @@ back. *(decision)*
 
 ## 6. Commands
 
-6.1. `/workflow run <file.ts>` — start a run. Rejected if another run is currently
-`running` (§7). *(orig. R3)*
+6.1. `/workflow run <name|file.ts>` — start a run. The argument is resolved as a
+filesystem path when it ends in `.ts`, otherwise as a workflow **name** from the
+catalog (§6.7). Rejected if another run is currently `running` (§7).
+*(orig. R3; name resolution: decision)*
 
 6.2. `/workflow resume [run-id]` — recover a `parked` (with an answer), `crashed`,
 or `cancelled` run, continuing from the last checkpoint (§5.2/§8). Requires that no
 run is currently `running`. A run-id selects among coexisting or earlier-session
 runs; omittable when unambiguous. *(orig. R7)*
 
-6.3. `/workflow list` — list runs: run-id, workflow name, started-at,
-stopped/completed-at, and status. *(orig. R9)*
+6.3. `/workflow run list` — list runs: run-id, workflow name, started-at,
+stopped/completed-at, and status. `list` is reserved as `run`'s first argument, so
+it can never name a workflow. *(orig. R9)*
 
-6.4. `/workflow cancel [run-id]` — cooperatively abort a run (§8.6); bare targets
-the `running` run. Cancelled runs are recoverable via `resume` (§5.2). *(orig. R6)*
+6.4. `/workflow cancel [run-id]` — stop a run. Two cases, because a `parked` run is
+not executing (§7.1) and so has no signal to interrupt:
+  - **executing run** — cooperatively abort at the next step boundary (§8.6);
+  - **parked run** — a *cold* cancel: the transition is recorded directly in the
+    event log (§5.3, §8.1), which is what makes §10.2's "stopping a parked run
+    requires explicit `/workflow cancel`" actually hold.
+
+  Bare targets the executing run, or — when none is executing — the sole `parked`
+  run; with several parked, a run-id is required. Only an executing or `parked` run
+  can be cancelled; a stopped run is rejected. Cancelled runs stay recoverable via
+  `resume` (§5.2). *(orig. R6; parked cancel: decision)*
 
 6.5. `/workflow delete <run-id>` — permanently remove a **stopped** run
 (`crashed`/`cancelled`/`completed`) and its recorded events from history (§8).
-Rejected for a live run (`running`/`parked`) — cancel it first. Irreversible: the
-run can no longer be resumed or listed. *(decision)*
+Rejected for a live run (`running`/`parked`) — cancel it first (§6.4), so removal is
+always a deliberate second act. Irreversible: the run can no longer be resumed or
+listed. *(decision)*
+
+6.6. `/workflow create` — interview the user and generate a new workflow file.
+Implemented as a **meta-workflow** (an ordinary `WorkflowDefinition` shipped with
+the adapter), so it runs through the same guard, event log, and attended Q&A loop
+as any other run. It receives the project root as its initial input. Shape: an
+input step gathers the goal and target file name; a Q&A agent step (§10.1) asks
+clarifying batches, then presents the plan for Approve/Revise until approved; a
+`.dountil` loop generates the source and validates it by loading it back (§1.4),
+retrying on failure; a final function step writes the file. Because a parked step
+is only answerable while top-level (§8.4), the whole interview — including
+approval — lives inside the single Q&A step rather than in a loop.
+
+Generation is **non-destructive and contained**: the target must resolve inside the
+project, and an existing file is never written over. Both are hard failures — the
+run crashes naming the offending path — rather than accommodations. Quietly writing
+to a different name would be worse than failing, since the run would report success
+while the file the user named still held something else. The clash is detected at
+validation, before anything is written.
+
+Validation loads the candidate **from its destination directory**, since imports
+resolve relative to the importing file (§1.4); validating elsewhere rejects every
+candidate on unresolvable imports. Loading proves the module imports and commits
+(§3); the generating agent is additionally required to check its own output with
+whatever tooling the project has (TypeScript, Biome) and to report plainly when
+none is available rather than claim a check it did not run. *(decision)*
+
+6.7. **Workflow catalog.** A project's workflows live in `<project>/.pi/workflows/`
+as `*.workflow.ts`, alongside the run store (§8.7); discovery filters on the
+suffix. `/workflow list` reports each workflow's name, file, and description — the
+file because two workflows may declare the same name, which `run` then rejects as
+ambiguous; such rows are flagged. Files that fail to load are reported rather than
+omitted.
+
+Discovery imports every candidate to read its declared name, so workflow modules
+must have no import-time side effects. Because that executes project code,
+resolving a **name** first tries the `<name>.workflow.ts` convention and only falls
+back to a full scan when it does not hold — so running one workflow does not
+normally execute the others. *(decision)*
 
 ## 7. Single running run (no concurrent execution)
 
@@ -223,6 +295,13 @@ engine continues after the last completed step(s). *(orig. R8)*
   - **Question suspension** (§10) — a clean, fully-recorded suspend point: the
     **same agent loop resumes** with the user's answer appended, context intact.
   *(clarifies orig. R8 vs R19)*
+
+  Answering requires the park to still be the run's **latest** state. A recorded
+  questionnaire is not proof a run is *currently* parked — it may have been
+  cancelled after asking (§6.4) — so answers arriving afterwards are refused rather
+  than silently reviving a run the user stopped. This matters because the run store
+  is shared across sessions (§8.7) and a prompt may be open while another session
+  cancels. *(decision)*
 
 8.5. **Definition drift** (file edited between launch and resume): resume
 re-reads the current file. Completed steps are matched by name (skipped / allowed
@@ -278,12 +357,14 @@ harness/session default. Function steps take no model. *(orig. R17; decision)*
 such steps may ask the user and suspend the run. This is a static property of the
 workflow definition, not a run-level mode. *(orig. R19/R20; decision)*
   - **Q&A-capable agent step** — output schema is a discriminated union
-    `{ result } | { question }`. The step does real work *and* may emit
-    `{question}` to reduce ambiguity (e.g. a "planning" step), possibly multiple
-    times. Each `{question}` suspends the run (`parked`), displays the
-    question, and — on answer — resumes the **same agent loop** with the answer
-    appended (§8.4), until the step finally emits `{result}`. Questions **do not**
-    use LLM tools.
+    `{ result } | { questionnaire }`, where a questionnaire is a **batch** of
+    questions, not a single one. The step does real work *and* may emit
+    `{questionnaire}` to reduce ambiguity (e.g. a "planning" step), possibly
+    multiple times. Each `{questionnaire}` suspends the run (`parked`), displays
+    the batch, and — on answers — resumes the **same agent loop** with them
+    appended (§8.4), until the step finally emits `{result}`. The framework owns
+    the questionnaire schema and injects the asking protocol, so the author's
+    prompt stays task-only. Questions **do not** use LLM tools.
   - **Non-Q&A agent step** — output is `{ result }` only; the agent cannot ask and
     must decide autonomously.
   - **Questionnaire step** (§2.4) — inherently Q&A; only asks, does no other work.
@@ -305,7 +386,7 @@ orig. R20 policy enum)*
 ## 11. Nested workflows
 
 11.1. A nested-workflow step is tracked **transparently**: its steps fold into
-the parent's event log under the **parent run-id**. `/workflow list` shows a
+the parent's event log under the **parent run-id**. `/workflow run list` shows a
 single run; parent resume/cancel naturally cover the child. *(orig. R10;
 decision)*
 
@@ -319,7 +400,7 @@ event log (§8.1) as they occur, so a user watching the session sees live progre
 12.2. A `running` agent step streams its output inline like a normal PI agent turn;
 a Q&A-capable step renders its `{question}` inline (§10.2). *(decision)*
 
-12.3. `/workflow list` (§6.3) reflects each run's current status and step; per-run
+12.3. `/workflow run list` (§6.3) reflects each run's current status and step; per-run
 detail (event history, current step, failure reason) is available from the recorded
 events (§8.1). *(decision)*
 
