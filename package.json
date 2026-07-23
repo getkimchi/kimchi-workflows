@@ -7,6 +7,13 @@
   "engines": {
     "node": ">=22"
   },
+  "//exports": "Subpath exports for the four public layers. Also what makes SELF-reference work: without an exports map, a workflow file inside this repo cannot `import ... from \"pi-workflows/src/flow\"` — which is exactly what /workflow create generates.",
+  "exports": {
+    "./src/flow": "./src/flow/index.ts",
+    "./src/engine": "./src/engine/index.ts",
+    "./src/host": "./src/host/index.ts",
+    "./src/testing": "./src/testing/index.ts"
+  },
   "scripts": {
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
