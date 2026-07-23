@@ -62,7 +62,13 @@ export async function runAgentStep(step: AgentStep, input: unknown, host: HostPo
 }
 
 /** Shared retry loop (spec §9): wrap each attempt in the time budget, re-attempt `retryable` failures within budget. */
-async function retryLoop(step: BudgetedStep, host: HostPort, state: RunState, runSignal: AbortSignal, attempt: (signal: AbortSignal) => Promise<AttemptResult>): Promise<StepOutcome> {
+async function retryLoop(
+  step: BudgetedStep,
+  host: HostPort,
+  state: RunState,
+  runSignal: AbortSignal,
+  attempt: (signal: AbortSignal) => Promise<AttemptResult>,
+): Promise<StepOutcome> {
   const maxAttempts = Math.max(1, step.retry?.maxAttempts ?? 1);
   const backoffMs = step.retry?.backoffMs ?? 0;
   let lastError = "";
@@ -179,7 +185,7 @@ async function runAgentSession(step: AgentStep, input: unknown, host: HostPort, 
       lastViolation = check.violation;
 
       if (repair < maxRepairs) {
-        await host.emit({ type: "agent-steer", runId: state.runId, stepName: step.name, attempt: repair + 1, violation: lastViolation, at: iso(host) });
+        await host.emit({ type: "agent-steer", runId: state.runId, stepName: step.name, attempt: repair + 1, violation: lastViolation, time: iso(host) });
         message = buildCorrectionMessage(steerSchema, lastViolation);
         continue;
       }
@@ -192,10 +198,7 @@ async function runAgentSession(step: AgentStep, input: unknown, host: HostPort, 
   }
 }
 
-type ReplyCheck =
-  | { ok: true; kind: "result"; value: unknown }
-  | { ok: true; kind: "questionnaire"; questionnaire: Questionnaire }
-  | { ok: false; violation: string };
+type ReplyCheck = { ok: true; kind: "result"; value: unknown } | { ok: true; kind: "questionnaire"; questionnaire: Questionnaire } | { ok: false; violation: string };
 
 /** Validate the agent's reply against the step's output schema — or, for Q&A steps, the `{result}|{questionnaire}` union. */
 function checkAgentReply(step: AgentStep, text: string): ReplyCheck {
@@ -203,7 +206,9 @@ function checkAgentReply(step: AgentStep, text: string): ReplyCheck {
     const check = validateQaOutput(step.outputSchema, text);
     if (!check.ok) return check;
     // `questionnaire` validated against QuestionnaireSchema above, so the cast is sound.
-    return check.kind === "questionnaire" ? { ok: true, kind: "questionnaire", questionnaire: check.questionnaire as Questionnaire } : { ok: true, kind: "result", value: check.value };
+    return check.kind === "questionnaire"
+      ? { ok: true, kind: "questionnaire", questionnaire: check.questionnaire as Questionnaire }
+      : { ok: true, kind: "result", value: check.value };
   }
   const check = validateAgentOutput(step.outputSchema, text);
   return check.ok ? { ok: true, kind: "result", value: check.value } : check;
@@ -240,7 +245,7 @@ async function retryScheduled(
   error: string,
 ): Promise<boolean> {
   if (attempt >= maxAttempts) return false;
-  await host.emit({ type: "step-retry", runId, stepName, attempt, reason, error, at: iso(host) });
+  await host.emit({ type: "step-retry", runId, stepName, attempt, reason, error, time: iso(host) });
   if (backoffMs > 0) await host.sleep(backoffMs);
   return true;
 }

@@ -1,9 +1,9 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { resumeWorkflow } from "../src/engine/resume-workflow.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunEvent } from "../src/engine/types.ts";
+import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 import { buildToggleWorkflow } from "./toggle-workflow.ts";
 
@@ -79,10 +79,10 @@ describe("resume (spec §8): continue after the last completed step", () => {
   it("fails with a descriptive error when a previously-completed step no longer exists (definition drift)", async () => {
     // Prior log records step "s1" as completed...
     const priorEvents: RunEvent[] = [
-      { type: "run-started", runId: "drift-run", workflowName: "toggle", input: undefined, at: "t0" },
-      { type: "step-started", runId: "drift-run", stepIndex: 0, stepName: "s1", input: undefined, at: "t1" },
-      { type: "step-completed", runId: "drift-run", stepIndex: 0, stepName: "s1", output: { a: 1 }, at: "t2" },
-      { type: "run-crashed", runId: "drift-run", stepName: "s2", error: "boom", at: "t3" },
+      { type: "run-started", runId: "drift-run", workflowName: "toggle", input: undefined, time: "t0" },
+      { type: "step-started", runId: "drift-run", stepIndex: 0, stepName: "s1", input: undefined, time: "t1" },
+      { type: "step-completed", runId: "drift-run", stepIndex: 0, stepName: "s1", output: { a: 1 }, time: "t2" },
+      { type: "run-crashed", runId: "drift-run", stepName: "s2", error: "boom", time: "t3" },
     ];
 
     // ...but the reloaded workflow renamed s1 -> s1b, so s1 is gone.

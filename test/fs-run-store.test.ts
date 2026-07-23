@@ -1,11 +1,11 @@
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import helloWorkflow from "../examples/hello.workflow.ts";
-import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunEvent } from "../src/engine/types.ts";
+import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { createFsRunStore } from "../src/host/fs-run-store.ts";
 import { createHostPort } from "../src/host/host-port.ts";
 
@@ -94,7 +94,7 @@ describe("filesystem run store (spec §8.7)", () => {
         stepName: "s",
         level: "info",
         message: `m${i}`,
-        at: "t",
+        time: "t",
       });
     }
     await lastAppend;
