@@ -11,6 +11,8 @@ export interface ScriptedAgent {
   readonly models: (string | undefined)[];
   /** The `history` seed seen by each opened session, in order (undefined for a fresh session). */
   readonly histories: (readonly unknown[] | undefined)[];
+  /** The `background` flag seen by each opened session, in order. */
+  readonly backgrounds: (boolean | undefined)[];
   /** Number of sessions opened (one per `startAgent`, i.e. per outer attempt / resume). */
   readonly opened: number;
   /** Number of `dispose()` calls. */
@@ -31,6 +33,7 @@ export function scriptedAgent(sessionScripts: readonly (readonly ScriptedTurn[])
   const messages: string[] = [];
   const models: (string | undefined)[] = [];
   const histories: (readonly unknown[] | undefined)[] = [];
+  const backgrounds: (boolean | undefined)[] = [];
   let opened = 0;
   let disposed = 0;
   let sessionIndex = 0;
@@ -39,6 +42,7 @@ export function scriptedAgent(sessionScripts: readonly (readonly ScriptedTurn[])
     opened += 1;
     models.push(request.model);
     histories.push(request.history);
+    backgrounds.push(request.background);
     const script = sessionScripts[sessionIndex++] ?? [];
     const conversation: unknown[] = [...(request.history ?? [])];
     let turn = 0;
@@ -67,6 +71,7 @@ export function scriptedAgent(sessionScripts: readonly (readonly ScriptedTurn[])
     messages,
     models,
     histories,
+    backgrounds,
     get opened() {
       return opened;
     },

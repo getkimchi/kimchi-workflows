@@ -33,8 +33,10 @@ export type AgentEntry = { kind: "fresh" } | { kind: "answer"; answers: Record<s
  * Outcome of a single attempt:
  *  - `ok`        — produced schema-valid output;
  *  - `retryable` — a failure the retry policy may re-attempt (thrown error / invalid function output /
- *                  agent transport error / budget exceeded, spec §9.3);
- *  - `fatal`     — a non-retryable failure (an agent whose output stays invalid after steering);
+ *                  agent transport error / budget exceeded, spec §9.3; also a `background` step's
+ *                  invalid output, which has no steering budget to exhaust first, spec §9.2);
+ *  - `fatal`     — a non-retryable failure (a non-background agent whose output stays invalid after
+ *                  steering);
  *  - `blocked`    — a Q&A step emitted a `{questions}` batch (spec §10);
  *  - `cancelled` — the abort signal fired.
  */
@@ -162,6 +164,9 @@ async function runFunctionAttempt(step: FunctionStep, input: unknown, ctx: RunCo
  *
  * When `asks`, the framework owns the questionnaire schema: the reply union is `{result}|{questions}`
  * and the asking protocol is auto-injected into the fresh prompt (so the author's prompt is task-only).
+ *
+ * When `background`, there is no steering budget at all (§9.2): invalid output → `retryable`, not
+ * `fatal` — falling back to the repeat policy is the only recourse a one-shot subagent has.
  */
 async function runAgentSession(
   step: AgentStep,
@@ -174,10 +179,13 @@ async function runAgentSession(
   entry: AgentEntry,
 ): Promise<AttemptResult> {
   const model = step.model ?? state.defaultModel; // step → workflow default; host applies the session default when undefined (spec §9.5)
-  const maxRepairs = Math.max(0, step.maxOutputRepairs ?? DEFAULT_MAX_OUTPUT_REPAIRS);
+  // A `background` step is a one-shot PI subagent (spec §2.2/§9.2, see src/host/pi-agent.ts): there is
+  // no resumable conversation to steer, so its repair budget is forced to 0 regardless of what the step
+  // itself declares — the loop below then runs exactly one turn before it must succeed or fail outright.
+  const maxRepairs = step.background ? 0 : Math.max(0, step.maxOutputRepairs ?? DEFAULT_MAX_OUTPUT_REPAIRS);
   const steerSchema = step.asks ? buildQaSchema(step.outputSchema) : step.outputSchema;
   const history = entry.kind === "answer" ? entry.conversation : undefined;
-  const session = host.startAgent({ model, history, stepName: step.name });
+  const session = host.startAgent({ model, history, stepName: step.name, background: step.background });
 
   try {
     let message = entry.kind === "answer" ? formatAnswers(entry.answers) : freshPrompt(step, input, ctx);
@@ -217,7 +225,14 @@ async function runAgentSession(
         message = buildCorrectionMessage(steerSchema, lastViolation);
         continue;
       }
-      return { kind: "fatal", error: `step "${step.name}" output: ${lastViolation}` };
+
+      const error = `step "${step.name}" output: ${lastViolation}`;
+      // Non-background (unchanged, spec §9.2): repairs were attempted and exhausted (or the author set
+      // maxOutputRepairs: 0) — a non-retryable failure; the step crashes without an outer retry.
+      // Background: there was never a repair to exhaust — an isolated one-shot subagent cannot be
+      // steered at all — so invalid output is NOT fatal here; it falls back to the repeat policy
+      // (spec §9.2), the same as a thrown transport error would.
+      return step.background ? { kind: "retryable", reason: "invalid-output", error } : { kind: "fatal", error };
     }
 
     return { kind: "fatal", error: `step "${step.name}" output: ${lastViolation}` };

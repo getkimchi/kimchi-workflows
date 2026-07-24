@@ -93,6 +93,14 @@ export interface AgentRequest {
   readonly history?: readonly ConversationMessage[];
   /** The step this session belongs to. Lets a host attribute cost/telemetry — and lets a test double script replies per step. */
   readonly stepName: string;
+  /**
+   * True for a `background` agent step (spec §2.2): the host must run this as an isolated PI subagent
+   * — its own context window and tool loop, no access to the parent session's history — rather than
+   * continuing whatever session ordinary agent steps use. `history` is always undefined alongside this:
+   * a background step can never be Q&A-capable (`.commit()` rejects `background` + `asks`, spec
+   * §10.1), so it never blocks and is never resumed with a seeded conversation.
+   */
+  readonly background?: boolean;
 }
 
 /** Token usage reported by a single agent turn (spec §9.3). */

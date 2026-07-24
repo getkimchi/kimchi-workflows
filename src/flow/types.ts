@@ -121,6 +121,18 @@ export interface AgentStep extends StepBase {
    * answer). Exceeding it fails the attempt with `budget-exceeded` — counted against the retry policy.
    */
   readonly maxTokens?: number;
+  /**
+   * Run as a PI subagent (spec §2.2): its own context window and tool loop, no access to the parent
+   * session's history, returning only its schema-valid output. Background is for agent steps only and
+   * may never be paired with `asks` — a subagent runs isolated and unwatched, so it must not be able to
+   * interrupt the parent session with a question (`.commit()` rejects the combination, spec §10.1).
+   *
+   * The real subagent mechanism PI's harness offers an extension is a one-shot subprocess (a second
+   * `pi` process, not a resumable conversation — see src/host/pi-agent.ts), so a background step's
+   * invalid output is never repaired in-session (spec §9.2): it fails the attempt directly and falls
+   * back to the repeat policy (`retry.maxRetry`), same as a thrown transport error would.
+   */
+  readonly background?: boolean;
 }
 
 /**

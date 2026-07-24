@@ -195,6 +195,7 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
       assertWellFormed(options.name, nodes);
       assertScopeNames(options.name, nodes);
       assertConcurrencyWithinCeiling(options.name, nodes, maxConcurrency);
+      assertNoBackgroundAsks(options.name, nodes);
       return {
         name: options.name,
         description: options.description,
@@ -320,6 +321,25 @@ function assertUniqueParallelArmNames(workflowName: string, node: ParallelNode):
     }
     seen.add(name);
   }
+}
+
+/**
+ * `background` + `asks` is rejected at `.commit()` (spec §10.1): a `background` agent step runs as an
+ * isolated, unwatched PI subagent (spec §2.2) — it must not be able to interrupt the parent session
+ * with a question whose reasoning the user never saw. Walks the full recursive tree (`forEachNode`), so
+ * the combination is caught wherever the step sits (top level, branch arm, loop/foreach body, parallel
+ * arm, or nested workflow).
+ */
+function assertNoBackgroundAsks(workflowName: string, nodes: readonly WorkflowNode[]): void {
+  forEachNode(nodes, (node) => {
+    if (node.kind !== "step" || node.step.kind !== "agent") return;
+    const step = node.step;
+    if (step.background && step.asks) {
+      throw new Error(
+        `workflow "${workflowName}": agent step "${step.name}" declares both background and asks — a background step runs isolated and unwatched, so it cannot block the run to ask a question (spec §10.1)`,
+      );
+    }
+  });
 }
 
 /**
