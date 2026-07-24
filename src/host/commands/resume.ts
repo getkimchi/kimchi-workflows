@@ -11,13 +11,13 @@ import { resumeWorkflow } from "../../engine/resume-workflow.ts";
 import { createHostPort } from "../host-port.ts";
 import { loadWorkflowFile } from "../load-workflow.ts";
 import { resumeAction } from "../resume-router.ts";
-import type { RunGuard } from "../run-guard.ts";
+import type { RunLock } from "../run-lock.ts";
 import { summarizeRun } from "../summarize-run.ts";
 import type { RunStore } from "../types.ts";
 import { handleAttendedQuestionnaire, pendingQuestionnaire } from "./attended.ts";
 import { type CommandCtx, describe, notifier, notifyResult, rejectIfBusy, runGuarded, type StartAgent } from "./context.ts";
 
-export async function handleResume(ctx: CommandCtx, store: RunStore, guard: RunGuard, startAgent: StartAgent, runId: string): Promise<void> {
+export async function handleResume(ctx: CommandCtx, store: RunStore, guard: RunLock, startAgent: StartAgent, runId: string): Promise<void> {
   if (rejectIfBusy(ctx, guard, "resuming")) return;
 
   const meta = await store.loadMeta(runId);
@@ -43,7 +43,7 @@ export async function handleResume(ctx: CommandCtx, store: RunStore, guard: RunG
   }
 
   // rerun: node-atomic re-run (3a/5a). A re-run may itself reach a Q&A step and block → attend it.
-  const result = await runGuarded(guard, runId, notifier(ctx), (signal) => {
+  const result = await runGuarded(guard, runId, ctx.cwd, store, notifier(ctx), (signal) => {
     const host = createHostPort(store, { startAgent });
     return resumeWorkflow(workflow, events, host, { signal });
   });

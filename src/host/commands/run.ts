@@ -10,14 +10,14 @@ import { runWorkflow } from "../../engine/run-workflow.ts";
 import type { WorkflowDefinition } from "../../flow/types.ts";
 import createWorkflowWorkflow from "../builtin/create.workflow.ts";
 import { createHostPort } from "../host-port.ts";
-import type { RunGuard } from "../run-guard.ts";
+import type { RunLock } from "../run-lock.ts";
 import type { RunStore } from "../types.ts";
 import { resolveWorkflow } from "../workflow-catalog.ts";
 import { handleAttendedQuestionnaire } from "./attended.ts";
 import { type CommandCtx, notifier, notifyResult, rejectIfBusy, runGuarded, type StartAgent } from "./context.ts";
 
 /** `/workflow run <name|file.ts>` — start a workflow named either by declared name or by path. */
-export async function handleRun(ctx: CommandCtx, store: RunStore, guard: RunGuard, startAgent: StartAgent, target: string): Promise<void> {
+export async function handleRun(ctx: CommandCtx, store: RunStore, guard: RunLock, startAgent: StartAgent, target: string): Promise<void> {
   if (rejectIfBusy(ctx, guard, "starting")) return;
 
   const resolution = await resolveWorkflow(ctx.cwd, target);
@@ -34,7 +34,7 @@ export async function handleRun(ctx: CommandCtx, store: RunStore, guard: RunGuar
  * exactly the same machinery as any other run. It differs only in receiving the project root as its
  * initial input, which its steps use to resolve where the generated file should land.
  */
-export async function handleCreate(ctx: CommandCtx, store: RunStore, guard: RunGuard, startAgent: StartAgent): Promise<void> {
+export async function handleCreate(ctx: CommandCtx, store: RunStore, guard: RunLock, startAgent: StartAgent): Promise<void> {
   if (rejectIfBusy(ctx, guard, "starting")) return;
 
   // The built-in ships with the extension, so it is imported directly rather than loaded from disk.
@@ -47,7 +47,7 @@ export async function handleCreate(ctx: CommandCtx, store: RunStore, guard: RunG
 async function startRun(
   ctx: CommandCtx,
   store: RunStore,
-  guard: RunGuard,
+  guard: RunLock,
   startAgent: StartAgent,
   workflow: WorkflowDefinition,
   workflowFilePath: string,
@@ -56,7 +56,7 @@ async function startRun(
   // Mint the run-id up front so metadata is persisted *at run start* (spec §8.7); the engine stays
   // file-unaware and simply uses the injected id.
   const runId = randomUUID();
-  const result = await runGuarded(guard, runId, notifier(ctx), async (signal) => {
+  const result = await runGuarded(guard, runId, ctx.cwd, store, notifier(ctx), async (signal) => {
     await store.saveMeta(runId, { workflowFilePath, workflowName: workflow.name });
     const host = createHostPort(store, { generateRunId: () => runId, startAgent });
     return runWorkflow(workflow, initialInput, host, { signal });

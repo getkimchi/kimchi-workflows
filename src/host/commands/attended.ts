@@ -11,7 +11,7 @@ import type { Questionnaire } from "../../flow/questionnaire.ts";
 import { createHostPort } from "../host-port.ts";
 import { loadWorkflowFile } from "../load-workflow.ts";
 import { collectAnswers } from "../questionnaire-render.ts";
-import type { RunGuard } from "../run-guard.ts";
+import type { RunLock } from "../run-lock.ts";
 import type { RunStore } from "../types.ts";
 import { type CommandCtx, describe, notifier, notifyResult, runGuarded, type StartAgent } from "./context.ts";
 
@@ -27,7 +27,7 @@ import { type CommandCtx, describe, notifier, notifyResult, runGuarded, type Sta
 export async function handleAttendedQuestionnaire(
   ctx: CommandCtx,
   store: RunStore,
-  guard: RunGuard,
+  guard: RunLock,
   workflowName: string,
   workflowFilePath: string,
   startAgent: StartAgent,
@@ -49,7 +49,7 @@ export async function handleAttendedQuestionnaire(
     // engine refuses such an answer rather than undoing the cancellation, and we report it plainly.
     let result: Awaited<ReturnType<typeof runGuarded>>;
     try {
-      result = await runGuarded(guard, runId, notifier(ctx), async (signal) => {
+      result = await runGuarded(guard, runId, ctx.cwd, store, notifier(ctx), async (signal) => {
         const workflow = await loadWorkflowFile(workflowFilePath);
         const events = await store.loadEvents(runId);
         const host = createHostPort(store, { startAgent });
