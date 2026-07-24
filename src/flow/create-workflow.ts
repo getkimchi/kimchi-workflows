@@ -1,20 +1,26 @@
 import type { TSchema } from "typebox";
 import { createMapStep } from "./create-map-step.ts";
-import type { BranchCondition, ForeachSelector, LoopCondition, MapFn, StepDefinition, WorkflowDefinition, WorkflowNode } from "./types.ts";
+import type { BranchCondition, ForeachSelector, LoopCondition, MapFn, ParallelNode, StepDefinition, WorkflowDefinition, WorkflowNode } from "./types.ts";
 import { forEachNode, nodeName } from "./types.ts";
 
 /**
- * `/` and `#` are node-path syntax (spec §8.5, engine/node-path.ts): a name carrying either would
- * make a path built from it unparseable. Duplicated here (rather than importing engine/node-path.ts)
+ * `/`, `#`, and `@` are node-path syntax (spec §8.5, engine/node-path.ts): a name carrying any of them
+ * would make a path built from it unparseable. Duplicated here (rather than importing engine/node-path.ts)
  * to keep `src/flow` free of a dependency on `src/engine` — flow is the pure authoring layer the
  * engine depends on, not the reverse.
  */
 function isValidNodeName(name: string): boolean {
-  return name.length > 0 && !name.includes("/") && !name.includes("#");
+  return name.length > 0 && !name.includes("/") && !name.includes("#") && !name.includes("@");
 }
 
 /** Default loop guard: a loop that neither satisfies its condition nor errors within this many iterations crashes. */
 export const DEFAULT_MAX_ITERATIONS = 100;
+
+/** Default concurrency ceiling (spec §3.6): the max steps executing at once across the whole run. */
+export const DEFAULT_MAX_CONCURRENCY = 4;
+
+/** Default foreach concurrency (spec §3.4): sequential unless the author opts in. */
+export const DEFAULT_FOREACH_CONCURRENCY = 1;
 
 export interface CreateWorkflowOptions<TInputSchema extends TSchema | undefined = undefined> {
   /** Unique workflow name/id — used by `/workflow list` and the run store (spec §1.5, §8.7). */
@@ -24,6 +30,12 @@ export interface CreateWorkflowOptions<TInputSchema extends TSchema | undefined 
   input?: TInputSchema;
   /** Default model (`provider/modelId`) for agent steps that declare none (spec §9.5). */
   defaultModel?: string;
+  /**
+   * The concurrency ceiling (spec §3.6): bounds the total steps executing at once across every
+   * construct in the run, including nested workflows (which inherit the ROOT run's ceiling). Default
+   * {@link DEFAULT_MAX_CONCURRENCY}. A per-construct `concurrency` above this is rejected at `.commit()`.
+   */
+  maxConcurrency?: number;
 }
 
 /** Options for a `.map()` construct. */
@@ -50,6 +62,17 @@ export interface LoopOptions {
 export interface ForeachOptions {
   /** Override the auto-generated node name (`foreach-1`, ...). */
   name?: string;
+  /**
+   * How many items run at once (spec §3.4). Default {@link DEFAULT_FOREACH_CONCURRENCY} (sequential).
+   * Rejected at `.commit()` if it exceeds the workflow's `maxConcurrency` ceiling (spec §3.6).
+   */
+  concurrency?: number;
+}
+
+/** Options for a `.parallel()` construct. */
+export interface ParallelOptions {
+  /** Override the auto-generated node name (`parallel-1`, ...). */
+  name?: string;
 }
 
 /** Options for a `.workflow()` (nested-workflow) construct. */
@@ -63,8 +86,9 @@ export type BranchArmSpec = readonly [BranchCondition, WorkflowDefinition];
 
 /**
  * Builder finalized with `.commit()` (Mastra-inspired, spec §1.2/§3). Nodes: `.then()` / `.map()`
- * (steps), `.branch()` (multi-match), `.dowhile()` / `.dountil()` (loops). Branch arms and loop
- * bodies are committed sub-workflows executed recursively by the same engine.
+ * (steps), `.branch()` (multi-match), `.dowhile()` / `.dountil()` (loops), `.foreach()`,
+ * `.parallel()` (structural fan-out). Branch arms and loop/foreach bodies are committed sub-workflows
+ * executed recursively by the same engine.
  */
 export interface WorkflowBuilder {
   /** Append a step node to run next in sequence (spec §3.1). */
@@ -84,10 +108,17 @@ export interface WorkflowBuilder {
   /** Loop (spec §3.3): run `body`, then repeat until `condition` holds; output is the last body output. */
   dountil(body: WorkflowDefinition, condition: LoopCondition, options?: LoopOptions): WorkflowBuilder;
   /**
-   * Foreach (spec §3.4): run `body` once per item selected by `selector` (pure), sequentially, with
-   * the item as the body's input. Output is the array of per-item outputs, in order.
+   * Foreach (spec §3.4): run `body` once per item selected by `selector` (pure), with the item as the
+   * body's input. `options.concurrency` (default 1) bounds how many items run at once. Output is the
+   * array of per-item outputs, in item order — independent of completion order.
    */
   foreach(body: WorkflowDefinition, selector: ForeachSelector, options?: ForeachOptions): WorkflowBuilder;
+  /**
+   * Parallel (spec §3.5): structural fan-out over independent STEPS — every arm runs concurrently
+   * against the same input, bounded only by the workflow ceiling (spec §3.6). Output is an object
+   * keyed by each arm's own step name, independent of completion order.
+   */
+  parallel(arms: readonly StepDefinition[], options?: ParallelOptions): WorkflowBuilder;
   /**
    * Nested workflow (spec §2.3/§11): run a committed sub-workflow's nodes here, transparently folding
    * into the parent run/log. Output is the sub-workflow's final output. Every step/node name must be
@@ -104,6 +135,8 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
   let branchCount = 0;
   let loopCount = 0;
   let foreachCount = 0;
+  let parallelCount = 0;
+  const maxConcurrency = options.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
 
   const builder: WorkflowBuilder = {
     // `.then()` is the builder's sequencing verb (spec §3.1, Mastra-inspired §1.2), not a thenable:
@@ -137,7 +170,18 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
     },
     foreach(body, selector, foreachOptions) {
       foreachCount += 1;
-      nodes.push({ kind: "foreach", name: foreachOptions?.name ?? `foreach-${foreachCount}`, body, selector });
+      nodes.push({
+        kind: "foreach",
+        name: foreachOptions?.name ?? `foreach-${foreachCount}`,
+        body,
+        selector,
+        concurrency: foreachOptions?.concurrency ?? DEFAULT_FOREACH_CONCURRENCY,
+      });
+      return builder;
+    },
+    parallel(arms, parallelOptions) {
+      parallelCount += 1;
+      nodes.push({ kind: "parallel", name: parallelOptions?.name ?? `parallel-${parallelCount}`, arms: [...arms] });
       return builder;
     },
     workflow(subWorkflow, nestedOptions) {
@@ -150,11 +194,13 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
       }
       assertWellFormed(options.name, nodes);
       assertScopeNames(options.name, nodes);
+      assertConcurrencyWithinCeiling(options.name, nodes, maxConcurrency);
       return {
         name: options.name,
         description: options.description,
         inputSchema: options.input,
         defaultModel: options.defaultModel,
+        maxConcurrency,
         nodes: [...nodes],
       };
     },
@@ -175,14 +221,15 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
   return builder;
 }
 
-/** The three things `.then()` accepts — anything else is not a step (spec §2). */
+/** The three things `.then()` (and a `.parallel()` arm) accepts — anything else is not a step (spec §2). */
 const STEP_KINDS = new Set(["function", "agent", "questionnaire"]);
 
 /**
  * Reject nodes that are not real steps, so `commit()` fails at authoring time rather than at run
  * time. `.then()` takes a `StepDefinition` from `createStep`/`createAgentStep`/`createQuestionnaireStep`;
  * passing anything else — a bare function, a plain object, the result of a hallucinated builder API —
- * used to commit successfully and only fail once the engine tried to execute it.
+ * used to commit successfully and only fail once the engine tried to execute it. `forEachNode` visits a
+ * `.parallel()` arm as a synthetic step node, so this same check covers arms for free.
  */
 function assertWellFormed(workflowName: string, nodes: readonly WorkflowNode[]): void {
   forEachNode(nodes, (node) => {
@@ -220,14 +267,21 @@ function describeValue(value: unknown): string {
  * `armName/stepName`, not `branchName/armName/stepName`). Both pools are checked together, since a
  * bare-name context read (spec §3.9) of either would be ambiguous if duplicated.
  *
- * This also enforces the `/`/`#` ban (spec §3): both are node-path syntax, and a name carrying either
- * would make a path built from it unparseable.
+ * A parallel node, by contrast, is NOT a peer scope like branch: its arms are plain steps nested UNDER
+ * its own name (`parallelName/armName`, like a loop/foreach body), so only the parallel's own name
+ * needs to be unique in THIS scope — its arms form their OWN separate, local scope, checked by
+ * {@link assertUniqueParallelArmNames}.
+ *
+ * This also enforces the `/`/`#`/`@` ban (spec §3): all three are node-path syntax, and a name
+ * carrying any of them would make a path built from it unparseable.
  */
 function assertScopeNames(workflowName: string, nodes: readonly WorkflowNode[]): void {
   const seen = new Set<string>();
   const check = (name: string): void => {
     if (!isValidNodeName(name)) {
-      throw new Error(`workflow "${workflowName}": name "${name}" is invalid — step/node names may not be empty or contain "/" or "#" (both are node-path syntax, spec §3)`);
+      throw new Error(
+        `workflow "${workflowName}": name "${name}" is invalid — step/node names may not be empty or contain "/", "#", or "@" (all three are node-path syntax, spec §3)`,
+      );
     }
     if (seen.has(name)) {
       throw new Error(
@@ -243,6 +297,43 @@ function assertScopeNames(workflowName: string, nodes: readonly WorkflowNode[]):
       for (const arm of node.arms) check(arm.name);
     } else {
       check(nodeName(node));
+      if (node.kind === "parallel") assertUniqueParallelArmNames(workflowName, node);
     }
   }
+}
+
+/** A parallel's own arm-name scope (spec §3.5/§3.9): unique among ITS arms, separate from the enclosing scope. */
+function assertUniqueParallelArmNames(workflowName: string, node: ParallelNode): void {
+  if (node.arms.length === 0) {
+    throw new Error(`workflow "${workflowName}": parallel "${node.name}" must declare at least one arm`);
+  }
+  const seen = new Set<string>();
+  for (const step of node.arms) {
+    const name = step.name;
+    if (!isValidNodeName(name)) {
+      throw new Error(
+        `workflow "${workflowName}": parallel "${node.name}" arm name "${name}" is invalid — step names may not be empty or contain "/", "#", or "@" (all three are node-path syntax, spec §3)`,
+      );
+    }
+    if (seen.has(name)) {
+      throw new Error(`workflow "${workflowName}": parallel "${node.name}" has two arms named "${name}"; arm names must be unique within their parallel (spec §3.5/§3.9)`);
+    }
+    seen.add(name);
+  }
+}
+
+/**
+ * A per-construct `concurrency` above the workflow's ceiling is rejected at `.commit()` rather than
+ * silently capped (spec §3.6) — an author who writes `8` should learn that the workflow says `4`, not
+ * discover it from timing. Walks the full recursive tree (`forEachNode`), so a foreach nested inside a
+ * branch arm, loop, or nested workflow is caught too, checked against THIS commit's own ceiling.
+ */
+function assertConcurrencyWithinCeiling(workflowName: string, nodes: readonly WorkflowNode[], maxConcurrency: number): void {
+  forEachNode(nodes, (node) => {
+    if (node.kind === "foreach" && node.concurrency > maxConcurrency) {
+      throw new Error(
+        `workflow "${workflowName}": foreach "${node.name}" declares concurrency ${node.concurrency}, above the workflow's ceiling of ${maxConcurrency} (spec §3.6) — raise maxConcurrency or lower this construct's concurrency`,
+      );
+    }
+  });
 }

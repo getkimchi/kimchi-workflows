@@ -1,44 +1,33 @@
 /**
  * Node walker for the deterministic engine (spec §4). A workflow is an ordered sequence of nodes
- * (step / branch / loop / foreach / nested workflow); this walks them with linear hand-off at the
- * node level. Branch arms and loop/foreach bodies are sub-workflows executed by the *same* walker
- * recursively (§3.2–4), each contributing one path segment to its children's addressing (spec §8.5).
+ * (step / branch / loop / foreach / parallel / nested workflow); this walks them with linear hand-off
+ * at the node level. Branch arms, loop/foreach bodies, and parallel arms are sub-workflows (or, for
+ * parallel, bare steps) executed by the SAME walker, each contributing one path segment to its
+ * children's addressing (spec §8.5).
+ *
+ * `.parallel` and `.foreach(concurrency > 1)` (spec §3.4/§3.5/§3.6, P3) live in concurrent-nodes.ts.
+ * That file needs to recurse back into this one (a foreach item's/parallel arm's body is walked by
+ * `runNodeSequence`; a parallel arm itself by `runStepNode`) — passed in as a small `NodeWalker` object
+ * (context.ts) rather than imported, so the dependency stays one-directional (this file →
+ * concurrent-nodes.ts) instead of an import cycle.
  *
  * Used by both a fresh run (`run-workflow.ts`) and a resume (`resume-workflow.ts`) via `execute`.
  * Zero imports from PI, `node:fs`, or any network lib — see src/engine/types.ts.
  */
 import { answersToOutput, questionnaireFromSchema, validateAnswers } from "../flow/questionnaire.ts";
-import type { BranchNode, ForeachNode, LoopNode, NestedWorkflowNode, QuestionnaireStep, StepDefinition, WorkflowDefinition, WorkflowNode } from "../flow/types.ts";
+import type { BranchNode, LoopNode, NestedWorkflowNode, QuestionnaireStep, StepDefinition, WorkflowDefinition, WorkflowNode } from "../flow/types.ts";
 import { nodeName } from "../flow/types.ts";
 import { describeSchemaViolations } from "../flow/validation.ts";
-import { createRunContext, type ExecOutcome, iso, type RunState, type StepOutcome } from "./context.ts";
-import { appendSegment, formatPath, type NodePath, staticChildKey } from "./node-path.ts";
+import { runForeachNode, runParallelNode } from "./concurrent-nodes.ts";
+import { createRunContext, type ExecOutcome, iso, type NodeWalker, type PendingBlock, type Reentry, type RunState, type StepOutcome } from "./context.ts";
+import { appendLoopIteration, appendSegment, formatPath, type NodePath, staticChildKey, staticKeyOf } from "./node-path.ts";
+import { createConcurrencyGate } from "./scheduler.ts";
 import { runAgentStep, runFunctionStep } from "./step-runner.ts";
 import type { HostPort, RunResult } from "./types.ts";
 
-/**
- * Answer-resume hint for a blocked Q&A step (spec §8.4/§8.5): reconstruct the step's session from
- * `conversation` and replay `answer` — continuing the SAME agent loop rather than re-running the step.
- */
-export interface AnswerResume {
-  readonly answers: Record<string, unknown>;
-  readonly conversation: readonly unknown[];
-}
-
-/**
- * Deep re-entry (spec §8.5, the heart of P2): `path` is the REMAINING node-path segments from "here"
- * down to the blocked step, each construct popping its own leading segment before recursing into its
- * body/arm/iteration. When `path` is fully consumed (length 0) the current node IS the target: a step
- * applies `answer` (continuing its conversation) if present, or — for `resumeWorkflow`'s node-atomic
- * restart (spec §8.2/§8.3), which never carries an `answer` — simply runs fresh. A construct node
- * (branch/loop/foreach/workflow) with an EXHAUSTED path always restarts fresh (only a step can be the
- * final blocked target); one still descending (`path.length > 0`) skips re-emitting its own "started"
- * event, since it was already recorded before the run blocked.
- */
-export interface Reentry {
-  readonly path: NodePath;
-  readonly answer?: AnswerResume;
-}
+// Re-exported for the engine's public surface (src/engine/index.ts) and for tests — the types
+// themselves live in context.ts (see the header comment above for why).
+export type { AnswerResume, Reentry } from "./context.ts";
 
 /**
  * Where execution begins plus the state recovered before it. A fresh run starts at the top with empty
@@ -55,6 +44,12 @@ export interface ExecutionCursor {
   readonly startIndex: number;
   readonly foreachItemHistory?: ReadonlyMap<string, ReadonlyMap<number, unknown>>;
   readonly reentry?: Reentry;
+  /**
+   * Resume-only (spec §8.6): every step currently `blocked` elsewhere in the log at the moment this
+   * resume began, keyed by static key. Lets a concurrent construct's re-entry recognize a sibling of
+   * the re-entry target that is ALSO still pending — left untouched rather than restarted or dropped.
+   */
+  readonly pendingBlocks?: ReadonlyMap<string, PendingBlock>;
 }
 
 /**
@@ -68,8 +63,13 @@ export async function execute(workflow: WorkflowDefinition, host: HostPort, curs
     workflowName: workflow.name,
     initialInput: cursor.initialInput,
     stepOutputs: cursor.stepOutputs,
+    inFlight: new Set(),
+    // Run-wide ceiling (spec §3.6): one gate for the whole call, shared by every construct at any
+    // depth — including nested workflows, which simply reuse `state` and so inherit this verbatim.
+    concurrencyGate: createConcurrencyGate(workflow.maxConcurrency),
     defaultModel: workflow.defaultModel,
     foreachItemHistory: cursor.foreachItemHistory,
+    pendingBlocks: cursor.pendingBlocks,
   };
 
   const outcome = await runNodeSequence(workflow.nodes, host, state, cursor.previousOutput, stepSignal, [], cursor.startIndex, cursor.reentry);
@@ -83,15 +83,9 @@ export async function execute(workflow: WorkflowDefinition, host: HostPort, curs
     return { runId: state.runId, status: "crashed", error: outcome.error };
   }
   if (outcome.kind === "blocked") {
-    await host.emit({
-      type: "questionnaire-asked",
-      runId: state.runId,
-      path: outcome.path,
-      questionnaire: outcome.questionnaire,
-      conversation: outcome.conversation,
-      violation: outcome.violation,
-      at: iso(host),
-    });
+    // `questionnaire-asked` was already emitted at the point this step (or, for a concurrent
+    // construct, whichever arm is being surfaced here) actually blocked — see `finishStep` — so this
+    // is just reporting, not recording.
     return { runId: state.runId, status: "blocked", path: outcome.path, questionnaire: outcome.questionnaire, violation: outcome.violation };
   }
   await host.emit({ type: "run-cancelled", runId: state.runId, path: outcome.path, at: iso(host) });
@@ -101,11 +95,12 @@ export async function execute(workflow: WorkflowDefinition, host: HostPort, curs
 /**
  * Walk a node sequence with linear hand-off (spec §3.6): each node's output feeds the next. Used at
  * the top level (with `startIndex`/`reentry` from resume) and recursively for branch arms /
- * loop-iteration / foreach-item / nested-workflow bodies (always `startIndex` 0, `reentry` popped one
- * segment per level by the caller). A node's output is recorded under its own STATIC path (spec §5.4)
- * for `ctx.getStepResult`.
+ * loop-iteration / foreach-item / parallel-arm / nested-workflow bodies (always `startIndex` 0,
+ * `reentry` popped one segment per level by the caller). A node's output is recorded under its own
+ * STATIC path (spec §5.4) for `ctx.getStepResult`. Exported for concurrent-nodes.ts, which recurses
+ * back into this for each arm's/item's own body.
  */
-async function runNodeSequence(
+export async function runNodeSequence(
   nodes: readonly WorkflowNode[],
   host: HostPort,
   state: RunState,
@@ -155,20 +150,32 @@ async function runNodeSequence(
   return { kind: "ok", output };
 }
 
-/** The name a re-entry's next hop must match: its own leading segment's name. */
-function leafNameOf(reentry: Reentry): string {
+/** The name a re-entry's next hop must match: its own leading segment's name. Exported for concurrent-nodes.ts. */
+export function leafNameOf(reentry: Reentry): string {
   const first = reentry.path[0];
   if (!first) throw new Error("resume: re-entry path is empty at a node boundary (definition drift?)");
   return first.name;
 }
 
-/** Whether `node` is addressable by `targetName` at this scope — a branch also exposes its own arms (spec §8.5). */
+/**
+ * Whether `node` is addressable by `targetName` at this scope. A branch's arms are PEERS of the
+ * branch's own path (spec §8.5: `armName/stepName`, not `branchName/armName/stepName`), so a re-entry
+ * path may name an arm DIRECTLY without the branch's own name ever appearing — hence the extra check.
+ * A parallel's arms, by contrast, nest UNDER its own name (`parallelName/armName`, like a loop/foreach
+ * body) — the re-entry path always leads with the parallel's own name, exactly like every other
+ * construct, so no extra check is needed there.
+ */
 function matchesReentryTarget(node: WorkflowNode, targetName: string): boolean {
   if (node.kind === "branch") {
     return node.name === targetName || node.arms.some((arm) => arm.name === targetName);
   }
   return nodeName(node) === targetName;
 }
+
+// The recursion points concurrent-nodes.ts needs back into this file (see the header comment) —
+// `runNodeSequence`/`runStepNode`/`leafNameOf` are stable `function` declarations (hoisted), so this
+// object can be built once, referencing them before their textual definition below.
+const walker: NodeWalker = { runNodeSequence, runStepNode, leafNameOf };
 
 function runNode(node: WorkflowNode, input: unknown, host: HostPort, state: RunState, signal: AbortSignal, parentPath: NodePath, reentry?: Reentry): Promise<ExecOutcome> {
   switch (node.kind) {
@@ -179,13 +186,16 @@ function runNode(node: WorkflowNode, input: unknown, host: HostPort, state: RunS
     case "loop":
       return runLoopNode(node, input, host, state, signal, parentPath, reentry);
     case "foreach":
-      return runForeachNode(node, host, state, signal, parentPath, reentry);
+      return runForeachNode(walker, node, host, state, signal, parentPath, reentry);
+    case "parallel":
+      return runParallelNode(walker, node, input, host, state, signal, parentPath, reentry);
     case "workflow":
       return runNestedWorkflowNode(node, input, host, state, signal, parentPath, reentry);
   }
 }
 
-async function runStepNode(
+/** Run one step to a settled outcome, tracking it in-flight for the full duration (spec §3.9). Exported for concurrent-nodes.ts (parallel arms). */
+export async function runStepNode(
   step: StepDefinition,
   input: unknown,
   host: HostPort,
@@ -196,7 +206,29 @@ async function runStepNode(
 ): Promise<ExecOutcome> {
   const path = appendSegment(parentPath, step.name);
   const formattedPath = formatPath(path);
+  const inFlightKey = staticKeyOf(path);
 
+  // Reads never race (spec §3.9): mark this step in-flight for the FULL duration of its execution
+  // (fresh, answer-continuation, or a questionnaire's immediate block) so a concurrent sibling's
+  // `getStepResult` throws rather than observing a torn/undefined value. Cleared on every exit path.
+  state.inFlight.add(inFlightKey);
+  try {
+    return await runStepNodeBody(step, input, host, state, signal, parentPath, formattedPath, reentry);
+  } finally {
+    state.inFlight.delete(inFlightKey);
+  }
+}
+
+async function runStepNodeBody(
+  step: StepDefinition,
+  input: unknown,
+  host: HostPort,
+  state: RunState,
+  signal: AbortSignal,
+  parentPath: NodePath,
+  formattedPath: string,
+  reentry?: Reentry,
+): Promise<ExecOutcome> {
   // Answer continuation (spec §8.4/§8.5): resume a blocked step with the user's structured answers — no
   // input re-validation and no new `step-started`. Branch on step kind:
   //  - agent → continue the SAME agent loop (the prompt builder is NOT re-invoked);
@@ -216,9 +248,15 @@ async function runStepNode(
   }
 
   // Questionnaire step, form mode (spec §2.4): does no other work — block immediately with its batch.
+  // `questionnaire-asked` is emitted HERE, at the point of blocking, not deferred to execute()'s top
+  // level (spec §8.6): under concurrency several steps can block in the SAME round, and each needs its
+  // OWN recorded event regardless of which one the caller ultimately reports as "the" blocked outcome —
+  // deferring to the top would silently drop every blocked sibling but one.
   if (step.kind === "questionnaire") {
     await host.emit({ type: "step-started", runId: state.runId, path: formattedPath, input: undefined, at: iso(host) });
-    return { kind: "blocked", path: formattedPath, questionnaire: questionnaireFor(step), conversation: [] };
+    const questionnaire = questionnaireFor(step);
+    await host.emit({ type: "questionnaire-asked", runId: state.runId, path: formattedPath, questionnaire, conversation: [], at: iso(host) });
+    return { kind: "blocked", path: formattedPath, questionnaire, conversation: [] };
   }
 
   // Linear hand-off (spec §3.6): a step with an input schema receives the previous node's output;
@@ -257,13 +295,28 @@ function answerQuestionnaireStep(step: QuestionnaireStep, answers: Record<string
   return check.ok ? { kind: "ok", output } : { kind: "blocked", questionnaire: questionnaireFor(step), conversation: [], violation: check.violation };
 }
 
-/** Turn a step's `StepOutcome` into an `ExecOutcome`: emit `step-completed` on success; attach identity otherwise. */
+/**
+ * Turn a step's `StepOutcome` into an `ExecOutcome`: emit `step-completed` on success. On `blocked`,
+ * emit `questionnaire-asked` right here — at the point this step actually blocked — rather than
+ * leaving it to whoever eventually reports the outcome (spec §8.6: under concurrency several steps can
+ * block in the SAME round, and each needs its own recorded event, independent of which one a
+ * concurrent construct's settlement picks to surface as "the" result of this call).
+ */
 async function finishStep(path: string, host: HostPort, state: RunState, outcome: StepOutcome): Promise<ExecOutcome> {
   switch (outcome.kind) {
     case "ok":
       await host.emit({ type: "step-completed", runId: state.runId, path, output: outcome.output, at: iso(host) });
       return { kind: "ok", output: outcome.output };
     case "blocked":
+      await host.emit({
+        type: "questionnaire-asked",
+        runId: state.runId,
+        path,
+        questionnaire: outcome.questionnaire,
+        conversation: outcome.conversation,
+        violation: outcome.violation,
+        at: iso(host),
+      });
       return { kind: "blocked", path, questionnaire: outcome.questionnaire, conversation: outcome.conversation, violation: outcome.violation };
     case "crashed":
       return { kind: "crashed", error: outcome.error, path };
@@ -335,7 +388,9 @@ async function runBranchNode(
  * Loop (spec §3.3/§8.5): run the body, evaluate the pure condition, repeat; guard against infinite
  * loops. Re-entry (spec §8.5) jumps directly to the blocked iteration — earlier iterations are trusted
  * complete (the engine never starts iteration N+1 until iteration N's body and condition are done) —
- * seeding that iteration's hand-off input from the previous iteration's recorded body output.
+ * seeding that iteration's hand-off input from the previous iteration's recorded body output. A loop
+ * is inherently sequential (never concurrent — only ONE iteration is ever live), so this is unchanged
+ * by P3 beyond the `appendLoopIteration` rename.
  */
 async function runLoopNode(node: LoopNode, input: unknown, host: HostPort, state: RunState, signal: AbortSignal, parentPath: NodePath, reentry?: Reentry): Promise<ExecOutcome> {
   const loopPath = appendSegment(parentPath, node.name);
@@ -359,7 +414,7 @@ async function runLoopNode(node: LoopNode, input: unknown, host: HostPort, state
 
   for (; iteration <= node.maxIterations; iteration++) {
     if (signal.aborted) return { kind: "cancelled" };
-    const iterPath = appendSegment(parentPath, node.name, iteration);
+    const iterPath = appendLoopIteration(parentPath, node.name, iteration);
     const thisIterationReentry = innerReentry;
     if (!thisIterationReentry) {
       await host.emit({ type: "loop-iteration", runId: state.runId, path: formatPath(iterPath), iteration, at: iso(host) });
@@ -384,68 +439,11 @@ async function runLoopNode(node: LoopNode, input: unknown, host: HostPort, state
 }
 
 /**
- * Foreach (spec §3.4/§8.5): run the body once per selected item, sequentially, with the item as input.
- * Output is the per-item outputs in order. Per-item checkpoint (spec §8.2): `state.foreachItemHistory`
- * (built once at resume start from `foreach-item-completed` events, spec §8.2) lets THIS foreach —
- * wherever it sits in the tree — skip every item already recorded, whether resuming node-atomically
- * (no `reentry`, spec §8.2/§8.3) or re-entering a deeper block inside a still-in-flight item (spec §8.5).
- */
-async function runForeachNode(node: ForeachNode, host: HostPort, state: RunState, signal: AbortSignal, parentPath: NodePath, reentry?: Reentry): Promise<ExecOutcome> {
-  const foreachPath = appendSegment(parentPath, node.name);
-  const ctx = createRunContext(state, parentPath);
-  const items = node.selector(ctx); // pure, deterministic — a resume re-runs it to the same array (spec §3.4)
-
-  if (!reentry) {
-    await host.emit({ type: "foreach-started", runId: state.runId, path: formatPath(foreachPath), count: items.length, at: iso(host) });
-  }
-
-  const history = state.foreachItemHistory?.get(formatPath(foreachPath));
-  const targetIndex = reentry ? reentry.path[0]?.index : undefined;
-  if (reentry && targetIndex === undefined) {
-    throw new Error(`resume: foreach "${node.name}" re-entry path is missing its item index (definition drift?)`);
-  }
-  const startIndex = targetIndex ?? firstMissingIndex(history, items.length);
-
-  const results: unknown[] = new Array(items.length);
-  for (let index = 0; index < startIndex; index++) {
-    results[index] = history?.get(index);
-  }
-
-  let innerReentry: Reentry | undefined = reentry ? { path: reentry.path.slice(1), answer: reentry.answer } : undefined;
-
-  for (let index = startIndex; index < items.length; index++) {
-    if (signal.aborted) return { kind: "cancelled" };
-    const itemPath = appendSegment(parentPath, node.name, index);
-    const thisItemReentry = innerReentry;
-    if (!thisItemReentry) {
-      await host.emit({ type: "foreach-item-started", runId: state.runId, path: formatPath(itemPath), index, at: iso(host) });
-    }
-
-    const outcome = await runNodeSequence(node.body.nodes, host, state, items[index], signal, itemPath, 0, thisItemReentry);
-    if (outcome.kind !== "ok") return outcome;
-
-    results[index] = outcome.output;
-    await host.emit({ type: "foreach-item-completed", runId: state.runId, path: formatPath(itemPath), index, output: outcome.output, at: iso(host) });
-    innerReentry = undefined;
-  }
-
-  await host.emit({ type: "node-completed", runId: state.runId, path: formatPath(foreachPath), output: results, at: iso(host) });
-  return { kind: "ok", output: results };
-}
-
-/** The first item index with no recorded `foreach-item-completed` (0 if none recorded at all). */
-function firstMissingIndex(history: ReadonlyMap<number, unknown> | undefined, length: number): number {
-  if (!history) return 0;
-  for (let i = 0; i < length; i++) {
-    if (!history.has(i)) return i;
-  }
-  return length;
-}
-
-/**
  * Nested workflow (spec §2.3/§11): run the sub-workflow's nodes under the SAME parent run state and
  * signal — transparently folding into the parent event log (one run), addressed under this node's own
  * path segment (spec §8.5/§11.1: `audit/lint`). Re-entry (spec §8.5) descends straight into its body.
+ * Sharing `state` is also what makes nested workflows inherit the root run's concurrency ceiling (spec
+ * §3.6): `state.concurrencyGate` is created once, at the root, and never recreated here.
  */
 async function runNestedWorkflowNode(
   node: NestedWorkflowNode,

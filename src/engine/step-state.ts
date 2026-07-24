@@ -75,6 +75,12 @@ export function deriveStepStates(events: readonly RunEvent[]): Map<StepStateKey,
       case "branch-arm":
         if (!event.taken) set(event.path, "skipped");
         break;
+      case "step-cancelled":
+        // A blocked sibling abandoned by a drain (spec §9.5): cancelled directly, distinct from the
+        // blanket run-crashed force-close below (which still applies to whatever step IS attributed
+        // to the crash, or a lone open step left over with no concurrency involved at all).
+        set(event.path, "cancelled");
+        break;
       case "run-crashed":
         if (event.path) set(event.path, "crashed");
         closeOpen("crashed");

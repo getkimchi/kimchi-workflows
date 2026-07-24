@@ -160,7 +160,7 @@ export type ForeachSelector = (ctx: RunContext) => readonly unknown[];
  * node's output feeds the next). Branch arms, loop/foreach bodies, and nested workflows are
  * themselves sub-workflows, executed by the same engine recursively.
  */
-export type WorkflowNode = StepNode | BranchNode | LoopNode | ForeachNode | NestedWorkflowNode;
+export type WorkflowNode = StepNode | BranchNode | LoopNode | ForeachNode | ParallelNode | NestedWorkflowNode;
 
 /** Wraps a single step (function/agent/map) as a node. Behavior is identical to the pre-node model. */
 export interface StepNode {
@@ -194,15 +194,31 @@ export interface LoopNode {
 }
 
 /**
- * Foreach node (spec §3.4): run `body` once per selected item, sequentially, with the item as the
- * body's input. Output is the array of per-item body outputs, in order. Each item checkpoints, so a
- * top-level foreach resumes at the first unprocessed item (spec §8).
+ * Foreach node (spec §3.4): run `body` once per selected item, with the item as the body's input.
+ * Output is the array of per-item body outputs, in order. Each item checkpoints, so a top-level
+ * foreach resumes at the first unprocessed item (spec §8). `concurrency` (default 1, sequential) bounds
+ * how many items run at once, itself capped by the workflow ceiling (spec §3.6) — `.commit()` rejects a
+ * value above it.
  */
 export interface ForeachNode {
   readonly kind: "foreach";
   readonly name: string;
   readonly body: WorkflowDefinition;
   readonly selector: ForeachSelector;
+  readonly concurrency: number;
+}
+
+/**
+ * Parallel node (spec §3.5): structural fan-out over independent STEPS (not sub-workflows) — every arm
+ * runs concurrently against the same input, bounded only by the workflow ceiling (spec §3.6; there is
+ * no per-construct override, unlike foreach). Output is an object keyed by each arm step's own `name`,
+ * so it is independent of completion order. Arms are addressed under the parallel's own node-path
+ * segment (`parallelName/armStepName`) — their own local scope, like a loop/foreach body.
+ */
+export interface ParallelNode {
+  readonly kind: "parallel";
+  readonly name: string;
+  readonly arms: readonly StepDefinition[];
 }
 
 /**
@@ -224,19 +240,27 @@ export interface WorkflowDefinition {
   readonly inputSchema?: TSchema;
   /** Default model for agent steps that declare none (spec §9.5). */
   readonly defaultModel?: string;
+  /**
+   * The concurrency ceiling (spec §3.6): the max number of steps executing at once across EVERY
+   * construct in the run, including nested workflows (which inherit the ROOT run's ceiling — their own
+   * declared value, if nested, is not consulted at run time). Default 4.
+   */
+  readonly maxConcurrency: number;
   readonly nodes: readonly WorkflowNode[];
 }
 
-/** The addressing name of a node (step name for step nodes; declared name for branch/loop nodes). */
+/** The addressing name of a node (step name for step nodes; declared name for branch/loop/parallel nodes). */
 export function nodeName(node: WorkflowNode): string {
   return node.kind === "step" ? node.step.name : node.name;
 }
 
 /**
  * Depth-first, pre-order traversal of a node tree (spec §3): visits every node exactly once — each
- * top-level node, then recursively those inside its branch arms, loop/foreach body, and nested
- * workflow. The single place that knows the recursive tree shape; both name-uniqueness (flow) and
- * resume drift/prefix-seeding (engine) build on it.
+ * top-level node, then recursively those inside its branch arms, loop/foreach body, parallel arms, and
+ * nested workflow. The single place that knows the recursive tree shape; both name-uniqueness (flow)
+ * and resume drift/prefix-seeding (engine) build on it. A parallel arm is a bare `StepDefinition`, not
+ * a `WorkflowNode`, so it is visited by wrapping it as a synthetic step node — never pushed into a real
+ * `nodes` array — purely so callers keep seeing a uniform `WorkflowNode`.
  */
 export function forEachNode(nodes: readonly WorkflowNode[], visit: (node: WorkflowNode) => void): void {
   for (const node of nodes) {
@@ -245,6 +269,8 @@ export function forEachNode(nodes: readonly WorkflowNode[], visit: (node: Workfl
       for (const arm of node.arms) forEachNode(arm.body.nodes, visit);
     } else if (node.kind === "loop" || node.kind === "foreach") {
       forEachNode(node.body.nodes, visit);
+    } else if (node.kind === "parallel") {
+      for (const step of node.arms) visit({ kind: "step", step });
     } else if (node.kind === "workflow") {
       forEachNode(node.workflow.nodes, visit);
     }

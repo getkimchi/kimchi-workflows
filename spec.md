@@ -24,7 +24,9 @@ with deterministic, harness-driven transitions and durable, resumable state.
   deterministically (§4).
 - **Node path** — the address of a step within a run: enclosing node names, the
   iteration or item index where one applies, then the step name — e.g.
-  `until-valid#3/design`, `batch#7/review`, `audit/lint` (§8.5).
+  `until-valid#3/design`, `batch@7/review`, `audit/lint` (§8.5). `#` marks a loop
+  iteration and `@` a foreach item: the two are addressed alike but keyed differently
+  (§5.4), so the wire format says which it is rather than leaving it inferred.
 
 ## 1. Workflow definition
 
@@ -113,12 +115,11 @@ enclosing scope, used for data-flow addressing (§3.9), event-log matching on
 resume (§8.7), and node-path addressing (§8.5).
 
 `.commit()` is the authoring-time gate: it rejects a workflow with no nodes,
-duplicate names within a scope, a name containing `/` or `#` (both are node-path
-syntax, §8.5, and a name carrying either makes a path unparseable), a per-construct
-`concurrency` above the workflow
-ceiling (§3.6), a `background` step that also asks (§2.2), or a node that is
-**not a step** —
-anything not produced by one of the step constructors (§2). Without that last
+duplicate names within a scope, a name containing `/`, `#`, or `@` (all three are
+node-path syntax, §8.5, and a name carrying one makes a path unparseable), a
+per-construct `concurrency` above the workflow ceiling (§3.6), a `background` step
+that also asks (§2.2), or a node that is **not a step** — anything not produced by
+one of the step constructors (§2). Without that last
 check a malformed definition commits successfully and only fails once the engine
 tries to execute it, which is precisely how generated code (§6.6) using a
 plausible-but-wrong builder API slips through. *(decision)*
@@ -442,7 +443,7 @@ completed step(s) and the last completed item(s). *(orig. R8)*
 
 8.5. **Blocking is legal anywhere.** A Q&A step may sit inside a loop, a foreach, a
 branch arm, or a nested workflow. The block event records the step's full **node
-path** — `until-valid#3/design`, `batch#7/review`, `audit/design` — and the
+path** — `until-valid#3/design`, `batch@7/review`, `audit/design` — and the
 checkpoint records the enclosing node's position (iteration counter and the output
 feeding its condition; the item index for a foreach). Resume re-enters the node at
 that position and continues the same agent conversation with the answers appended,
@@ -455,15 +456,18 @@ the run reads `in_progress` while any of them does (§5.3). Pending questionnair
 a **FIFO queue** addressed by node path; the session renders one at a time, and an
 answer is matched to the path it was asked from. *(decision)*
 
-  **Answering is delivery, not resume.** An answer to a run that is still executing
-  goes to the process holding the lock (§7.2), which feeds it to the waiting step in
-  place — it does **not** go through `/workflow resume` and is not subject to the
-  no-executing-run guard (§7.2), which would otherwise make a queued question
-  unanswerable for as long as any sibling runs. It follows that only the session
-  driving a run can answer it while it executes; another session may answer only once
-  nothing is executing, by resuming the run and taking over the lock. Without this
-  split the two rules deadlock: work continues *because* a block is local, yet every
-  route to unblocking it is barred *because* work continues. *(decision)*
+  **Settle, then ask.** A fan-out round runs to quiescence before the run reports
+  `blocked`: siblings finish or block in turn, and only then does the run surface its
+  queue. At that moment nothing is executing and the lock is released (§7.2), so any
+  session answers through the ordinary resume path. This is what keeps §7.2 and this
+  clause from deadlocking — not a special case exempting answers from the guard, but
+  the absence of any moment where a question is pending *while* the run executes.
+
+  The cost, stated plainly: a question raised early in a wide fan-out is not shown
+  until its siblings finish, so one slow sibling delays the prompt. At concurrency 1 —
+  the default — there is no difference at all. Buying earlier prompts would mean the
+  engine handing out a handle answerable mid-flight, which trades this simplicity for
+  an interactive surface that is far harder to keep pure and to test. *(decision)*
 
 8.7. **Definition drift** (file edited between launch and resume): resume re-reads
 the current file and **re-validates each completed step's recorded output against

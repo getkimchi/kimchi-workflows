@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { appendSegment, formatPath, parsePath, staticKeyOf, staticPathOf } from "../src/engine/node-path.ts";
+import { appendForeachItem, appendLoopIteration, appendSegment, formatPath, parsePath, staticKeyOf, staticPathOf } from "../src/engine/node-path.ts";
 import { resumeWithAnswer, resumeWorkflow } from "../src/engine/resume-workflow.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import { createQuestionnaireStep, createStep, createWorkflow } from "../src/flow/index.ts";
@@ -13,21 +13,30 @@ describe("node-path grammar (spec §8.5): format/parse round-trip", () => {
     expect(parsePath("audit/lint")).toEqual(path);
   });
 
-  it("round-trips a loop-iteration path", () => {
-    const path = appendSegment([{ name: "until-valid", index: 3 }], "design");
+  it("round-trips a loop-iteration path (spec §5.4: '#' — its index is dropped from the static key)", () => {
+    const path = appendSegment(appendLoopIteration([], "until-valid", 3), "design");
     expect(formatPath(path)).toBe("until-valid#3/design");
     expect(parsePath("until-valid#3/design")).toEqual(path);
   });
 
-  it("round-trips a foreach-item path", () => {
-    expect(formatPath([{ name: "batch", index: 7 }, { name: "review" }])).toBe("batch#7/review");
-    expect(parsePath("batch#7/review")).toEqual([{ name: "batch", index: 7 }, { name: "review" }]);
+  it("round-trips a foreach-item path (spec §5.4: '@' — its index is KEPT in the static key)", () => {
+    const path = appendSegment(appendForeachItem([], "batch", 7), "review");
+    expect(formatPath(path)).toBe("batch@7/review");
+    expect(parsePath("batch@7/review")).toEqual(path);
   });
 
-  it("drops indices for the static key (spec §5.4)", () => {
-    const dynamic = parsePath("until-valid#3/design");
-    expect(staticKeyOf(dynamic)).toBe("until-valid/design");
-    expect(staticPathOf(dynamic)).toEqual([{ name: "until-valid" }, { name: "design" }]);
+  it("rejects a path segment mixing '#' and '@'", () => {
+    expect(() => parsePath("batch@7#3/review")).toThrow(/mixes/);
+  });
+
+  it("drops LOOP iteration indices for the static key, but KEEPS foreach item indices (spec §5.4)", () => {
+    const loopDynamic = parsePath("until-valid#3/design");
+    expect(staticKeyOf(loopDynamic)).toBe("until-valid/design");
+    expect(staticPathOf(loopDynamic)).toEqual([{ name: "until-valid" }, { name: "design" }]);
+
+    const foreachDynamic = parsePath("batch@7/review");
+    expect(staticKeyOf(foreachDynamic)).toBe("batch@7/review"); // index KEPT — several items are live at once under concurrency
+    expect(staticPathOf(foreachDynamic)).toEqual(foreachDynamic);
   });
 
   it("fails loudly rather than mis-parsing malformed input", () => {
@@ -36,6 +45,7 @@ describe("node-path grammar (spec §8.5): format/parse round-trip", () => {
     expect(() => parsePath("audit#")).toThrow(); // empty index
     expect(() => parsePath("audit#x")).toThrow(); // non-integer index
     expect(() => parsePath("audit#1#2")).toThrow(); // more than one "#" in a segment
+    expect(() => parsePath("audit@1@2")).toThrow(); // more than one "@" in a segment
     // A log written before node-path addressing landed has no `path` field — `undefined` off disk
     // must not be silently mis-parsed as a path.
     expect(() => parsePath(undefined as unknown as string)).toThrow(/non-empty path string/);
@@ -52,7 +62,7 @@ describe(".commit() rejects path syntax and same-scope name collisions (spec §3
       createWorkflow({ name: "w" })
         .then(createStep({ name: "bad/name", run: () => ({}) }))
         .commit(),
-    ).toThrow(/"\/" or "#"/);
+    ).toThrow(/node-path syntax/);
   });
 
   it("rejects a step name containing '#'", () => {
@@ -60,7 +70,7 @@ describe(".commit() rejects path syntax and same-scope name collisions (spec §3
       createWorkflow({ name: "w" })
         .then(createStep({ name: "bad#name", run: () => ({}) }))
         .commit(),
-    ).toThrow(/"\/" or "#"/);
+    ).toThrow(/node-path syntax/);
   });
 
   it("rejects a loop/foreach/nested-workflow node name containing path syntax", () => {
@@ -71,7 +81,7 @@ describe(".commit() rejects path syntax and same-scope name collisions (spec §3
       createWorkflow({ name: "w" })
         .dountil(body, () => true, { name: "bad/loop" })
         .commit(),
-    ).toThrow(/"\/" or "#"/);
+    ).toThrow(/node-path syntax/);
   });
 
   it("rejects two nodes sharing a name within the SAME scope — the concrete case a bare-name read would be ambiguous in", () => {

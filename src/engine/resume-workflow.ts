@@ -7,13 +7,16 @@
  *    completed top-level nodes and re-run the first incomplete node wholesale (a foreach among them
  *    still skips its own completed items, spec §8.2).
  *  - `resumeWithAnswer` — for a `blocked` run: the §8.4/§8.5 same-loop path. A block is legal anywhere
- *    in the node tree — inside a loop, foreach, branch arm, or nested workflow — so this navigates
- *    straight to that exact position (re-entry, spec §8.5) and continues the SAME agent loop with the
- *    answers appended, rather than restarting the enclosing node and re-asking.
+ *    in the node tree — inside a loop, foreach, branch arm, parallel, or nested workflow — so this
+ *    navigates straight to that exact position (re-entry, spec §8.5) and continues the SAME agent loop
+ *    with the answers appended, rather than restarting the enclosing node and re-asking. Under
+ *    concurrency several steps may be blocked at once (spec §8.6): an explicit `path` (or, by default,
+ *    the FIFO-first currently-pending one) selects WHICH; every other pending block is left untouched
+ *    and, if still pending afterward, reported back instead of the construct's final output.
  */
 import { nodeName, type StepDefinition, type WorkflowDefinition, type WorkflowNode } from "../flow/types.ts";
 import { describeSchemaViolations } from "../flow/validation.ts";
-import { iso } from "./context.ts";
+import { iso, type PendingBlock } from "./context.ts";
 import { execute, type Reentry } from "./execute.ts";
 import { formatPath, parsePath, staticKeyOf } from "./node-path.ts";
 import { deriveStepStates } from "./step-state.ts";
@@ -68,26 +71,37 @@ export async function resumeWorkflow(workflow: WorkflowDefinition, priorEvents: 
  * the blocked step's exact position — however deeply nested — and continues its SAME loop: an agent
  * step re-batches or emits `{result}`; a questionnaire step reassembles + validates the answers into
  * its output. On another `{questions}` the run re-blocks at that same position.
+ *
+ * `options.path` selects WHICH pending block to answer when several are open at once (spec §8.6);
+ * omitted, it defaults to the FIFO-first (earliest-asked) currently-pending one. Every OTHER pending
+ * block is left exactly as it was — not re-asked, not silently dropped — and if still pending once the
+ * target settles, IT is what this call reports back (rather than the construct's assembled output).
  */
 export async function resumeWithAnswer(
   workflow: WorkflowDefinition,
   priorEvents: readonly RunEvent[],
   answers: Record<string, unknown>,
   host: HostPort,
-  options: RunOptions = {},
+  options: RunOptions & { path?: string } = {},
 ): Promise<RunResult> {
   const started = requireRunStarted(priorEvents);
   const { runId, input: initialInput } = started;
 
-  const pending = lastQuestionnaireAsked(priorEvents);
+  const allPending = pendingQuestionnaires(priorEvents);
+  const pending = options.path === undefined ? (allPending[0] ?? lastQuestionnaireAsked(priorEvents)) : findAskedAt(priorEvents, options.path);
   if (!pending) {
-    throw new Error("cannot answer: the run is not blocked (no pending questionnaire in the log)");
+    throw new Error(
+      options.path === undefined
+        ? "cannot answer: the run is not blocked (no pending questionnaire in the log)"
+        : `cannot answer: "${options.path}" was never asked in this run's log`,
+    );
   }
 
-  // The block must still be the run's latest word. A questionnaire in the log is not proof the run is
-  // *currently* blocked: it may have been cancelled, or reached a terminal state, after asking — and a
-  // caller holding a questionnaire captured before that (an open prompt, another session) would
-  // otherwise resume a run the user already stopped, silently overwriting the cancellation.
+  // The block must still be the run's latest word for ITS OWN path. A questionnaire in the log is not
+  // proof that step is *currently* blocked: it may have been cancelled (run-level, or — under
+  // concurrency — a per-step drain, spec §9.5) or reached a terminal state after asking, and a caller
+  // holding a questionnaire captured before that (an open prompt, another session) would otherwise
+  // resume a run the user already stopped, silently overwriting the cancellation.
   const settled = settledAfter(priorEvents, pending);
   if (settled) {
     throw new Error(`cannot answer run ${runId}: it was ${settled} after blocking; answering would undo that`);
@@ -98,11 +112,21 @@ export async function resumeWithAnswer(
   if (drift) return drift;
 
   const foreachItemHistory = buildForeachItemHistory(priorEvents);
+
+  // Every OTHER step currently blocked (spec §8.6): a concurrent construct's re-entry leaves these
+  // untouched rather than restarting or dropping them, and reports the next one if still pending once
+  // the target settles. Keyed by static key, matching how execute.ts looks them up.
+  const pendingBlocks = new Map<string, PendingBlock>();
+  for (const entry of allPending) {
+    if (entry.path === pending.path) continue;
+    pendingBlocks.set(staticKeyOf(parsePath(entry.path)), { path: entry.path, questionnaire: entry.questionnaire, conversation: entry.conversation });
+  }
+
   await host.emit({ type: "answers-provided", runId, path: pending.path, answers, at: iso(host) });
 
   const reentry: Reentry = { path: parsePath(pending.path), answer: { answers, conversation: pending.conversation } };
 
-  return execute(workflow, host, { runId, initialInput, stepOutputs, previousOutput: initialInput, startIndex: 0, foreachItemHistory, reentry }, options.signal);
+  return execute(workflow, host, { runId, initialInput, stepOutputs, previousOutput: initialInput, startIndex: 0, foreachItemHistory, reentry, pendingBlocks }, options.signal);
 }
 
 function requireRunStarted(priorEvents: readonly RunEvent[]): RunStartedEvent {
@@ -168,7 +192,10 @@ async function checkDrift(
   for (const [staticKey, state] of states) {
     if (state !== "completed") continue;
 
-    const step = resolveStepAtStaticPath(workflow.nodes, staticKey.split("/"));
+    const step = resolveStepAtStaticPath(
+      workflow.nodes,
+      parsePath(staticKey).map((segment) => segment.name),
+    );
     if (!step) {
       const error = `cannot resume run ${runId}: previously-completed step "${staticKey}" no longer exists in workflow "${workflow.name}" (definition drift, spec §8.7)`;
       await host.emit({ type: "run-crashed", runId, path: staticKey, error, at: iso(host) });
@@ -187,35 +214,43 @@ async function checkDrift(
   return undefined;
 }
 
-/** Resolve the step definition at a STATIC path (e.g. `["until-valid", "design"]`) in the current tree, or undefined. */
+/** Resolve the step definition at a STATIC path (bare names only — indices already stripped by the caller) in the current tree, or undefined. */
 function resolveStepAtStaticPath(nodes: readonly WorkflowNode[], segments: readonly string[]): StepDefinition | undefined {
   const [head, ...rest] = segments;
   if (head === undefined) return undefined;
 
   for (const node of nodes) {
-    if (node.kind === "step") {
-      if (node.step.name === head) return rest.length === 0 ? node.step : undefined;
-      continue;
-    }
-    if (node.kind === "branch") {
-      for (const arm of node.arms) {
-        if (arm.name === head) return resolveStepAtStaticPath(arm.body.nodes, rest);
-      }
-      continue;
-    }
-    if ((node.kind === "loop" || node.kind === "foreach") && node.name === head) {
-      return resolveStepAtStaticPath(node.body.nodes, rest);
-    }
-    if (node.kind === "workflow" && node.name === head) {
-      return resolveStepAtStaticPath(node.workflow.nodes, rest);
-    }
+    const resolved = resolveAtNode(node, head, rest);
+    if (resolved !== undefined) return resolved;
   }
   return undefined;
 }
 
+/** One node's contribution to {@link resolveStepAtStaticPath}: `undefined` means "not this node, keep looking". */
+function resolveAtNode(node: WorkflowNode, head: string, rest: readonly string[]): StepDefinition | undefined {
+  switch (node.kind) {
+    case "step":
+      return node.step.name === head && rest.length === 0 ? node.step : undefined;
+    case "branch":
+      for (const arm of node.arms) {
+        if (arm.name === head) return resolveStepAtStaticPath(arm.body.nodes, rest);
+      }
+      return undefined;
+    case "loop":
+    case "foreach":
+      return node.name === head ? resolveStepAtStaticPath(node.body.nodes, rest) : undefined;
+    case "parallel":
+      if (node.name !== head || rest.length !== 1) return undefined;
+      return node.arms.find((arm) => arm.name === rest[0]);
+    case "workflow":
+      return node.name === head ? resolveStepAtStaticPath(node.workflow.nodes, rest) : undefined;
+  }
+}
+
 /**
- * Whether the run reached a terminal state *after* it blocked — i.e. the pending questionnaire is
- * stale. Returns the status that settled it, or `undefined` while the block still stands.
+ * Whether the run reached a terminal state, OR this specific step was abandoned by a drain (spec
+ * §9.5's `step-cancelled`), *after* it blocked — i.e. the pending questionnaire is stale. Returns the
+ * status that settled it, or `undefined` while the block still stands.
  */
 function settledAfter(priorEvents: readonly RunEvent[], pending: QuestionnaireAskedEvent): "cancelled" | "completed" | "crashed" | undefined {
   const blockedAt = priorEvents.lastIndexOf(pending);
@@ -223,16 +258,58 @@ function settledAfter(priorEvents: readonly RunEvent[], pending: QuestionnaireAs
     if (event.type === "run-cancelled") return "cancelled";
     if (event.type === "run-completed") return "completed";
     if (event.type === "run-crashed") return "crashed";
+    if (event.type === "step-cancelled" && event.path === pending.path) return "cancelled";
   }
   return undefined;
 }
 
+/** The single latest `questionnaire-asked` event in the WHOLE log, regardless of path or current state. */
 function lastQuestionnaireAsked(priorEvents: readonly RunEvent[]): QuestionnaireAskedEvent | undefined {
   let pending: QuestionnaireAskedEvent | undefined;
   for (const event of priorEvents) {
     if (event.type === "questionnaire-asked") pending = event;
   }
   return pending;
+}
+
+/** The latest `questionnaire-asked` event recorded at exactly `path`, regardless of current state (settledAfter diagnoses staleness). */
+function findAskedAt(priorEvents: readonly RunEvent[], path: string): QuestionnaireAskedEvent | undefined {
+  let found: QuestionnaireAskedEvent | undefined;
+  for (const event of priorEvents) {
+    if (event.type === "questionnaire-asked" && event.path === path) found = event;
+  }
+  return found;
+}
+
+/**
+ * Every step CURRENTLY blocked (spec §8.6), each resolved to its own latest `questionnaire-asked`
+ * event, in FIFO order (earliest-asked first — the order these events appear in the log; not
+ * completion order, spec §4.2). Empty when nothing is pending. This is what makes "several steps
+ * blocked at once" answerable one at a time: the default target when `resumeWithAnswer` is called
+ * with no explicit `path`, and the source of `pendingBlocks` (every OTHER pending one, left untouched).
+ *
+ * Exported so a host's attended loop (spec §10.2) can show the SAME question it will actually deliver
+ * an answer to — `pendingQuestionnaire`-singular (the last EVER asked, regardless of current state) is
+ * wrong once more than one step can be blocked at once, since it can disagree with which one
+ * `resumeWithAnswer`'s own default (`path` omitted) targets.
+ */
+export function pendingQuestionnaires(priorEvents: readonly RunEvent[]): QuestionnaireAskedEvent[] {
+  const states = deriveStepStates(priorEvents);
+  const latestByKey = new Map<string, { event: QuestionnaireAskedEvent; index: number }>();
+  priorEvents.forEach((event, index) => {
+    if (event.type === "questionnaire-asked") {
+      latestByKey.set(staticKeyOf(parsePath(event.path)), { event, index });
+    }
+  });
+
+  const pending: { event: QuestionnaireAskedEvent; index: number }[] = [];
+  for (const [key, state] of states) {
+    if (state !== "blocked") continue;
+    const entry = latestByKey.get(key);
+    if (entry) pending.push(entry);
+  }
+  pending.sort((a, b) => a.index - b.index);
+  return pending.map((entry) => entry.event);
 }
 
 /** Index of the first top-level node with no recorded completion (its own bare name absent from `stepOutputs`). */
