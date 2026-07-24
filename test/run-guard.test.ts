@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createRunGuard } from "../src/host/run-guard.ts";
 
-describe("run guard (spec §7): at most one running run in-process", () => {
+describe("run guard (spec §7): at most one in_progress run in-process", () => {
   it("blocks a second begin while one run is active, then allows it after end", () => {
     const guard = createRunGuard();
 
@@ -38,17 +38,17 @@ describe("run guard (spec §7): at most one running run in-process", () => {
     expect(guard.active?.runId).toBe("run-1");
   });
 
-  it("a parked run releases the guard, so a subsequent /workflow run is not blocked (spec §7, §10.2)", () => {
+  it("a blocked run releases the guard, so a subsequent /workflow run is not blocked (spec §7, §10.2)", () => {
     const guard = createRunGuard();
 
     // The adapter acquires the guard around execution and releases it in `finally` on ALL outcomes —
-    // including `parked`. Model that: begin, then release (as the adapter does when a run parks).
-    const controller = guard.begin("parked-run");
+    // including `blocked`. Model that: begin, then release (as the adapter does when a run blocks).
+    const controller = guard.begin("blocked-run");
     expect(controller).toBeInstanceOf(AbortController);
-    guard.end("parked-run"); // released on park (parked ≠ running)
+    guard.end("blocked-run"); // released on block (blocked ≠ in_progress)
     expect(guard.active).toBeUndefined();
 
-    // A brand-new run can begin even though "parked-run" is still parked (it does not block).
+    // A brand-new run can begin even though "blocked-run" is still blocked (it does not block).
     expect(guard.begin("new-run")).toBeInstanceOf(AbortController);
     expect(guard.active?.runId).toBe("new-run");
   });

@@ -63,8 +63,8 @@ async function startRun(
   });
   if (!result) return; // guard was busy (race) — already notified
 
-  // Attended flow: if the run parked, render the questionnaire inline and loop until it settles.
-  if (result.status === "parked") {
+  // Attended flow: if the run blocked, render the questionnaire inline and loop until it settles.
+  if (result.status === "blocked") {
     await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, workflowFilePath, startAgent, runId, result.questionnaire);
   } else {
     notifyResult(ctx, workflow.name, result);

@@ -31,17 +31,17 @@ describe("example suite (offline)", () => {
   });
 
   it("survey: an input form gathers structured input, then a later step consumes it", async () => {
-    const parked = await createTestRun(surveyWorkflow);
-    expect(parked.status).toBe("parked");
-    expect(parked.questionKeys()).toEqual(["name", "environment"]);
+    const blocked = await createTestRun(surveyWorkflow);
+    expect(blocked.status).toBe("blocked");
+    expect(blocked.questionKeys()).toEqual(["name", "environment"]);
 
-    const done = await parked.answer({ name: "Ada", environment: "prod" });
+    const done = await blocked.answer({ name: "Ada", environment: "prod" });
     expect(done.status).toBe("completed");
     expect(done.output).toEqual({ message: "Hello Ada, deploying to prod." });
   });
 
   it("planning: a Q&A agent asks before planning, then a function step consumes the plan", async () => {
-    const parked = await createTestRun(planningWorkflow, {
+    const blocked = await createTestRun(planningWorkflow, {
       agents: {
         plan: [
           ask({ questions: [{ key: "backend", header: "Backend", question: "Which cache backend?", kind: "text" }] }),
@@ -50,10 +50,10 @@ describe("example suite (offline)", () => {
       },
     });
 
-    expect(parked.status).toBe("parked");
-    expect(parked.questionKeys()).toEqual(["backend"]);
+    expect(blocked.status).toBe("blocked");
+    expect(blocked.questionKeys()).toEqual(["backend"]);
 
-    const done = await parked.answer({ backend: "Redis" });
+    const done = await blocked.answer({ backend: "Redis" });
     expect(done.status).toBe("completed");
     expect(done.output).toEqual({ message: "Plan ready with 2 steps: Redis cache" });
   });

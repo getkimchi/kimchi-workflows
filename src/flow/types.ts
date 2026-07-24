@@ -55,8 +55,8 @@ export interface AgentPromptArgs<TInput> {
  * an input-schema violation is a deterministic wiring failure and is never retried.
  */
 export interface RetryPolicy {
-  /** Total attempts including the first (default 1 = no retry). */
-  readonly maxAttempts: number;
+  /** Attempts after the first (default 0 = run once, no retry). */
+  readonly maxRetry: number;
   /** Delay between attempts, awaited via `host.sleep` (default 0 = no wait). */
   readonly backoffMs?: number;
 }
@@ -98,16 +98,16 @@ export interface AgentStep extends StepBase {
   readonly buildPrompt: (args: AgentPromptArgs<unknown>) => string;
   /**
    * In-session output-steering budget (spec §9.2): how many corrections to send after the first
-   * reply when the output is invalid, before the step fails. Distinct from `retry.maxAttempts`,
+   * reply when the output is invalid, before the step fails. Distinct from `retry.maxRetry`,
    * which restarts a fresh session on a transport error. Default 2.
    */
   readonly maxOutputRepairs?: number;
   /**
    * Q&A capability (spec §10.1), framework-set. When true, the agent's final message is the union
-   * `{ result: <output> } | { questionnaire: <Questionnaire> }` (the framework owns the questionnaire
-   * schema and auto-injects the asking protocol). A `{questionnaire}` parks the run; the collected
+   * `{ result: <output> } | { questions: <Questionnaire> }` (the framework owns the questionnaire
+   * schema and auto-injects the asking protocol). A `{questions}` blocks the run; the collected
    * answers resume the **same** agent loop (spec §8.4). When false/absent, the reply is the bare
-   * `output` and the step can never park. Enabled via `createAgentStep({ asks: true })`.
+   * `output` and the step can never block. Enabled via `createAgentStep({ asks: true })`.
    */
   readonly asks?: boolean;
   /**
@@ -118,14 +118,14 @@ export interface AgentStep extends StepBase {
 }
 
 /**
- * Input step — form mode (spec §2.4): a first-class, LLM-free step that only collects structured
- * input. It parks with a questionnaire (derived from `outputSchema` or the explicit `questionnaire`
+ * Questionnaire step (spec §2.4): a first-class, LLM-free step that only collects structured
+ * input. It blocks with a questionnaire (derived from `outputSchema` or the explicit `questionnaire`
  * override); on answers, they are reassembled into the target shape and validated against
- * `outputSchema` to become the step's output. Invalid answers → re-park. Elicitation — an agent that
+ * `outputSchema` to become the step's output. Invalid answers → re-block. Elicitation — an agent that
  * composes the questions — is an {@link AgentStep} with `asks: true`, not this kind.
  */
-export interface InputStep extends StepBase {
-  readonly kind: "input";
+export interface QuestionnaireStep extends StepBase {
+  readonly kind: "questionnaire";
   /** The annotated TypeBox target — the single source of truth for asking, rendering, and validating. */
   readonly outputSchema: TSchema;
   /** Explicit questionnaire override; when absent it is derived from `outputSchema` at run time. */
@@ -133,7 +133,7 @@ export interface InputStep extends StepBase {
 }
 
 /** A step at rest is one of the step kinds; the engine branches on `kind`. */
-export type StepDefinition = FunctionStep | AgentStep | InputStep;
+export type StepDefinition = FunctionStep | AgentStep | QuestionnaireStep;
 
 /** A pure branch predicate over the run context (spec §3.2) — side-effect-free, keeps transitions deterministic. */
 export type BranchCondition = (ctx: RunContext) => boolean;

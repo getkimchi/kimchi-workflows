@@ -1,12 +1,12 @@
 /**
- * In-process single-running-run guard (spec §7). At most one run executes at a time in this
+ * In-process single-active-run guard (spec §7). At most one run executes at a time in this
  * process; `/workflow run` and `/workflow resume` are rejected while one is active. Also holds
  * the active run's `AbortController` so `/workflow cancel` can abort it (spec §8.6).
  *
- * Deliberately based on an in-process handle, not stale store status: a run marked `running` in
- * the store by a process that died is NOT tracked here.
+ * Deliberately based on an in-process handle, not stale store status: a run marked `in_progress`
+ * in the store by a process that died is NOT tracked here.
  *
- * Known limitation: this does not coordinate across processes, so a stale `running` left by a
+ * Known limitation: this does not coordinate across processes, so a stale `in_progress` left by a
  * crashed process elsewhere is not detected (resolved once such a run is resumed/cancelled).
  */
 export interface ActiveRun {

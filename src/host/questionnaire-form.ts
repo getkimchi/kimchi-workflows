@@ -31,7 +31,7 @@ function tuiPicker(ctx: FormContext): Picker {
 /**
  * Render the questionnaire as a sequence of rich overlays and return the structured answers keyed by
  * `question.key`. Returns `undefined` if the user cancels any widget (dismiss ≠ cancel — the caller
- * keeps the run parked).
+ * keeps the run blocked).
  */
 export async function renderRichForm(ctx: FormContext, questionnaire: Questionnaire): Promise<Record<string, unknown> | undefined> {
   const picker = tuiPicker(ctx);

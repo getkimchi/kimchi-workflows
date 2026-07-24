@@ -1,7 +1,7 @@
 export type { CreateAgentStepOptions } from "./create-agent-step.ts";
 export { createAgentStep } from "./create-agent-step.ts";
-export type { CreateInputStepOptions } from "./create-input-step.ts";
-export { createInputStep } from "./create-input-step.ts";
+export type { CreateQuestionnaireStepOptions } from "./create-questionnaire-step.ts";
+export { createQuestionnaireStep } from "./create-questionnaire-step.ts";
 export type { CreateStepOptions } from "./create-step.ts";
 export { createStep } from "./create-step.ts";
 export type {
@@ -36,11 +36,11 @@ export type {
   ForeachNode,
   ForeachSelector,
   FunctionStep,
-  InputStep,
   LoopCondition,
   LoopNode,
   MapFn,
   NestedWorkflowNode,
+  QuestionnaireStep,
   RetryPolicy,
   RunContext,
   StepDefinition,

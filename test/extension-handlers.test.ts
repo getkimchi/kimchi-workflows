@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { resumeWithAnswer, resumeWorkflow } from "../src/engine/resume-workflow.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunResult } from "../src/engine/types.ts";
-import { createInputStep, createStep, createWorkflow } from "../src/flow/index.ts";
+import { createQuestionnaireStep, createStep, createWorkflow } from "../src/flow/index.ts";
 import { handleCancel, handleDelete, handleListRuns, handleListWorkflows, runGuarded } from "../src/host/commands/index.ts";
 import { createRunGuard } from "../src/host/run-guard.ts";
 import { summarizeRun } from "../src/host/summarize-run.ts";
@@ -76,10 +76,10 @@ describe("handleListRuns", () => {
     const spy = notifySpy();
     const runs: RunSummary[] = [
       { runId: "a1", workflowName: "survey", status: "completed", startedAt: "T0", completedAt: "T1" },
-      { runId: "b2", workflowName: "plan", status: "parked", startedAt: "T2" },
+      { runId: "b2", workflowName: "plan", status: "blocked", startedAt: "T2" },
     ];
     await handleListRuns({ ui: { notify: spy.notify } }, { list: () => Promise.resolve(runs) });
-    expect(spy.notes).toEqual([["a1  survey  completed  started=T0  completed=T1\nb2  plan  parked  started=T2  completed=-", "info"]]);
+    expect(spy.notes).toEqual([["a1  survey  completed  started=T0  completed=T1\nb2  plan  blocked  started=T2  completed=-", "info"]]);
   });
 });
 
@@ -165,12 +165,12 @@ describe("handleListWorkflows", () => {
 
 /**
  * A real in-memory store holding one run, driven to a genuine state through the engine — so these
- * assert the actual `parked`/`completed` semantics rather than a hand-written log.
+ * assert the actual `blocked`/`completed` semantics rather than a hand-written log.
  */
-async function storeWithRun(kind: "parked" | "completed"): Promise<{ store: RunStore; runId: string }> {
-  const form = createInputStep({ name: "ask", output: Type.Object({ name: Type.String() }) });
+async function storeWithRun(kind: "blocked" | "completed"): Promise<{ store: RunStore; runId: string }> {
+  const form = createQuestionnaireStep({ name: "ask", output: Type.Object({ name: Type.String() }) });
   const done = createStep({ name: "done", run: () => ({ ok: true }) });
-  const workflow = kind === "parked" ? createWorkflow({ name: "parks" }).then(form).commit() : createWorkflow({ name: "runs" }).then(done).commit();
+  const workflow = kind === "blocked" ? createWorkflow({ name: "blocks" }).then(form).commit() : createWorkflow({ name: "runs" }).then(done).commit();
 
   const { host, store } = createTestHost();
   const result = await runWorkflow(workflow, undefined, host);
@@ -183,7 +183,7 @@ describe("handleCancel", () => {
     const guard = createRunGuard();
     const controller = guard.begin("live");
     const spy = notifySpy();
-    const { store } = await storeWithRun("parked");
+    const { store } = await storeWithRun("blocked");
 
     await handleCancel({ ui: { notify: spy.notify } }, guard, store, undefined);
 
@@ -191,19 +191,19 @@ describe("handleCancel", () => {
     expect(spy.notes[0]?.[0]).toMatch(/cancelling run live at the next step boundary/);
   });
 
-  it("cold-cancels a parked run, which no signal can reach (spec §10.2)", async () => {
-    const { store, runId } = await storeWithRun("parked");
+  it("cold-cancels a blocked run, which no signal can reach (spec §10.2)", async () => {
+    const { store, runId } = await storeWithRun("blocked");
     const spy = notifySpy();
 
-    // No guard entry: a parked run is not executing (spec §7.1), so there is nothing to abort.
+    // No guard entry: a blocked run is not executing (spec §7.1), so there is nothing to abort.
     await handleCancel({ ui: { notify: spy.notify } }, createRunGuard(), store, runId);
 
     expect(summarizeRun(await store.loadEvents(runId))?.status).toBe("cancelled");
-    expect(spy.notes[0]?.[0]).toMatch(/cancelled parked run/);
+    expect(spy.notes[0]?.[0]).toMatch(/cancelled blocked run/);
   });
 
-  it("targets the sole parked run when given no run-id", async () => {
-    const { store, runId } = await storeWithRun("parked");
+  it("targets the sole blocked run when given no run-id", async () => {
+    const { store, runId } = await storeWithRun("blocked");
     const spy = notifySpy();
 
     await handleCancel({ ui: { notify: spy.notify } }, createRunGuard(), store, undefined);
@@ -217,7 +217,7 @@ describe("handleCancel", () => {
 
     await handleCancel({ ui: { notify: spy.notify } }, createRunGuard(), store, runId);
 
-    expect(spy.notes[0]?.[0]).toMatch(/is completed; only an executing or parked run can be cancelled/);
+    expect(spy.notes[0]?.[0]).toMatch(/is completed; only an executing or blocked run can be cancelled/);
     expect(summarizeRun(await store.loadEvents(runId))?.status).toBe("completed"); // untouched
   });
 
@@ -242,19 +242,19 @@ describe("handleDelete", () => {
     expect(spy.notes[0]?.[0]).toMatch(/deleted completed run/);
   });
 
-  it("refuses a parked run and points at cancel first (spec §6.5)", async () => {
-    const { store, runId } = await storeWithRun("parked");
+  it("refuses a blocked run and points at cancel first (spec §6.5)", async () => {
+    const { store, runId } = await storeWithRun("blocked");
     const spy = notifySpy();
 
     await handleDelete({ ui: { notify: spy.notify } }, store, runId);
 
     expect(spy.notes[0]?.[1]).toBe("warning");
-    expect(spy.notes[0]?.[0]).toMatch(/is parked; cancel it first/);
+    expect(spy.notes[0]?.[0]).toMatch(/is blocked; cancel it first/);
     expect((await store.loadEvents(runId)).length).toBeGreaterThan(0); // still there
   });
 
-  it("cancel then delete is the sanctioned way to remove a parked run", async () => {
-    const { store, runId } = await storeWithRun("parked");
+  it("cancel then delete is the sanctioned way to remove a blocked run", async () => {
+    const { store, runId } = await storeWithRun("blocked");
     const spy = notifySpy();
 
     await handleCancel({ ui: { notify: spy.notify } }, createRunGuard(), store, runId);
@@ -275,54 +275,54 @@ describe("handleDelete", () => {
 
 describe("a cancelled run cannot be resurrected by a late answer (adversarial regression)", () => {
   it("refuses answers delivered after the run was cancelled", async () => {
-    const form = createInputStep({ name: "ask", output: Type.Object({ name: Type.String() }) });
-    const workflow = createWorkflow({ name: "parks" }).then(form).commit();
+    const form = createQuestionnaireStep({ name: "ask", output: Type.Object({ name: Type.String() }) });
+    const workflow = createWorkflow({ name: "blocks" }).then(form).commit();
     const { host, store } = createTestHost();
 
-    const parked = await runWorkflow(workflow, undefined, host);
-    await handleCancel({ ui: { notify: notifySpy().notify } }, createRunGuard(), store, parked.runId);
+    const blocked = await runWorkflow(workflow, undefined, host);
+    await handleCancel({ ui: { notify: notifySpy().notify } }, createRunGuard(), store, blocked.runId);
 
     // An answer captured before the cancel (an open prompt, or another session) must not undo it.
-    await expect(resumeWithAnswer(workflow, await store.loadEvents(parked.runId), { name: "Ada" }, host)).rejects.toThrow(/was cancelled after parking/);
-    expect(summarizeRun(await store.loadEvents(parked.runId))?.status).toBe("cancelled"); // still cancelled
+    await expect(resumeWithAnswer(workflow, await store.loadEvents(blocked.runId), { name: "Ada" }, host)).rejects.toThrow(/was cancelled after blocking/);
+    expect(summarizeRun(await store.loadEvents(blocked.runId))?.status).toBe("cancelled"); // still cancelled
   });
 
-  it("still accepts answers while the park stands", async () => {
-    const form = createInputStep({ name: "ask", output: Type.Object({ name: Type.String() }) });
-    const workflow = createWorkflow({ name: "parks" }).then(form).commit();
+  it("still accepts answers while the block stands", async () => {
+    const form = createQuestionnaireStep({ name: "ask", output: Type.Object({ name: Type.String() }) });
+    const workflow = createWorkflow({ name: "blocks" }).then(form).commit();
     const { host, store } = createTestHost();
 
-    const parked = await runWorkflow(workflow, undefined, host);
-    const done = await resumeWithAnswer(workflow, await store.loadEvents(parked.runId), { name: "Ada" }, host);
+    const blocked = await runWorkflow(workflow, undefined, host);
+    const done = await resumeWithAnswer(workflow, await store.loadEvents(blocked.runId), { name: "Ada" }, host);
 
     expect(done.status).toBe("completed");
   });
 });
 
 describe("a cancelled run is still resumable — only stale answers are refused (spec §5.2, §8.4)", () => {
-  it("re-runs a cold-cancelled parked run and asks again", async () => {
-    const form = createInputStep({ name: "ask", output: Type.Object({ name: Type.String() }) });
+  it("re-runs a cold-cancelled blocked run and asks again", async () => {
+    const form = createQuestionnaireStep({ name: "ask", output: Type.Object({ name: Type.String() }) });
     const greet = createStep({
       name: "greet",
       input: Type.Object({ name: Type.String() }),
       output: Type.Object({ message: Type.String() }),
       run: ({ input }) => ({ message: `hi ${input.name}` }),
     });
-    const workflow = createWorkflow({ name: "parks" }).then(form).then(greet).commit();
+    const workflow = createWorkflow({ name: "blocks" }).then(form).then(greet).commit();
     const { host, store } = createTestHost();
 
-    const parked = await runWorkflow(workflow, undefined, host);
-    await handleCancel({ ui: { notify: notifySpy().notify } }, createRunGuard(), store, parked.runId);
-    expect(summarizeRun(await store.loadEvents(parked.runId))?.status).toBe("cancelled");
+    const blocked = await runWorkflow(workflow, undefined, host);
+    await handleCancel({ ui: { notify: notifySpy().notify } }, createRunGuard(), store, blocked.runId);
+    expect(summarizeRun(await store.loadEvents(blocked.runId))?.status).toBe("cancelled");
 
     // §5.2: cancelled is recoverable. The re-run path (§8.2) re-runs the interrupted step, so the
-    // question is asked afresh rather than the stale park being silently continued.
-    const revived = await resumeWorkflow(workflow, await store.loadEvents(parked.runId), host);
-    expect(revived.status).toBe("parked");
+    // question is asked afresh rather than the stale block being silently continued.
+    const revived = await resumeWorkflow(workflow, await store.loadEvents(blocked.runId), host);
+    expect(revived.status).toBe("blocked");
     expect(revived.stepName).toBe("ask");
 
-    // ...and answering THAT park works, because it is now the run's latest state.
-    const done = await resumeWithAnswer(workflow, await store.loadEvents(parked.runId), { name: "Ada" }, host);
+    // ...and answering THAT block works, because it is now the run's latest state.
+    const done = await resumeWithAnswer(workflow, await store.loadEvents(blocked.runId), { name: "Ada" }, host);
     expect(done.status).toBe("completed");
     expect(done.output).toEqual({ message: "hi Ada" });
   });

@@ -1,10 +1,10 @@
 /**
  * The workflow test driver: run a committed workflow against a fake host and walk it through its
- * states — parked, answered, re-parked, retried, cancelled — without touching PI, the filesystem, or
+ * states — blocked, answered, re-blocked, retried, cancelled — without touching PI, the filesystem, or
  * the network.
  *
  * The engine is deterministic, so a workflow's behaviour is fully pinned by three inputs: the initial
- * input, the answers delivered to input/Q&A steps, and what agent steps say. The first two are
+ * input, the answers delivered to questionnaire/Q&A steps, and what agent steps say. The first two are
  * arguments here; the third is scripted per step by {@link createAgentDouble}.
  *
  * Each transition returns a NEW {@link TestRun} rather than mutating: `start()`, `answer()` and
@@ -40,8 +40,8 @@ export interface TestRunOptions {
    * `step-started` is emitted, which the retry loop observes before the step body executes — so the
    * named step does NOT run. Fires once, so a following `resume()` proceeds normally.
    *
-   * Only function and agent steps can be cancelled this way. An input step is never cancelled by
-   * this or anything else: unanswered or invalid answers re-park it (spec §2.4).
+   * Only function and agent steps can be cancelled this way. A questionnaire step is never cancelled
+   * by this or anything else: unanswered or invalid answers re-block it (spec §2.4).
    */
   cancelAt?: string;
 }
@@ -58,11 +58,11 @@ export interface TestRun {
   readonly status: RunResult["status"];
   readonly output: unknown;
   readonly error: string | undefined;
-  /** The pending questionnaire when `parked`. */
+  /** The pending questionnaire when `blocked`. */
   readonly questionnaire: Questionnaire | undefined;
-  /** The step that parked, or the step a crash/cancel occurred at. */
+  /** The step that blocked, or the step a crash/cancel occurred at. */
   readonly stepName: string | undefined;
-  /** Why a form input step RE-parked: the schema violation in the delivered answers (spec §2.4). */
+  /** Why a questionnaire step RE-blocked: the schema violation in the delivered answers (spec §2.4). */
   readonly violation: string | undefined;
   /** The full event log so far, across every transition of this run. */
   readonly events: readonly RunEvent[];
@@ -79,8 +79,8 @@ export interface TestRun {
   agent(stepName: string): AgentRecord;
 
   /**
-   * Deliver structured answers to the parked step (spec §8.4). Complete + valid answers let the run
-   * continue; incomplete or invalid ones re-park with `violation` set — an input step is never
+   * Deliver structured answers to the blocked step (spec §8.4). Complete + valid answers let the run
+   * continue; incomplete or invalid ones re-block with `violation` set — a questionnaire step is never
    * cancelled by a bad answer, exactly as leaving a mandatory question blank leaves it pending.
    */
   answer(answers: Record<string, unknown>): Promise<TestRun>;
@@ -92,14 +92,14 @@ export interface TestRun {
 }
 
 /**
- * Start `workflow` under a fresh fake host and resolve at its first terminal-or-parked state.
+ * Start `workflow` under a fresh fake host and resolve at its first terminal-or-blocked state.
  *
  * One call per run, deliberately: the agent queues, the event store, and the fixed run id are all
  * per-run state, so a reusable factory would let a second run silently inherit the first's consumed
  * replies and duplicate its run id. Continue a run through {@link TestRun.answer}/{@link TestRun.resume}.
  *
  * Agent scripts are validated against the workflow's steps up front, so a script naming an unknown
- * step — or asking from a step that cannot park — fails here with a clear message rather than
+ * step — or asking from a step that cannot block — fails here with a clear message rather than
  * surfacing mid-run as an opaque schema violation.
  */
 export async function createTestRun(workflow: WorkflowDefinition, options: TestRunOptions = {}): Promise<TestRun> {
@@ -211,8 +211,8 @@ async function toTestRun(context: RunContextForTest, result: RunResult): Promise
     },
 
     async answer(answers: Record<string, unknown>): Promise<TestRun> {
-      if (result.status !== "parked") {
-        throw new Error(`answer(): the run is ${result.status}, not parked — nothing is asking a question`);
+      if (result.status !== "blocked") {
+        throw new Error(`answer(): the run is ${result.status}, not blocked — nothing is asking a question`);
       }
       const next = await resumeWithAnswer(context.workflow, events, answers, context.host, { signal: context.canceller?.arm() });
       return toTestRun(context, next);
@@ -221,7 +221,7 @@ async function toTestRun(context: RunContextForTest, result: RunResult): Promise
     async resume(): Promise<TestRun> {
       if (result.status !== "crashed" && result.status !== "cancelled") {
         throw new Error(
-          `resume(): only a crashed or cancelled run is re-run node-atomically; this run is ${result.status}${result.status === "parked" ? " — use answer() instead" : ""}`,
+          `resume(): only a crashed or cancelled run is re-run node-atomically; this run is ${result.status}${result.status === "blocked" ? " — use answer() instead" : ""}`,
         );
       }
       const next = await resumeWorkflow(context.workflow, events, context.host);

@@ -6,7 +6,7 @@
  *  - `resumeWorkflow` — for `crashed`/`cancelled` runs: node-atomic re-run (spec §8.2/§8.3). Skip
  *    completed top-level nodes and re-run the first incomplete node wholesale (with per-item resume
  *    for a top-level foreach, spec §3.4).
- *  - `resumeWithAnswer` — for a `parked` run: the §8.4 same-loop path. Reconstruct the parked Q&A
+ *  - `resumeWithAnswer` — for a `blocked` run: the §8.4 same-loop path. Reconstruct the blocked Q&A
  *    step's session from the recorded conversation and replay the answer — continuing the SAME agent
  *    loop, NOT re-running the step from scratch.
  */
@@ -41,10 +41,10 @@ export async function resumeWorkflow(workflow: WorkflowDefinition, priorEvents: 
 }
 
 /**
- * Resume a `parked` run by delivering the user's structured `answers` (spec §8.4). Continues the
- * parked step's SAME loop: an agent step re-batches or emits `{result}`; a form input step
- * reassembles + validates the answers into its output. On another `{questionnaire}` the run re-parks.
- * Supported for a **top-level** parked step.
+ * Resume a `blocked` run by delivering the user's structured `answers` (spec §8.4). Continues the
+ * blocked step's SAME loop: an agent step re-batches or emits `{result}`; a questionnaire step
+ * reassembles + validates the answers into its output. On another `{questions}` the run re-blocks.
+ * Supported for a **top-level** blocked step.
  */
 export async function resumeWithAnswer(
   workflow: WorkflowDefinition,
@@ -58,21 +58,21 @@ export async function resumeWithAnswer(
 
   const pending = lastQuestionnaireAsked(priorEvents);
   if (!pending) {
-    throw new Error("cannot answer: the run is not parked (no pending questionnaire in the log)");
+    throw new Error("cannot answer: the run is not blocked (no pending questionnaire in the log)");
   }
 
-  // The park must still be the run's latest word. A questionnaire in the log is not proof the run is
-  // *currently* parked: it may have been cancelled, or reached a terminal state, after asking — and a
+  // The block must still be the run's latest word. A questionnaire in the log is not proof the run is
+  // *currently* blocked: it may have been cancelled, or reached a terminal state, after asking — and a
   // caller holding a questionnaire captured before that (an open prompt, another session) would
   // otherwise resume a run the user already stopped, silently overwriting the cancellation.
   const settled = settledAfter(priorEvents, pending);
   if (settled) {
-    throw new Error(`cannot answer run ${runId}: it was ${settled} after parking; answering would undo that`);
+    throw new Error(`cannot answer run ${runId}: it was ${settled} after blocking; answering would undo that`);
   }
 
-  const parkedIndex = topLevelStepIndex(workflow, pending.stepName);
-  if (parkedIndex === -1) {
-    const error = `cannot answer run ${runId}: parked step "${pending.stepName}" is not a top-level step (nested Q&A resume is out of scope)`;
+  const blockedIndex = topLevelStepIndex(workflow, pending.stepName);
+  if (blockedIndex === -1) {
+    const error = `cannot answer run ${runId}: blocked step "${pending.stepName}" is not a top-level step (nested Q&A resume is out of scope)`;
     await host.emit({ type: "run-crashed", runId, stepName: pending.stepName, error, at: iso(host) });
     return { runId, status: "crashed", error, stepName: pending.stepName };
   }
@@ -81,8 +81,8 @@ export async function resumeWithAnswer(
   const drift = await checkDrift(workflow, completedByName, runId, host);
   if (drift) return drift;
 
-  // Seed the prefix before the parked step; the parked step continues via the answer hint (not re-run).
-  const { stepOutputs, previousOutput } = seedPrefix(workflow, completedByName, parkedIndex, initialInput);
+  // Seed the prefix before the blocked step; the blocked step continues via the answer hint (not re-run).
+  const { stepOutputs, previousOutput } = seedPrefix(workflow, completedByName, blockedIndex, initialInput);
 
   await host.emit({ type: "answers-provided", runId, stepName: pending.stepName, answers, at: iso(host) });
 
@@ -94,7 +94,7 @@ export async function resumeWithAnswer(
       initialInput,
       stepOutputs,
       previousOutput,
-      startIndex: parkedIndex,
+      startIndex: blockedIndex,
       answerResume: { stepName: pending.stepName, answers, conversation: pending.conversation },
     },
     options.signal,
@@ -158,12 +158,12 @@ function seedPrefix(
 }
 
 /**
- * Whether the run reached a terminal state *after* it parked — i.e. the pending questionnaire is
- * stale. Returns the status that settled it, or `undefined` while the park still stands.
+ * Whether the run reached a terminal state *after* it blocked — i.e. the pending questionnaire is
+ * stale. Returns the status that settled it, or `undefined` while the block still stands.
  */
 function settledAfter(priorEvents: readonly RunEvent[], pending: QuestionnaireAskedEvent): "cancelled" | "completed" | "crashed" | undefined {
-  const parkedAt = priorEvents.lastIndexOf(pending);
-  for (const event of priorEvents.slice(parkedAt + 1)) {
+  const blockedAt = priorEvents.lastIndexOf(pending);
+  for (const event of priorEvents.slice(blockedAt + 1)) {
     if (event.type === "run-cancelled") return "cancelled";
     if (event.type === "run-completed") return "completed";
     if (event.type === "run-crashed") return "crashed";

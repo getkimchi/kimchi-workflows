@@ -3,11 +3,11 @@
  * host — no PI, no filesystem, no network.
  *
  * ```ts
- * const parked = await createTestRun(planningWorkflow, {
+ * const blocked = await createTestRun(planningWorkflow, {
  *   agents: { plan: [ask({ questions: [...] }), reply({ steps: [...], summary: "..." })] },
  * });
  *
- * const done = await parked.answer({ backend: "Redis" });
+ * const done = await blocked.answer({ backend: "Redis" });
  * ```
  */
 

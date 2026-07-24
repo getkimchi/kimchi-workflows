@@ -21,16 +21,16 @@ export type StepOutcome =
   | { kind: "ok"; output: unknown }
   | { kind: "crashed"; error: string }
   | { kind: "cancelled" }
-  // A step asked a `questionnaire` batch (spec §10): the run parks. `conversation` resumes the same loop.
-  // `violation` is set only when a form input step re-parks because the delivered answers were invalid.
-  | { kind: "parked"; questionnaire: Questionnaire; conversation: readonly unknown[]; violation?: string };
+  // A step asked a `questions` batch (spec §10): the run blocks. `conversation` resumes the same loop.
+  // `violation` is set only when a questionnaire step re-blocks because the delivered answers were invalid.
+  | { kind: "blocked"; questionnaire: Questionnaire; conversation: readonly unknown[]; violation?: string };
 
 /** Outcome of executing a node or a node sequence. `ok` carries the value handed to the next node. */
 export type ExecOutcome =
   | { kind: "ok"; output: unknown }
   | { kind: "crashed"; error: string; stepName?: string }
   | { kind: "cancelled"; stepName?: string }
-  | { kind: "parked"; stepName: string; questionnaire: Questionnaire; conversation: readonly unknown[]; violation?: string };
+  | { kind: "blocked"; stepName: string; questionnaire: Questionnaire; conversation: readonly unknown[]; violation?: string };
 
 export function iso(host: HostPort): string {
   return host.now().toISOString();

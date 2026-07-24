@@ -5,7 +5,7 @@
  * otherwise fall back to native dialogs (which also work over RPC). The rich module is imported lazily
  * so RPC/offline never value-imports the terminal-only TUI widgets. Both paths return the same
  * structured answers object keyed by `question.key`, or `undefined` when the user dismisses (dismiss ≠
- * cancel — the caller keeps the run parked).
+ * cancel — the caller keeps the run blocked).
  */
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { Questionnaire } from "../flow/questionnaire.ts";

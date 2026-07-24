@@ -269,7 +269,7 @@ partial.violation;  // "<root>: must have required properties environment"
 
 A first ask has no `violation` (nothing was rejected yet), so `violation !== undefined` is precisely "asked again, and here's what was wrong".
 
-Each transition returns a **new** run handle, so earlier states stay inspectable: `status`, `output`, `error`, `questions`, `violation`, `events`, `eventsOf(type)`, `stepOutput(name)`, `stepState(path)`, `agent(step)`, `sleepCalls`. Pass `cancelAt: "step"` to cancel the run just before a step executes, then `resume()` to check it picks up from the last checkpoint.
+Each transition returns a **new** run handle, so earlier states stay inspectable: `status`, `output`, `error`, `questionnaire`, `violation`, `events`, `eventsOf(type)`, `stepOutput(name)`, `stepState(path)`, `agent(step)`, `sleepCalls`. Pass `cancelAt: "step"` to cancel the run just before a step executes, then `resume()` to check it picks up from the last checkpoint.
 
 Recording and replaying real model responses as fixtures is deliberately out of scope — hand-scripted replies plus the live integration suite cover that ground.
 

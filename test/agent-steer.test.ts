@@ -10,7 +10,7 @@ import { scriptedAgent } from "./scripted-agent.ts";
 const outputSchema = Type.Object({ summary: Type.String(), keywords: Type.Array(Type.String()) });
 const valid = '{"summary":"ok","keywords":["k"]}';
 
-function agentStepWith(overrides: { maxOutputRepairs?: number; retry?: { maxAttempts: number } } = {}) {
+function agentStepWith(overrides: { maxOutputRepairs?: number; retry?: { maxRetry: number } } = {}) {
   return createAgentStep({ name: "summarize", output: outputSchema, prompt: () => "Summarize.", ...overrides });
 }
 
@@ -90,7 +90,7 @@ describe("output steering (Phase 4b, spec §9.2)", () => {
 
   it("keeps steering (in-session) and transport-retry (fresh session) as independent budgets", async () => {
     // Session 1: throws (transport) -> outer retry. Session 2: invalid then valid -> one steer.
-    const step = agentStepWith({ maxOutputRepairs: 2, retry: { maxAttempts: 2 } });
+    const step = agentStepWith({ maxOutputRepairs: 2, retry: { maxRetry: 1 } }); // 1 retry after the first = 2 total attempts
     const workflow = createWorkflow({ name: "steer-and-retry" }).then(step).commit();
     const agent = scriptedAgent([[new Error("blip")], ['{"summary":"x"}', valid]]);
     const { host, store } = createTestHost({ startAgent: agent.startAgent });

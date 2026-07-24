@@ -49,9 +49,9 @@ export type RunEvent =
   // A cooperative cancel (spec §5, §8.6): applied side effects are NOT rolled back; the run is
   // recoverable via resume. `stepName` is the step the run was cancelled at, if one was executing.
   | { type: "run-cancelled"; runId: string; stepName?: string; at: string }
-  // A Q&A suspension (spec §8.4/§10): a step asked a `questionnaire` BATCH → the run is `parked`.
-  // `conversation` is the opaque agent history needed to resume the SAME loop (empty for form input).
-  // `violation` is set only on a RE-park of a form input step: why the delivered answers were rejected
+  // A Q&A suspension (spec §8.4/§10): a step asked a `questions` BATCH → the run is `blocked`.
+  // `conversation` is the opaque agent history needed to resume the SAME loop (empty for a questionnaire step).
+  // `violation` is set only on a RE-block of a questionnaire step: why the delivered answers were rejected
   // (absent on a first ask, and on an agent's ask — which is an intentional question, not a rejection).
   | { type: "questionnaire-asked"; runId: string; stepName: string; questionnaire: Questionnaire; conversation: readonly ConversationMessage[]; violation?: string; at: string }
   // The user's structured answers (question `key` → value); resume delivers them back (spec §8.4).
@@ -62,7 +62,7 @@ export type ConversationMessage = unknown;
 
 /**
  * What an agent step needs from the host to run (spec §2.2). Model is `provider/modelId`; omit for
- * the session default. `history` seeds a resumed session with the parked step's prior messages so it
+ * the session default. `history` seeds a resumed session with the blocked step's prior messages so it
  * continues the same loop (spec §8.4).
  */
 export interface AgentRequest {
@@ -91,7 +91,7 @@ export interface AgentTurn {
 export interface AgentSession {
   /** Send `message`, run the agent loop to `agent_end`, and resolve with the final assistant text + usage. */
   sendAndAwaitEnd(message: string): Promise<AgentTurn>;
-  /** The full conversation after the last turn — captured when a Q&A step parks, to resume it (spec §8.4). */
+  /** The full conversation after the last turn — captured when a Q&A step blocks, to resume it (spec §8.4). */
   getConversation(): readonly ConversationMessage[];
   /** Release any listeners/resources for this session. Called by the engine in a `finally`. */
   dispose(): void;
@@ -127,16 +127,16 @@ export interface RunOptions {
 
 /**
  * Outcome of a single run/resume call (spec §5.1). Only `completed` is terminal; `crashed`,
- * `cancelled`, and `parked` are resumable. `parked` carries the pending `questionnaire` + `stepName`.
+ * `cancelled`, and `blocked` are resumable. `blocked` carries the pending `questionnaire` + `stepName`.
  */
 export interface RunResult {
   readonly runId: string;
-  readonly status: "completed" | "crashed" | "cancelled" | "parked";
+  readonly status: "completed" | "crashed" | "cancelled" | "blocked";
   readonly output?: unknown;
   readonly error?: string;
-  /** Present when `parked`: the questionnaire batch the step asked, and the step that asked it. */
+  /** Present when `blocked`: the questionnaire batch the step asked, and the step that asked it. */
   readonly questionnaire?: Questionnaire;
   readonly stepName?: string;
-  /** Present when a form input step RE-parked: why the delivered answers were rejected (spec §2.4). */
+  /** Present when a questionnaire step RE-blocked: why the delivered answers were rejected (spec §2.4). */
   readonly violation?: string;
 }

@@ -7,7 +7,7 @@
  * Zero imports from PI, `node:fs`, or any network lib — see src/engine/types.ts.
  */
 import { answersToOutput, questionnaireFromSchema, validateAnswers } from "../flow/questionnaire.ts";
-import type { BranchNode, ForeachNode, InputStep, LoopNode, NestedWorkflowNode, StepDefinition, WorkflowDefinition, WorkflowNode } from "../flow/types.ts";
+import type { BranchNode, ForeachNode, LoopNode, NestedWorkflowNode, QuestionnaireStep, StepDefinition, WorkflowDefinition, WorkflowNode } from "../flow/types.ts";
 import { nodeName } from "../flow/types.ts";
 import { describeSchemaViolations } from "../flow/validation.ts";
 import { createRunContext, type ExecOutcome, iso, type RunState, type StepOutcome } from "./context.ts";
@@ -24,7 +24,7 @@ export interface ForeachResume {
 }
 
 /**
- * Answer-resume hint for a parked top-level Q&A step (spec §8.4): reconstruct the step's session from
+ * Answer-resume hint for a blocked top-level Q&A step (spec §8.4): reconstruct the step's session from
  * `conversation` and replay `answer` — continuing the SAME agent loop rather than re-running the step.
  */
 export interface AnswerResume {
@@ -46,7 +46,7 @@ export interface ExecutionCursor {
   readonly startIndex: number;
   /** Per-item resume for the top-level foreach at `startIndex`, if that node is an interrupted foreach. */
   readonly foreachResume?: ForeachResume;
-  /** Answer-resume for the top-level Q&A step at `startIndex`, if that step is parked (spec §8.4). */
+  /** Answer-resume for the top-level Q&A step at `startIndex`, if that step is blocked (spec §8.4). */
   readonly answerResume?: AnswerResume;
 }
 
@@ -74,7 +74,7 @@ export async function execute(workflow: WorkflowDefinition, host: HostPort, curs
     await host.emit({ type: "run-crashed", runId: state.runId, stepName: outcome.stepName, error: outcome.error, at: iso(host) });
     return { runId: state.runId, status: "crashed", error: outcome.error };
   }
-  if (outcome.kind === "parked") {
+  if (outcome.kind === "blocked") {
     await host.emit({
       type: "questionnaire-asked",
       runId: state.runId,
@@ -84,7 +84,7 @@ export async function execute(workflow: WorkflowDefinition, host: HostPort, curs
       violation: outcome.violation,
       at: iso(host),
     });
-    return { runId: state.runId, status: "parked", stepName: outcome.stepName, questionnaire: outcome.questionnaire, violation: outcome.violation };
+    return { runId: state.runId, status: "blocked", stepName: outcome.stepName, questionnaire: outcome.questionnaire, violation: outcome.violation };
   }
   await host.emit({ type: "run-cancelled", runId: state.runId, stepName: outcome.stepName, at: iso(host) });
   return { runId: state.runId, status: "cancelled" };
@@ -161,24 +161,24 @@ async function runStepNode(
   signal: AbortSignal,
   answerResume?: AnswerResume,
 ): Promise<ExecOutcome> {
-  // Answer continuation (spec §8.4): resume a parked step with the user's structured answers — no
+  // Answer continuation (spec §8.4): resume a blocked step with the user's structured answers — no
   // input re-validation and no new `step-started`. Branch on step kind:
   //  - agent → continue the SAME agent loop (the prompt builder is NOT re-invoked);
-  //  - input (form) → reassemble the answers into `output` and validate (no `startAgent`).
+  //  - questionnaire (form) → reassemble the answers into `output` and validate (no `startAgent`).
   if (answerResume?.stepName === step.name) {
     if (step.kind === "agent") {
       const outcome = await runAgentStep(step, undefined, host, state, signal, { kind: "answer", answers: answerResume.answers, conversation: answerResume.conversation });
       return finishStep(step, index, host, state, outcome);
     }
-    if (step.kind === "input") {
-      return finishStep(step, index, host, state, answerInputStep(step, answerResume.answers));
+    if (step.kind === "questionnaire") {
+      return finishStep(step, index, host, state, answerQuestionnaireStep(step, answerResume.answers));
     }
   }
 
-  // Input step, form mode (spec §2.4): does no other work — park immediately with its questionnaire batch.
-  if (step.kind === "input") {
+  // Questionnaire step, form mode (spec §2.4): does no other work — block immediately with its batch.
+  if (step.kind === "questionnaire") {
     await host.emit({ type: "step-started", runId: state.runId, stepIndex: index, stepName: step.name, input: undefined, at: iso(host) });
-    return { kind: "parked", stepName: step.name, questionnaire: inputQuestionnaire(step), conversation: [] };
+    return { kind: "blocked", stepName: step.name, questionnaire: questionnaireFor(step), conversation: [] };
   }
 
   // Linear hand-off (spec §3.6): a step with an input schema receives the previous node's output;
@@ -199,19 +199,19 @@ async function runStepNode(
   return finishStep(step, index, host, state, outcome);
 }
 
-/** The questionnaire an input (form) step parks with: the explicit override, or one derived from its target. */
-function inputQuestionnaire(step: InputStep) {
+/** The questionnaire a questionnaire step blocks with: the explicit override, or one derived from its target. */
+function questionnaireFor(step: QuestionnaireStep) {
   return step.questionnaire ?? questionnaireFromSchema(step.outputSchema);
 }
 
 /**
- * Apply answers to a parked input (form) step (spec §2.4): reassemble the flat answers into the
- * target shape and validate. Valid → that becomes the step output. Invalid → re-park with the batch.
+ * Apply answers to a blocked questionnaire step (spec §2.4): reassemble the flat answers into the
+ * target shape and validate. Valid → that becomes the step output. Invalid → re-block with the batch.
  */
-function answerInputStep(step: InputStep, answers: Record<string, unknown>): StepOutcome {
+function answerQuestionnaireStep(step: QuestionnaireStep, answers: Record<string, unknown>): StepOutcome {
   const output = answersToOutput(step.outputSchema, answers);
   const check = validateAnswers(step.outputSchema, output);
-  return check.ok ? { kind: "ok", output } : { kind: "parked", questionnaire: inputQuestionnaire(step), conversation: [], violation: check.violation };
+  return check.ok ? { kind: "ok", output } : { kind: "blocked", questionnaire: questionnaireFor(step), conversation: [], violation: check.violation };
 }
 
 /** Turn a step's `StepOutcome` into an `ExecOutcome`: emit `step-completed` on success; attach identity otherwise. */
@@ -220,8 +220,8 @@ async function finishStep(step: StepDefinition, index: number, host: HostPort, s
     case "ok":
       await host.emit({ type: "step-completed", runId: state.runId, stepIndex: index, stepName: step.name, output: outcome.output, at: iso(host) });
       return { kind: "ok", output: outcome.output };
-    case "parked":
-      return { kind: "parked", stepName: step.name, questionnaire: outcome.questionnaire, conversation: outcome.conversation, violation: outcome.violation };
+    case "blocked":
+      return { kind: "blocked", stepName: step.name, questionnaire: outcome.questionnaire, conversation: outcome.conversation, violation: outcome.violation };
     case "crashed":
       return { kind: "crashed", error: outcome.error, stepName: step.name };
     case "cancelled":

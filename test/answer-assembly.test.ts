@@ -248,7 +248,7 @@ describe("collectViaDialogs (native fallback, spec §10.2)", () => {
     expect(await collectViaDialogs(ui, q)).toEqual({ name: "Ada", note: "no" });
   });
 
-  it("returns undefined when the user dismisses (dismiss ≠ cancel → stay parked)", async () => {
+  it("returns undefined when the user dismisses (dismiss ≠ cancel → stay blocked)", async () => {
     const ui = fakeDialogs({ select: [undefined] });
     expect(await collectViaDialogs(ui, single)).toBeUndefined();
   });

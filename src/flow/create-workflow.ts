@@ -171,11 +171,11 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
  * uniqueness lets node-atomic resume identify a completed node from the log unambiguously.
  */
 /** The three things `.then()` accepts — anything else is not a step (spec §2). */
-const STEP_KINDS = new Set(["function", "agent", "input"]);
+const STEP_KINDS = new Set(["function", "agent", "questionnaire"]);
 
 /**
  * Reject nodes that are not real steps, so `commit()` fails at authoring time rather than at run
- * time. `.then()` takes a `StepDefinition` from `createStep`/`createAgentStep`/`createInputStep`;
+ * time. `.then()` takes a `StepDefinition` from `createStep`/`createAgentStep`/`createQuestionnaireStep`;
  * passing anything else — a bare function, a plain object, the result of a hallucinated builder API —
  * used to commit successfully and only fail once the engine tried to execute it.
  */
@@ -185,7 +185,7 @@ function assertWellFormed(workflowName: string, nodes: readonly WorkflowNode[]):
     const step: unknown = node.step;
     const kind = (step as { kind?: unknown } | null)?.kind;
     if (typeof step !== "object" || step === null || typeof kind !== "string" || !STEP_KINDS.has(kind)) {
-      throw new Error(`workflow "${workflowName}": .then() expects a step from createStep/createAgentStep/createInputStep, but received ${describeValue(step)}`);
+      throw new Error(`workflow "${workflowName}": .then() expects a step from createStep/createAgentStep/createQuestionnaireStep, but received ${describeValue(step)}`);
     }
     if (typeof (step as { name?: unknown }).name !== "string" || (step as { name: string }).name.length === 0) {
       throw new Error(`workflow "${workflowName}": a ${kind} step is missing its required "name"`);

@@ -60,19 +60,19 @@ describe("/workflow create meta-workflow", () => {
       },
     });
 
-    expect(brief.status).toBe("parked");
+    expect(brief.status).toBe("blocked");
     expect(brief.stepName).toBe("brief");
     expect(brief.questionKeys()).toEqual(["goal", "fileName"]);
 
     // 2. The design agent clarifies, then proposes the plan for approval — both inside ONE step,
-    //    so every park stays top-level and therefore resumable.
+    //    so every block stays top-level and therefore resumable.
     const clarifying = await brief.answer({ goal: "greet the user", fileName: "greeter.workflow.ts" });
-    expect(clarifying.status).toBe("parked");
+    expect(clarifying.status).toBe("blocked");
     expect(clarifying.stepName).toBe("design");
     expect(clarifying.questionKeys()).toEqual(["detail"]);
 
     const approving = await clarifying.answer({ detail: "the world" });
-    expect(approving.status).toBe("parked");
+    expect(approving.status).toBe("blocked");
     expect(approving.questionKeys()).toEqual(["approve", "feedback"]);
 
     // 3. Approval releases the result; generate → check → write follow with no further questions.

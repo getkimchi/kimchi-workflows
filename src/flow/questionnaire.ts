@@ -4,7 +4,7 @@
  * The framework owns the "how to ask" contract: an annotated TypeBox target schema is the single
  * source of truth for asking, rendering, and validating structured user input.
  *
- * - {@link QuestionnaireSchema} is the canonical ask/park payload (a BATCH of questions).
+ * - {@link QuestionnaireSchema} is the canonical ask/block payload (a BATCH of questions).
  * - {@link questionnaireFromSchema} derives that batch from an annotated target `Type.Object`.
  * - {@link buildAskingProtocol} produces the prompt text injected into an agent so authors never
  *   repeat the protocol.
@@ -48,7 +48,7 @@ export const QuestionSchema = Type.Object({
 });
 export type Question = Static<typeof QuestionSchema>;
 
-/** The canonical ask/park payload: a batch of questions with an optional title (mirrors AskUserQuestion). */
+/** The canonical ask/block payload: a batch of questions with an optional title (mirrors AskUserQuestion). */
 export const QuestionnaireSchema = Type.Object({
   title: Type.Optional(Type.String()),
   questions: Type.Array(QuestionSchema),
@@ -89,14 +89,14 @@ export function questionnaireFromSchema(outputSchema: TSchema): Questionnaire {
 
 /**
  * The protocol text injected into an agent's prompt (pure). Tells the model to ask by replying with
- * ONLY `{ questionnaire: … }` (batching questions) and to finish with ONLY `{ result: … }`, embedding
+ * ONLY `{ questions: … }` (batching questions) and to finish with ONLY `{ result: … }`, embedding
  * both the {@link QuestionnaireSchema} and the target output schema (TypeBox schemas *are* JSON Schema).
  */
 export function buildAskingProtocol(outputSchema: TSchema): string {
   return [
     "When you need information from the user, reply with ONLY a JSON object of the form",
-    '{ "questionnaire": <Questionnaire> } and nothing else. Batch as many questions as you can into a',
-    "single questionnaire rather than asking one at a time. The Questionnaire must match this JSON Schema:",
+    '{ "questions": <Questionnaire> } and nothing else. Batch as many questions as you can into a',
+    "single batch rather than asking one at a time. The Questionnaire must match this JSON Schema:",
     JSON.stringify(QuestionnaireSchema, null, 2),
     "",
     'When you have enough information, reply with ONLY { "result": <result> }, where <result> matches',
@@ -141,7 +141,7 @@ export function formatAnswers(answers: Record<string, unknown>): string {
     "The user answered your questionnaire:",
     ...lines,
     "",
-    'Continue: reply with ONLY { "result": … } if you now have enough, or ONLY { "questionnaire": … } if you need more.',
+    'Continue: reply with ONLY { "result": … } if you now have enough, or ONLY { "questions": … } if you need more.',
   ].join("\n");
 }
 

@@ -4,7 +4,7 @@ import type { RunEvent } from "../engine/types.ts";
 export interface RunSummary {
   readonly runId: string;
   readonly workflowName: string;
-  readonly status: "running" | "completed" | "crashed" | "cancelled" | "parked";
+  readonly status: "in_progress" | "completed" | "crashed" | "cancelled" | "blocked";
   readonly startedAt: string;
   readonly completedAt?: string;
 }

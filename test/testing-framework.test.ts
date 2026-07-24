@@ -1,12 +1,12 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { createAgentStep, createInputStep, createStep, createWorkflow } from "../src/flow/index.ts";
+import { createAgentStep, createQuestionnaireStep, createStep, createWorkflow } from "../src/flow/index.ts";
 import { ask, createTestRun, raw, reply, throws, usage } from "../src/testing/index.ts";
 
 /**
  * The testing framework's own tests. Covers what the framework promises workflow authors:
- * step-keyed agent scripting, queues that survive session boundaries, the input-step answer matrix
- * (spec §2.4), and construction-time rejection of scripts that cannot apply to their step.
+ * step-keyed agent scripting, queues that survive session boundaries, the questionnaire-step answer
+ * matrix (spec §2.4), and construction-time rejection of scripts that cannot apply to their step.
  */
 
 const planSchema = Type.Object({ steps: Type.Array(Type.String()) });
@@ -40,18 +40,18 @@ describe("agent scripting by step name", () => {
     expect(run.agent("second").messages).toEqual(["do b after 1"]);
   });
 
-  it("consumes one step's queue across sessions: a park and its answer-resume take successive entries", async () => {
+  it("consumes one step's queue across sessions: a block and its answer-resume take successive entries", async () => {
     const plan = createAgentStep({ name: "plan", output: planSchema, asks: true, prompt: () => "plan it" });
     const workflow = createWorkflow({ name: "asking" }).then(plan).commit();
 
-    const parked = await createTestRun(workflow, {
+    const blocked = await createTestRun(workflow, {
       agents: { plan: [ask(oneQuestion), reply({ steps: ["cache reads"] })] },
     });
-    expect(parked.status).toBe("parked");
-    expect(parked.questionKeys()).toEqual(["backend"]);
-    expect(parked.violation).toBeUndefined(); // an agent's question is not a rejection
+    expect(blocked.status).toBe("blocked");
+    expect(blocked.questionKeys()).toEqual(["backend"]);
+    expect(blocked.violation).toBeUndefined(); // an agent's question is not a rejection
 
-    const done = await parked.answer({ backend: "Redis" });
+    const done = await blocked.answer({ backend: "Redis" });
     expect(done.status).toBe("completed");
     expect(done.output).toEqual({ steps: ["cache reads"] });
 
@@ -64,7 +64,7 @@ describe("agent scripting by step name", () => {
   });
 
   it("scripts the failure paths: a thrown turn retries, and the next queue entry serves the retry", async () => {
-    const flaky = createAgentStep({ name: "flaky", output: planSchema, retry: { maxAttempts: 2, backoffMs: 25 }, prompt: () => "go" });
+    const flaky = createAgentStep({ name: "flaky", output: planSchema, retry: { maxRetry: 1, backoffMs: 25 }, prompt: () => "go" }); // 1 retry after the first = 2 total attempts
     const workflow = createWorkflow({ name: "agent-retry" }).then(flaky).commit();
 
     const run = await createTestRun(workflow, {
@@ -111,7 +111,7 @@ describe("agent script validation (fails at construction, not mid-run)", () => {
     await expect(createTestRun(plainWorkflow, { agents: { nope: [reply({ steps: [] })] } })).rejects.toThrow(/no agent step with that name/);
   });
 
-  it("rejects ask() against a step that cannot park", async () => {
+  it("rejects ask() against a step that cannot block", async () => {
     await expect(createTestRun(plainWorkflow, { agents: { plain: [ask(oneQuestion)] } })).rejects.toThrow(/requires a step declared asks: true/);
   });
 
@@ -120,8 +120,8 @@ describe("agent script validation (fails at construction, not mid-run)", () => {
   });
 });
 
-describe("input step answer matrix (spec §2.4)", () => {
-  const form = createInputStep({ name: "form", output: formSchema });
+describe("questionnaire step answer matrix (spec §2.4)", () => {
+  const form = createQuestionnaireStep({ name: "form", output: formSchema });
   const greet = createStep({
     name: "greet",
     input: formSchema,
@@ -130,63 +130,63 @@ describe("input step answer matrix (spec §2.4)", () => {
   });
   const workflow = createWorkflow({ name: "form-matrix" }).then(form).then(greet).commit();
 
-  it("parks with the derived questionnaire, and no violation on the first ask", async () => {
-    const parked = await createTestRun(workflow);
-    expect(parked.status).toBe("parked");
-    expect(parked.stepName).toBe("form");
-    expect(parked.questionKeys()).toEqual(["name", "environment"]);
-    expect(parked.violation).toBeUndefined();
+  it("blocks with the derived questionnaire, and no violation on the first ask", async () => {
+    const blocked = await createTestRun(workflow);
+    expect(blocked.status).toBe("blocked");
+    expect(blocked.stepName).toBe("form");
+    expect(blocked.questionKeys()).toEqual(["name", "environment"]);
+    expect(blocked.violation).toBeUndefined();
   });
 
   it("completes on full, valid answers", async () => {
-    const parked = await createTestRun(workflow);
-    const done = await parked.answer({ name: "Ada", environment: "prod" });
+    const blocked = await createTestRun(workflow);
+    const done = await blocked.answer({ name: "Ada", environment: "prod" });
     expect(done.status).toBe("completed");
     expect(done.output).toEqual({ message: "Ada → prod" });
   });
 
-  it("re-parks with a violation naming the unanswered mandatory question", async () => {
-    const parked = await createTestRun(workflow);
-    const again = await parked.answer({ name: "Ada" });
+  it("re-blocks with a violation naming the unanswered mandatory question", async () => {
+    const blocked = await createTestRun(workflow);
+    const again = await blocked.answer({ name: "Ada" });
 
-    expect(again.status).toBe("parked");
+    expect(again.status).toBe("blocked");
     expect(again.violation).toMatch(/environment/);
     expect(again.questionKeys()).toEqual(["name", "environment"]); // the same batch comes back
   });
 
-  it("re-parks with a violation when an answer is outside the declared options", async () => {
-    const parked = await createTestRun(workflow);
-    const again = await parked.answer({ name: "Ada", environment: "staging" });
+  it("re-blocks with a violation when an answer is outside the declared options", async () => {
+    const blocked = await createTestRun(workflow);
+    const again = await blocked.answer({ name: "Ada", environment: "staging" });
 
-    expect(again.status).toBe("parked");
+    expect(again.status).toBe("blocked");
     expect(again.violation).toMatch(/environment/);
   });
 
-  it("re-parks naming every missing question when nothing is answered", async () => {
-    const parked = await createTestRun(workflow);
-    const again = await parked.answer({});
+  it("re-blocks naming every missing question when nothing is answered", async () => {
+    const blocked = await createTestRun(workflow);
+    const again = await blocked.answer({});
 
-    expect(again.status).toBe("parked");
+    expect(again.status).toBe("blocked");
     expect(again.violation).toMatch(/name/);
     expect(again.violation).toMatch(/environment/);
   });
 
-  it("stays answerable after a re-park: a corrected answer completes the run", async () => {
-    const parked = await createTestRun(workflow);
-    const rejected = await parked.answer({ name: "Ada" });
+  it("stays answerable after a re-block: a corrected answer completes the run", async () => {
+    const blocked = await createTestRun(workflow);
+    const rejected = await blocked.answer({ name: "Ada" });
     const done = await rejected.answer({ name: "Ada", environment: "dev" });
 
     expect(done.status).toBe("completed");
     expect(done.output).toEqual({ message: "Ada → dev" });
   });
 
-  it("dismissal is not an engine event: an unanswered park appends nothing and stays answerable", async () => {
-    const parked = await createTestRun(workflow);
+  it("dismissal is not an engine event: an unanswered block appends nothing and stays answerable", async () => {
+    const blocked = await createTestRun(workflow);
     // Dismissing the form (spec §10.2) never reaches the engine — the host simply does not resume.
-    expect(parked.eventsOf("answers-provided")).toHaveLength(0);
-    expect(parked.eventsOf("questionnaire-asked")).toHaveLength(1);
+    expect(blocked.eventsOf("answers-provided")).toHaveLength(0);
+    expect(blocked.eventsOf("questionnaire-asked")).toHaveLength(1);
 
-    const done = await parked.answer({ name: "Ada", environment: "dev" });
+    const done = await blocked.answer({ name: "Ada", environment: "dev" });
     expect(done.status).toBe("completed");
   });
 });
@@ -236,17 +236,17 @@ describe("cancellation (spec §8.6) — function/agent steps only", () => {
 });
 
 describe("transition guards", () => {
-  const form = createInputStep({ name: "form", output: formSchema });
+  const form = createQuestionnaireStep({ name: "form", output: formSchema });
   const workflow = createWorkflow({ name: "guards" }).then(form).commit();
 
-  it("refuses answer() on a run that is not parked", async () => {
-    const parked = await createTestRun(workflow);
-    const done = await parked.answer({ name: "Ada", environment: "dev" });
-    await expect(done.answer({})).rejects.toThrow(/not parked/);
+  it("refuses answer() on a run that is not blocked", async () => {
+    const blocked = await createTestRun(workflow);
+    const done = await blocked.answer({ name: "Ada", environment: "dev" });
+    await expect(done.answer({})).rejects.toThrow(/not blocked/);
   });
 
-  it("refuses resume() on a parked run and points at answer()", async () => {
-    const parked = await createTestRun(workflow);
-    await expect(parked.resume()).rejects.toThrow(/use answer\(\) instead/);
+  it("refuses resume() on a blocked run and points at answer()", async () => {
+    const blocked = await createTestRun(workflow);
+    await expect(blocked.resume()).rejects.toThrow(/use answer\(\) instead/);
   });
 });
