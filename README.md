@@ -13,10 +13,11 @@ Coding agents are good at doing one thing when you ask. They are bad at reliably
 **PI Workflows** makes the process explicit. You describe it — the steps, the loops, the branches, the stopping conditions — as a plain TypeScript file. A harness-side **engine** drives the transitions between steps **deterministically**, so control flow never depends on the model "deciding" to move on. The LLM is called only *inside* a step, to do the actual work. The result is a workflow that:
 
 - **always terminates** — loops have guards; conditions are pure, side-effect-free predicates the engine evaluates itself, so there are no infinite "the agent kept going" runs;
-- **can stop and resume** — every completed step is checkpointed to a durable event log, so a crashed, cancelled, or parked run picks up from the last checkpoint — across sessions and harness restarts;
-- **runs unattended when it can** — a workflow with no questions runs start-to-finish with no human nudges; one that needs input simply *parks* until answered.
+- **can stop and resume** — every completed step is checkpointed to a durable event log, so a crashed, cancelled, or blocked run picks up from the last checkpoint — across sessions and harness restarts;
+- **runs unattended when it can** — a workflow with no questions runs start-to-finish with no human nudges; one that needs input simply *blocks* until answered;
+- **is testable outside the harness** — no PI, no model, no network, no filesystem.
 
-And because the steps are explicit, structure the harness can exploit: step-aware compaction, parallelism, running steps in subagents — and you can even ask the harness to design the workflow for you.
+And because the steps are explicit, structure the harness can exploit: step-aware compaction, fan-out across steps, running steps in subagents — and you can even ask the harness to design the workflow for you.
 
 ---
 
@@ -27,15 +28,15 @@ Three layers, one seam. The core is pure and fully testable **without any LLM or
 ```
 ┌─ Flow layer (src/flow) ────────────────────────────────────────────┐
 │  Authoring API: createWorkflow / createStep / createAgentStep /    │
-│  createInputStep. TypeBox I/O schemas. Builder: .then .branch      │
-│  .dowhile .dountil .foreach .map .workflow → .commit()             │
+│  createQuestionnaireStep. TypeBox I/O schemas. Builder: .then      │
+│  .parallel .branch .dowhile .dountil .foreach .map → .commit()     │
 │  Pure. No host, no network.                                        │
 └────────────────────────────────────────────────────────────────────┘
                               │  WorkflowDefinition
                               ▼
 ┌─ Engine (src/engine) ──────────────────────────────────────────────┐
 │  Deterministic scheduler: step transitions, run-context data       │
-│  flow, checkpointing, unified retry, the run state machine.        │
+│  flow, checkpointing, unified retry, step and run states.          │
 │  Depends only on a narrow HostPort interface → fake-host testable. │
 └────────────────────────────────────────────────────────────────────┘
                               │  HostPort
@@ -47,23 +48,42 @@ Three layers, one seam. The core is pure and fully testable **without any LLM or
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-Because the engine owns every transition — and every branch/loop condition is a pure `(ctx) => boolean` predicate the engine evaluates — a workflow's control flow is fully deterministic. LLM calls happen only inside agent-step bodies. That is what lets the same workflow run under scripted, no-network tests *and* against a real model in PI.
+Because the engine owns every transition — and every branch/loop condition is a pure `(ctx) => boolean` predicate the engine evaluates — a workflow's control flow is deterministic: which steps run, what each receives, and what each construct outputs never depend on scheduling. LLM calls happen only inside agent-step bodies. That is what lets the same workflow run under scripted, no-network tests *and* against a real model in PI.
 
 ---
 
 ## Features
 
 - **Define arbitrary workflows in TypeScript.** A workflow is an ordinary, git-tracked `.ts` file that default-exports a committed `WorkflowDefinition`. Edit it like any code; no separate build step (loaded at run time via `jiti`).
-- **Goal-driven loops.** `.dountil` / `.dowhile` repeat a step (or a whole sub-workflow) until a condition holds — the pattern behind a code-review loop, a "fix until green" loop, or a propose-and-check loop. A `maxIterations` guard means every loop **provably terminates**.
-- **Four step types.** *Function* (a TypeScript function), *Agent* (runs the PI agent tool loop until it stops, returning schema-validated structured output), *Q&A / Input* (gathers structured input from the user, or lets a planning agent ask a clarifying question), and *Nested workflow* (compose a whole workflow as a step).
+- **Goal-driven loops.** `.dountil` / `.dowhile` repeat a step (or a whole sub-workflow) until a condition holds — the pattern behind a code-review loop, a "fix until green" loop, or a propose-and-check loop. A `maxIterations` guard (default 100) means every loop **provably terminates**.
+- **Four step types.** *Function* (a TypeScript function), *Agent* (runs the PI agent tool loop until it stops, returning schema-validated structured output), *Questionnaire* (gathers structured input from the user), and *Nested workflow* (compose a whole workflow as a step).
 - **Deterministic, harness-driven execution.** The engine — not the model — decides transitions. No steering messages or tool calls influence control flow, so runs are reproducible and always reach a terminal state.
-- **Stop and resume.** Runs are recorded as an append-only JSONL event log under `.pi/workflows/`. `parked`, `crashed`, and `cancelled` runs all resume from the last completed step; `foreach` resumes at the next unprocessed item. Resume works across PI sessions and restarts.
-- **Runs outside the harness.** Workflow definitions live in your repo in TypeScript, versioned by git — not baked into the harness. The harness is just the execution engine.
-- **Human-in-the-loop when needed, unattended when not.** A workflow with no Q&A steps runs to completion with zero human interaction. A Q&A-capable step *parks* the run and surfaces its question inline; answering resumes the same agent loop with context intact. Dismissing a question does **not** cancel — the run stays parked until answered or explicitly cancelled.
+- **Fan-out with a ceiling.** `.parallel([a, b])` runs independent steps at once; `.foreach(body, { concurrency })` iterates a list, sequential by default. A workflow-wide `maxConcurrency` (default 4) caps the whole run, so a wide fan-out can't open twenty model sessions at once.
+- **Stop and resume.** Runs are recorded as an append-only JSONL event log under `.pi/workflows/`. `blocked`, `crashed`, and `cancelled` runs all resume from the last checkpoint; `foreach` resumes at the next unprocessed item; a step blocked deep inside a loop resumes back into that iteration with its conversation intact.
+- **Human-in-the-loop when needed, unattended when not.** A workflow with no Q&A steps runs to completion with zero human interaction. A Q&A-capable step *blocks* the run and surfaces its question inline; answering resumes the same agent loop with context intact. Dismissing a question does **not** cancel — the run stays blocked until answered or explicitly cancelled.
+- **Background subagents.** An agent step marked `background: true` runs as a PI subagent — its own context window and tool loop, returning only its structured output.
 - **Typed data flow with TypeBox.** Step input/output schemas are TypeBox; adjacent steps hand off automatically when schemas line up, and `.map()` / the run context (`getStepResult`, `getInitData`) reach non-adjacent outputs. The same schema validates LLM structured output and types your code.
-- **Retry & budgets.** Each step can declare a unified repeat policy (`maxAttempts`, backoff) covering thrown errors, schema-invalid output, and budget overruns, plus per-step **token** and **wall-time** budgets. Exhausted retries → `crashed` (and resumable).
+- **Retry & budgets.** Each step can declare a repeat policy (`maxRetry`, backoff) covering thrown errors and budget overruns, plus per-step **token** and **wall-time** budgets. Schema-invalid model output is repaired in-conversation first (`maxOutputRepairs`, default 2) rather than burning a retry. Exhausted retries → `crashed` (and resumable).
 - **Per-step model selection.** An agent step may pin a `provider/modelId`; resolution is step → workflow default → session default.
-- **Branching & fan-out.** `.branch([[cond, body], …])` runs every matching arm sequentially; `.foreach(body, selector)` iterates a step over a list, checkpointing each item.
+- **Testing as a first-class citizen.** Drive a whole workflow from any test runner with scripted agent replies, supplied answers, and schema-checked step overrides.
+
+---
+
+## States
+
+One vocabulary for steps and runs:
+
+| State | A step | A run |
+| --- | --- | --- |
+| `todo` | not reached yet | — |
+| `in_progress` | executing, including retries | any step executing |
+| `blocked` | waiting on a human answer | nothing executing, something asking |
+| `completed` | finished, output recorded | final node completed |
+| `skipped` | branch arm whose condition was false | — |
+| `cancelled` | interrupted by `/workflow cancel` | cancelled by the user |
+| `crashed` | retries exhausted | a step crashed |
+
+Status is derived from the event log — nothing stores a status that can drift from what actually happened. A run reads `in_progress` whenever any step is executing, even if another step is simultaneously blocked on a question. Only `completed` is terminal; everything else resumes.
 
 ---
 
@@ -88,28 +108,28 @@ Once registered, the commands are available inside PI:
 
 | Command | What it does |
 | --- | --- |
-| `/workflow list` | List the project's workflows: name and description. |
+| `/workflow list` | List the project's workflows: name, file, and description. |
 | `/workflow create` | Interview you, propose a plan, and generate a new workflow file. |
-| `/workflow run <name\|file.ts>` | Start a run, by declared name or by path. Rejected if another run is already active. |
-| `/workflow run list` | List runs: id, workflow name, status, started/completed times. |
-| `/workflow resume <run-id>` | Continue a `parked` / `crashed` / `cancelled` run from its last checkpoint. |
-| `/workflow cancel [run-id]` | Stop a run: abort an executing one at the next step boundary, or cancel a parked one outright. Resumable either way. |
-| `/workflow delete <run-id>` | Permanently remove a **stopped** run and its events. A running or parked run is rejected — cancel it first. |
+| `/workflow run <name\|file.ts>` | Start a run, by declared name or by path. Rejected if a run is already executing in this project. |
+| `/workflow run list` | List runs: id, workflow name, status, current step, pending questions, started/completed times. |
+| `/workflow resume [run-id]` | Continue a `blocked` / `crashed` / `cancelled` run from its last checkpoint. |
+| `/workflow cancel [run-id]` | Stop a run: abort an executing one at the next step boundary, or cancel a blocked one outright. Resumable either way. |
+| `/workflow delete <run-id>` | Permanently remove a **stopped** run and its events. The id is always required; a live run is rejected — cancel it first. |
 
-Only one run executes at a time; parked runs coexist and don't block new work. Dismissing a question doesn't cancel — the run stays parked until you answer it or cancel it explicitly. Since a parked run isn't executing, there's no signal to interrupt: cancelling one records the stop directly in its log, and a bare `/workflow cancel` targets the sole parked run when nothing is executing.
+Only one run executes **per project** at a time, enforced by a lock in the run store rather than by reading a status — so two PI sessions open on the same repo can't both drive steps against the same working tree. If the process holding the lock dies, the next contender reclaims it and records the abandoned run as `crashed`, still resumable. Blocked runs coexist and don't block new work. Dismissing a question doesn't cancel — the run stays blocked until you answer it or cancel it explicitly. Since a blocked run isn't executing, there's no signal to interrupt: cancelling one records the stop directly in its log, and a bare `/workflow cancel` targets the sole blocked run when nothing is executing.
 
-**Where things live.** Authored workflows go in `.pi/workflows/` as `*.workflow.ts`, following PI's convention for project resources (`.pi/extensions/`, `.pi/skills/`, …). Run logs are written to the same directory as `<run-id>.jsonl` plus a `.meta.json` sidecar; discovery filters on the `.workflow.ts` suffix, so the two never collide. `list` is reserved as the first argument to `run`, so no workflow can be reached as `/workflow run list`.
+**Where things live.** Authored workflows go in `.pi/workflows/` as `*.workflow.ts`, following PI's convention for project resources (`.pi/extensions/`, `.pi/skills/`, …). Run logs are written to the same directory as `<run-id>.jsonl` plus a `.meta.json` sidecar, alongside the `run.lock` held by an executing run; discovery filters on the `.workflow.ts` suffix, so they never collide. `list` is reserved as the first argument to `run`, so no workflow can be reached as `/workflow run list`.
 
 > **Listing imports every workflow.** `/workflow list` reads each file's declared name by importing it, which executes project code — the same trust boundary `.pi/extensions/` sits behind. Keep workflow modules free of import-time side effects: define the workflow, export it, do nothing else.
 
 ### `/workflow create`
 
-`create` is itself a workflow (`src/host/builtin/create.workflow.ts`) — same authoring API, same engine, same event log — so it parks, resumes, and is tested like any other. It runs four nodes:
+`create` is itself a workflow (`src/host/builtin/create.workflow.ts`) — same authoring API, same engine, same event log — so it blocks, resumes, and is tested like any other:
 
-1. **`brief`** — an input form: what should this do, and what should the file be called?
+1. **`brief`** — a questionnaire step: what should this do, and what should the file be called?
 2. **`target`** — settle the destination straight away, so a bad or taken name fails in milliseconds rather than after the interview.
-3. **`design`** — a Q&A agent that asks clarifying questions in batches, then presents the plan for **Approve / Revise**, revising until you approve. The whole interview lives in this one step, because a parked step can only be answered while it is top-level — an approval loop built from `.dountil` could never be resumed.
-4. **`until-valid`** — generate the TypeScript, then load it back with the real loader; on failure the agent sees the loader's error and retries (up to 3 times). A workflow that never loads crashes the run rather than writing a broken file.
+3. **`design`** — a Q&A agent asks clarifying questions in batches, then presents the plan for **Approve / Revise** in a `.dountil` loop, revising until you approve.
+4. **`until-valid`** — generate the TypeScript, then load it back with the real loader; on failure the agent sees the loader's error and retries. A workflow that never loads crashes the run rather than writing a broken file.
 5. **`write`** — save it. A bare name lands in `.pi/workflows/`, so the new workflow is immediately visible to `/workflow list` and runnable by name.
 
 It never destroys existing work. A name that already exists fails the run and leaves the file untouched — pick a different name, or delete the old one first. A name resolving outside the project is rejected too. Both are checked at step 2, before a single model call.
@@ -147,11 +167,25 @@ export default createWorkflow({ name: "review-loop" })
   .commit();
 ```
 
+Fan-out, bounded by the workflow ceiling:
+
+```ts
+export default createWorkflow({ name: "audit", maxConcurrency: 4 })
+  .parallel([lint, typecheck, deps])          // independent, run together
+  .foreach(reviewFile, { concurrency: 2 })    // two files at a time
+  .then(report)
+  .commit();
+```
+
 Run it from inside PI:
 
 ```
 /workflow run examples/review-loop.workflow.ts
 ```
+
+Two rules come with fan-out. **Concurrent steps must not touch the same files** — the engine can't know what an agent will edit, so overlapping side effects are yours to avoid; sequence anything that shares state. And **reading a step that's currently in flight throws** rather than returning `undefined`, because a silent `undefined` would make the value depend on who won the race.
+
+Step names need only be unique within their enclosing workflow — the same sub-workflow can be composed twice, and steps are addressed by **node path** (`audit/lint`, `until-valid#3/design`, `batch#7/review`). `ctx.getStepResult("lint")` resolves to the nearest enclosing scope; pass a full path when a bare name would be ambiguous.
 
 ---
 
@@ -163,11 +197,11 @@ Seven runnable examples live in [`examples/`](examples/), each covering one capa
 | --- | --- | --- |
 | `hello` | function | A single function step with a TypeBox output. |
 | `pipeline` | function | Linear hand-off plus a non-adjacent `.map()` reaching an earlier step. |
-| `batch` | function | Sequential `.foreach()` over a list. |
-| `survey` | questionnaire | An input form gathers params up front, then a step consumes them. |
+| `batch` | function | `.foreach()` over a list. |
+| `survey` | questionnaire | A form gathers params up front, then a step consumes them. |
 | `summarize` | agent | A single agent step returning schema-valid structured output. |
 | `review-loop` | agent + loop | Propose → check, `.dountil` it passes (with a max-iteration guard). |
-| `planning` | Q&A agent | A planning agent that may ask a clarifying question (parks), then plans. |
+| `planning` | Q&A agent | A planning agent that may ask a clarifying question (blocks), then plans. |
 
 Function-only and questionnaire examples run with no network; agent examples use a model (the examples default to `kimchi-dev/kimi-k2.7`).
 
@@ -175,7 +209,7 @@ Function-only and questionnaire examples run with no network; agent examples use
 
 ## Documentation
 
-- **[`spec.md`](spec.md)** — the full extension specification: step types, control and data flow, the run lifecycle and state machine, commands, persistence/resume semantics, retry & budgets, and the questions/human-input model. Start here to understand *why* things behave as they do.
+- **[`spec.md`](spec.md)** — the full extension specification: step types, control and data flow, step and run states, commands, persistence/resume semantics, retry & budgets, the questions/human-input model, and the testing contract. Start here to understand *why* things behave as they do.
 - **[`examples/README.md`](examples/README.md)** — how to run each example and which tests cover it.
 - **Source** — the authoring API is in [`src/flow/`](src/flow/), the deterministic engine in [`src/engine/`](src/engine/), and the PI adapter in [`src/host/`](src/host/). Each `index.ts` re-exports that layer's public surface.
 
@@ -183,22 +217,22 @@ Function-only and questionnaire examples run with no network; agent examples use
 
 ## Testing a workflow
 
-Workflows are deterministic apart from what agent steps say, so a workflow's behaviour is pinned by three things: its input, the answers given to questions, and the agents' replies. `src/testing` supplies all three — no PI, no filesystem, no network.
+A workflow's behaviour is pinned by three things: the agents' replies, the answers given to questions, and what its steps do. `src/testing` supplies all three — no PI, no filesystem, no network, and no runner-specific matchers, so it works under Vitest, Jest, or `node:test`.
 
 ```ts
 import { ask, createTestRun, reply } from "pi-workflows/src/testing";
 
-const parked = await createTestRun(planningWorkflow, {
+const blocked = await createTestRun(planningWorkflow, {
   agents: {
     plan: [ask({ questions: [{ key: "backend", header: "Backend", question: "Which cache?", kind: "text" }] }),
            reply({ steps: ["add a redis client"], summary: "Redis cache" })],
   },
 });
 
-expect(parked.status).toBe("parked");
-expect(parked.questionKeys()).toEqual(["backend"]);
+expect(blocked.status).toBe("blocked");
+expect(blocked.questionKeys()).toEqual(["backend"]);
 
-const done = await parked.answer({ backend: "Redis" });
+const done = await blocked.answer({ backend: "Redis" });
 expect(done.status).toBe("completed");
 ```
 
@@ -206,25 +240,38 @@ expect(done.status).toBe("completed");
 
 | builder | the agent… |
 | --- | --- |
-| `ask(questionnaire)` | asks a batch → the run parks (needs `asks: true`) |
+| `ask(questions)` | asks a batch → the run blocks (needs `asks: true`) |
 | `reply(value)` | returns its output → the step completes |
-| `raw(text)` | returns something invalid → drives output steering |
+| `raw(text)` | returns something invalid → drives in-session output repair |
 | `throws(error)` | fails at the transport → drives the retry policy |
 | `usage(turn, tokens)` | reports token usage → drives the token budget |
 
-Scripts are checked against the workflow up front, so naming a step that isn't an agent step — or scripting `ask` for a step that can never park — fails immediately rather than as a confusing schema error mid-run.
-
-**Input steps need no double.** They're deterministic, so the test *is* the answers you supply. Answers that are incomplete or invalid re-park the step — an input step is never cancelled by a bad answer, exactly as leaving a mandatory question blank leaves it pending — and `violation` says why:
+**Step overrides replace what a step does.** Any step can be swapped for a stub — to keep a side-effecting step from touching the world, to force a failure that's otherwise unreachable, or to skip expensive setup and exercise late logic directly:
 
 ```ts
-const partial = await parked.answer({ name: "Ada" });
-partial.status;     // "parked"
+const run = await createTestRun(releaseWorkflow, {
+  steps: {
+    "open-pr": () => ({ url: "https://example.test/pr/1" }),
+    "read-git": throws(new Error("detached HEAD")),
+  },
+});
+```
+
+Overrides are **schema-checked**: an unknown step name fails immediately, and a stub's return value is validated against the real step's declared output schema — so a stub that has drifted from the contract it stands in for fails the test instead of hiding the drift.
+
+**Questionnaire steps need no double.** They're deterministic, so the test *is* the answers you supply. Answers that are incomplete or invalid re-block the step — a questionnaire step is never cancelled by a bad answer, exactly as leaving a mandatory question blank leaves it pending — and `violation` says why:
+
+```ts
+const partial = await blocked.answer({ name: "Ada" });
+partial.status;     // "blocked"
 partial.violation;  // "<root>: must have required properties environment"
 ```
 
 A first ask has no `violation` (nothing was rejected yet), so `violation !== undefined` is precisely "asked again, and here's what was wrong".
 
-Each transition returns a **new** `TestRun`, so earlier states stay inspectable: `status`, `output`, `error`, `questionnaire`, `violation`, `events`, `eventsOf(type)`, `stepOutput(name)`, `agent(step)`, `sleepCalls`. Pass `cancelAt: "step"` to cancel the run just before a step executes (spec §8.6), then `resume()` to check it picks up from the last checkpoint.
+Each transition returns a **new** run handle, so earlier states stay inspectable: `status`, `output`, `error`, `questions`, `violation`, `events`, `eventsOf(type)`, `stepOutput(name)`, `stepState(path)`, `agent(step)`, `sleepCalls`. Pass `cancelAt: "step"` to cancel the run just before a step executes, then `resume()` to check it picks up from the last checkpoint.
+
+Recording and replaying real model responses as fixtures is deliberately out of scope — hand-scripted replies plus the live integration suite cover that ground.
 
 ---
 
@@ -238,5 +285,4 @@ pnpm typecheck            # tsc --noEmit
 
 The offline suite (`test/examples-suite.test.ts`) drives every example end-to-end through the engine with a fake host — including the agent-bearing `planning` example, whose agent is scripted. The integration suite runs the agent examples against a real model.
 
-
-TODO: /create command to define a workflow
+> **Spec ahead of code.** `spec.md` is the source of truth and currently specifies twelve things the implementation hasn't caught up to: the `blocked`/`in_progress` state vocabulary, derived run status, the project lock, node-path addressing and resume-into-nested-blocks, `.parallel` and `concurrency`, background subagents, schema-checked step overrides, output re-validation on resume, budget-clock pausing while blocked, drain-on-crash, `delete` requiring a run-id, and `/workflow list`. Run logs written by older builds are not readable — pre-1.0, the store format changes without migration.

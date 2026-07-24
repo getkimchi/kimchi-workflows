@@ -11,16 +11,20 @@ with deterministic, harness-driven transitions and durable, resumable state.
 
 - **Workflow** — a definition authored in a TypeScript file (git-tracked,
   editable). Declares steps, control flow, and I/O schemas.
-- **Step** — a single unit of work. One of four types (§2).
+- **Step** — a single unit of work. One of four types (§2). Every step has a
+  **state** (§5.1).
 - **Run** — a single execution instance of a workflow. Has a `run-id`, a status
-  (§5), and an event log.
-- **Session** — the PI session. Runs are recorded in the session's event log;
-  this log is the source of truth for status, resume, and listing.
-- **Running run** — at most one run **executes** at a time (§7); other runs may
-  coexist `parked` or stopped. A run with no Q&A steps runs to completion without
-  human interaction (§10).
+  (§5.2), and an event log.
+- **Session** — the PI session. Runs are recorded in the per-project run store;
+  the event log is the source of truth for state, resume, and listing.
+- **Executing run** — at most one run **executes** per project at a time (§7);
+  other runs may coexist blocked or stopped. A run with no Q&A steps runs to
+  completion without human interaction (§10.3).
 - **Engine** — the harness-side executor that drives transitions between steps
   deterministically (§4).
+- **Node path** — the address of a step within a run: enclosing node names, the
+  iteration or item index where one applies, then the step name — e.g.
+  `until-valid#3/design`, `batch#7/review`, `audit/lint` (§8.5).
 
 ## 1. Workflow definition
 
@@ -28,8 +32,11 @@ with deterministic, harness-driven transitions and durable, resumable state.
 and edited like any TypeScript file. *(orig. R1)*
 
 1.2. The authoring API is inspired by Mastra's workflow model (`createStep`,
-`createWorkflow`, loops, branching) but is **not** a port or clone — it adapts
-those fundamentals to PI's conventions. *(orig. R2)*
+`createWorkflow`, loops, branching, structural fan-out) but is **not** a port or
+clone — it adapts those fundamentals to PI's conventions. In particular,
+concurrency is **structural** as it is in Mastra: it comes from `.parallel` and
+`.foreach`, not from declared step dependencies. There is no `dependsOn` and no
+readiness scheduler. *(orig. R2; decision)*
 
 1.3. Step input/output schemas are defined with **TypeBox**, the harness's schema
 library of choice. TypeBox's native JSON Schema output is used directly for LLM
@@ -44,11 +51,11 @@ package itself; module resolution is relative to the importing file, so a workfl
 must be validated from the directory it will actually live in (§6.6). *(decision)*
 
 1.5. **Identity & versioning.** A workflow declares a `name`/`id` in
-`createWorkflow`, used in the catalog (§6.7), `run list` (§6.3), and the run store (§8.7). **Versioning is
-out of scope** — the file is git-tracked (§1.1) and that is the versioning story.
-Definition changes are reconciled by step-name matching on resume (§8.5); if an
-edit breaks compatibility, the engine surfaces the error (§8.5) and the author
-resolves it. *(decision)*
+`createWorkflow`, used in the catalog (§6.7), `run list` (§6.3), and the run store
+(§8.9). **Versioning is out of scope** — the file is git-tracked (§1.1) and that is
+the versioning story. Definition changes are reconciled on resume by re-validating
+recorded outputs (§8.7); if an edit breaks compatibility, the engine surfaces the
+error and the author resolves it. *(decision)*
 
 ## 2. Step types
 
@@ -64,85 +71,136 @@ name** it belongs to, so a host can attribute cost and telemetry per step — an
 test double can script replies per step rather than per session. *(orig. R12;
 step tagging: decision)*
 
+  An agent step may declare `background: true`, which runs it as a **PI subagent**:
+  its own context window and tool loop, no access to the parent session's history,
+  returning only its schema-valid output (§12.2). Background is for agent steps
+  only, and a background step may not be Q&A-capable — `background` together with
+  `asks` is rejected at `.commit()` (§10.1). *(decision)*
+
 2.3. **Nested-workflow step** — another workflow executed as a step. *(orig. R10;
 tracking in §11)*
 
 2.4. **Questionnaire step** — a first-class step that collects structured input
 from the user (e.g. to gather workflow parameters). Inherently **Q&A** (§10): it
-always suspends for the user. Unlike a Q&A-capable agent step (§2.2) it does no
+always blocks for the user. Unlike a Q&A-capable agent step (§2.2) it does no
 other work — it only asks. Some workflows need no input at all (e.g. a
 dependency-update flow that opens a PR unattended) and omit this step.
 
-  An input step is **never cancelled by its answers**: answers that are incomplete
-  or fail the target schema re-park it with the same batch, exactly as leaving a
-  mandatory question blank leaves it pending. A re-park carries the schema
+  Its annotated TypeBox output schema is the single source of truth: the framework
+  derives the questionnaire from it, renders it, and validates the answers against
+  it.
+
+  A questionnaire step is **never cancelled by its answers**: answers that are
+  incomplete or fail the target schema re-block it with the same batch, exactly as
+  leaving a mandatory question blank leaves it pending. A re-block carries the schema
   **violation** that rejected the answers, which is what distinguishes "asking" from
   "asking again, and here is what was wrong" — a first ask carries none, and neither
   does an agent's question (§10.1), which is a question rather than a rejection.
   *(decision)*
 
 2.5. **Step context (what the harness injects).** Every step receives: its
-validated **input**; the **run context** (prior step outputs by name, workflow
-initial input, run metadata — `getStepResult`/`getInitData`, §3.7); an **abort
-signal** (for cooperative cancel, §8.6); and a **logger** (writes to the run event
-log, §8.1). An agent step additionally gets its resolved model (§9.5) and the PI
-message/tooling harness. *(orig. R11/R12; decision)*
+validated **input**; the **run context** (prior step outputs by name or node path,
+workflow initial input, run metadata — `getStepResult`/`getInitData`, §3.9); an
+**abort signal** (for cooperative cancel, §8.8); and a **logger** (writes to the run
+event log, §8.1). An agent step additionally gets its resolved model (§9.6) and the
+PI message/tooling harness. *(orig. R11/R12; decision)*
 
 ## 3. Control flow & data flow
 
 A workflow is built by chaining constructs on a builder (Mastra-inspired, §1.2)
-and finalized (`.commit()`-style). Every step has a unique **name** used both for
-data-flow addressing (§3.7) and event-log matching on resume (§8.5).
+and finalized (`.commit()`-style). Every step has a **name**, unique within its
+enclosing scope, used for data-flow addressing (§3.9), event-log matching on
+resume (§8.7), and node-path addressing (§8.5).
 
 `.commit()` is the authoring-time gate: it rejects a workflow with no nodes,
-duplicate names, or a node that is **not a step** — anything not produced by one of
-the step constructors (§2). Without that last check a malformed definition commits
-successfully and only fails once the engine tries to execute it, which is precisely
-how generated code (§6.6) using a plausible-but-wrong builder API slips through.
-*(decision)*
+duplicate names within a scope, a name containing `/` or `#` (both are node-path
+syntax, §8.5, and a name carrying either makes a path unparseable), an ambiguous
+bare-name context read (§3.9), a per-construct `concurrency` above the workflow
+ceiling (§3.6), a `background` step that also asks (§2.2), or a node that is
+**not a step** —
+anything not produced by one of the step constructors (§2). Without that last
+check a malformed definition commits successfully and only fails once the engine
+tries to execute it, which is precisely how generated code (§6.6) using a
+plausible-but-wrong builder API slips through. *(decision)*
 
 **Control-flow constructs** *(orig. R2)*:
 
 3.1. **Sequence** — `.then(step)`: run steps in order.
 
 3.2. **Branch** — `.branch([[cond, step], …])`: **multi-match** — every arm whose
-condition is true runs (sequentially; there is no parallel execution). The
-construct's output is an object keyed by the executed step names. Conditions are
-**side-effect-free** predicates `(ctx) => boolean` the engine evaluates over the
-run context, keeping transitions deterministic (§4). *(decision)*
+condition is true runs. The construct's output is an object keyed by the executed
+step names; when **no** condition matches the output is `{}` and the run continues
+(a data-dependent flow reaching none of its arms is a legitimate outcome; a
+downstream step that cannot cope says so through its own input schema). Arms whose
+condition was false are `skipped` (§5.1). Conditions are **side-effect-free**
+predicates `(ctx) => boolean` the engine evaluates over the run context, keeping
+transitions deterministic (§4). *(decision)*
 
 3.3. **Loop** — `.dowhile(step, cond)` / `.dountil(step, cond)`: repeat a step
 while / until a condition holds. Output is the last iteration's output. `cond` is
 likewise a side-effect-free predicate over the run context / the step's latest
-output.
+output. Every loop declares `maxIterations` (default **100**); exceeding it crashes
+the run naming the node, which is what makes termination a property of the engine
+rather than of the model's judgement. *(decision)*
 
-3.4. **Foreach** — `.foreach(step)`: iterate a step over an array input
-**sequentially** (one item at a time; no concurrency). Output is the array of
-per-item outputs. Each iteration checkpoints (§8); resume continues at the next
-unprocessed item.
+3.4. **Foreach** — `.foreach(step, { concurrency })`: iterate a step over an array
+input. `concurrency` defaults to **1** (sequential), so a side-effecting body over a
+long list does not fan out unless the author says so. Output is the array of per-item
+outputs **in item order**, never completion order. An empty array yields `[]` and the
+run continues; a non-array input is a wiring failure and crashes (§3.8). Each item
+checkpoints (§8.2); resume continues at the next unprocessed item. *(decision)*
+
+3.5. **Parallel** — `.parallel([a, b, …])`: structural fan-out over independent
+steps. All arms run concurrently, bounded only by the workflow ceiling (§3.6);
+output is an object keyed by step name, so it is independent of completion order.
+*(decision)*
+
+3.6. **Concurrency ceiling.** `createWorkflow({ maxConcurrency })` bounds the total
+number of steps executing at once across every construct in the run, including
+nested workflows, which inherit the root run's ceiling. It defaults to **4** and caps
+every construct: a 20-arm `.parallel` runs 4 at a time rather than opening 20 model
+sessions at once. Raising it is an explicit author decision. A per-construct
+`concurrency` **above** the ceiling is rejected by `.commit()` rather than silently
+capped — an author who writes `8` should learn that the workflow says `4`, not
+discover it from timing. *(decision)*
 
 **Data flow:**
 
-3.5. A step *may* declare a TypeBox input schema and *may* declare a TypeBox
+3.7. A step *may* declare a TypeBox input schema and *may* declare a TypeBox
 output schema. *(orig. R13/R14)*
 
-3.6. **Linear default:** a step's input is the previous step's output when the
+3.8. **Linear default:** a step's input is the previous step's output when the
 schemas line up — simple chains need no wiring. A step with no input schema
-ignores the upstream output. *(orig. R13/R14; decision)*
+ignores the upstream output. An input that fails the declared schema is a
+deterministic **wiring failure**: it crashes the run immediately and is **never
+retried**, since re-running cannot change the result. *(orig. R13/R14; decision)*
 
-3.7. **Non-adjacent access** (after a branch, across a loop, or from an earlier
+3.9. **Non-adjacent access** (after a branch, across a loop, or from an earlier
 step): use a `.map()` between steps, or read the **run context** inside a step's
-body. The context exposes prior step outputs keyed by step name, the workflow's
-initial input, and run metadata. (Mastra parity: `.map({ step, path } | fn)`,
-`getStepResult(step)`, `getInitData()`.) *(decision)*
+body. The context exposes prior step outputs, the workflow's initial input, and run
+metadata. Lookups take either a **bare name**, resolved lexically to the nearest
+enclosing scope, or an explicit **node path** (`audit/lint`). A bare name that is
+ambiguous at authoring time is rejected by `.commit()` rather than resolved by
+guesswork. (Mastra parity: `.map({ step, path } | fn)`, `getStepResult(step)`,
+`getInitData()`.) *(decision)*
 
-3.8. **Construct outputs** feeding the next step: branch → object keyed by
-executed step name (§3.2); foreach → array of per-item outputs (§3.4); loop →
-last iteration's output (§3.3).
+  **Reads never race.** A lookup naming a step that is currently **in flight** throws
+  rather than returning `undefined`. Step bodies are arbitrary code, so nothing can
+  statically prevent a `.map()` or a condition from reaching for a concurrently
+  executing step (§3.4/§3.5) — and a silent `undefined` would make the result depend
+  on who won the race, which is exactly the nondeterminism §4.2 exists to exclude. A
+  deterministic error is the only honest answer. A step that has not been reached, or
+  was `skipped`, still reads `undefined`: that is a structural fact, not a race.
+  *(decision)*
 
-3.9. A workflow *may* declare a top-level input schema. Where a workflow requires
+3.10. **Construct outputs** feeding the next step: branch → object keyed by
+executed step name, `{}` when none matched (§3.2); foreach → array of per-item
+outputs in item order (§3.4); loop → last iteration's output (§3.3); parallel →
+object keyed by step name (§3.5).
+
+3.11. A workflow *may* declare a top-level input schema. Where a workflow requires
 user-supplied input, it is gathered via a questionnaire step (§2.4) rather than a
-mandatory launch argument.
+mandatory launch argument — including when nobody is present to answer (§10.3).
 
 ## 4. Execution engine (deterministic transitions)
 
@@ -150,82 +208,122 @@ mandatory launch argument.
 **deterministically**, without relying on LLM tool calls or steering messages to
 decide control flow. *(orig. R4)*
 
-4.2. This constraint applies to **transitions only**. Two mechanisms operate
+4.2. **What determinism means under concurrency (§3.4/§3.5).** The set of steps
+that execute, the input each receives, and every construct's output are
+deterministic and independent of scheduling: foreach output is ordered by item,
+branch and parallel outputs are keyed by name. What is **not** deterministic is the
+interleaving of concurrent steps' side effects and the order in which their events
+land in the log. Conditions remain pure, and a context read cannot observe an
+in-flight step (§3.9), so the engine — never the model, never a race — decides
+transitions. *(decision)*
+
+4.3. This constraint applies to **transitions only**. Two mechanisms operate
 *within* a step and are not transitions:
   - **Output steering** (§9.2): correcting an agent's invalid output.
-  - **Question suspension** (§10): an agent emitting a `{question}`.
+  - **Question suspension** (§10): an agent emitting a `{questions}`.
 
   These are step-internal and do not contradict 4.1. *(clarifies orig. R4 vs
   R15/R19)*
 
-## 5. Run lifecycle & states
+## 5. States
 
-5.1. A run is always in exactly one status: *(orig. R5)*
-  - **running** — actively executing.
-  - **parked** — suspended at a Q&A step awaiting an answer (§10). Parks
-    indefinitely; never auto-cancels or times out.
-  - **crashed** — a step failed and retries were exhausted (§9).
-  - **cancelled** — the user deliberately stopped the run (§6.4).
-  - **completed** — reached the final step.
+5.1. **Step state.** A step is always in exactly one state: *(decision)*
+  - **todo** — not reached yet.
+  - **in_progress** — executing, including retries and output steering.
+  - **blocked** — suspended awaiting a human answer (§10).
+  - **completed** — finished; its output is recorded.
+  - **skipped** — never eligible: a branch arm whose condition was false (§3.2).
+  - **cancelled** — interrupted by an explicit user cancel (§6.4).
+  - **crashed** — retries exhausted (§9.5).
 
-5.2. **Terminality & retry (GitHub-Actions-style).** Only **completed** is
-terminal. `parked`, `crashed`, and `cancelled` are all
-recoverable via `/workflow resume`: resume continues from the last completed step,
-re-running the failed/interrupted step and everything after it (§8). Re-running a
-`completed` run means starting a **new** run (fresh run-id), never a transition
-back. *(decision)*
+  `todo` covers "inputs not ready / not reached"; `blocked` means, and only ever
+  means, *waiting on a human*. The two must not be conflated — a step waiting for a
+  free concurrency slot is `todo`, not `blocked`.
 
-5.3. **Transitions:**
-  - `running →` `completed` | `crashed` | `cancelled`, or the suspension `parked`.
-  - `crashed` | `cancelled` `→ running` via `resume`; `parked → running` on answer.
-  - `cancel` is an explicit user action from `running` or `parked`; a parked run is
-    never cancelled automatically — dismissing its question keeps it parked
+5.2. **Run status** uses the same vocabulary, minus the two that only make sense
+per step: a run is `in_progress`, `blocked`, `completed`, `cancelled`, or
+`crashed`. *(decision — replaces the earlier `running`/`parked` wording)*
+
+5.3. **Status is derived from the event log**, with step states as the intermediate
+view — no status field is authoritative on its own:
+  - any step `in_progress` → run `in_progress` (work is happening, even if another
+    step is simultaneously blocked);
+  - else any step `blocked` → run `blocked`;
+  - else a recorded run-level `cancelled` or `completed` event decides;
+  - else any step `crashed` → run `crashed`.
+
+  `completed` and `cancelled` are run-level facts and cannot be derived from step
+  states alone: a run completes when its final node completes, and a cold cancel
+  (§6.4) can arrive at a run with no step executing at all. *(decision)*
+
+5.4. **State keys.** Step state is keyed by **static node path** — the node path
+with iteration indices dropped (`until-valid/design`) — and the latest execution
+wins, so a `run list` stays bounded no matter how many iterations ran. Foreach item
+state is the exception: it is keyed **per item index**, because with
+`concurrency > 1` several items are genuinely live at once. Iteration counters,
+per-item history and retry attempts remain readable from the events themselves.
+*(decision)*
+
+5.5. **Terminality & retry (GitHub-Actions-style).** Only **completed** is
+terminal. `blocked`, `crashed`, and `cancelled` are all recoverable via
+`/workflow resume`: resume continues from the last checkpoint, re-running
+interrupted steps and everything after them (§8). Re-running a `completed` run means
+starting a **new** run (fresh run-id), never a transition back. *(decision)*
+
+5.6. **Transitions:**
+  - `in_progress →` `completed` | `crashed` | `cancelled`, or the suspension `blocked`.
+  - `crashed` | `cancelled` `→ in_progress` via `resume`; `blocked → in_progress` on answer.
+  - `cancel` is an explicit user action from `in_progress` or `blocked`; a blocked run
+    is never cancelled automatically — dismissing its question keeps it blocked
     (§10.2). *(decision)*
 
 ## 6. Commands
 
 6.1. `/workflow run <name|file.ts>` — start a run. The argument is resolved as a
 filesystem path when it ends in `.ts`, otherwise as a workflow **name** from the
-catalog (§6.7). Rejected if another run is currently `running` (§7).
-*(orig. R3; name resolution: decision)*
+catalog (§6.7). Paths resolve relative to the project root. Rejected if another run
+is executing in this project (§7). *(orig. R3; name resolution: decision)*
 
-6.2. `/workflow resume [run-id]` — recover a `parked` (with an answer), `crashed`,
-or `cancelled` run, continuing from the last checkpoint (§5.2/§8). Requires that no
-run is currently `running`. A run-id selects among coexisting or earlier-session
-runs; omittable when unambiguous. *(orig. R7)*
+6.2. `/workflow resume [run-id]` — recover a `blocked` (with an answer), `crashed`,
+or `cancelled` run, continuing from the last checkpoint (§5.5/§8). Requires that no
+run is executing. A run-id selects among coexisting or earlier-session runs;
+omittable when exactly one recoverable run exists. *(orig. R7)*
 
 6.3. `/workflow run list` — list runs: run-id, workflow name, started-at,
-stopped/completed-at, and status. `list` is reserved as `run`'s first argument, so
-it can never name a workflow. *(orig. R9)*
+stopped/completed-at, status, current step, and **pending-question count**. The count
+is not decoration: a run with one blocked step and one executing step reads
+`in_progress` (§5.3), so without it a waiting question is invisible in the listing.
+`list` is reserved as `run`'s first argument, so it can never name a workflow.
+*(orig. R9; decision)*
 
-6.4. `/workflow cancel [run-id]` — stop a run. Two cases, because a `parked` run is
+6.4. `/workflow cancel [run-id]` — stop a run. Two cases, because a `blocked` run is
 not executing (§7.1) and so has no signal to interrupt:
-  - **executing run** — cooperatively abort at the next step boundary (§8.6);
-  - **parked run** — a *cold* cancel: the transition is recorded directly in the
-    event log (§5.3, §8.1), which is what makes §10.2's "stopping a parked run
+  - **executing run** — cooperatively abort at the next step boundary (§8.8);
+  - **blocked run** — a *cold* cancel: the transition is recorded directly in the
+    event log (§5.6, §8.1), which is what makes §10.2's "stopping a blocked run
     requires explicit `/workflow cancel`" actually hold.
 
-  Bare targets the executing run, or — when none is executing — the sole `parked`
-  run; with several parked, a run-id is required. Only an executing or `parked` run
+  Bare targets the executing run, or — when none is executing — the sole `blocked`
+  run; with several blocked, a run-id is required. Only an executing or `blocked` run
   can be cancelled; a stopped run is rejected. Cancelled runs stay recoverable via
-  `resume` (§5.2). *(orig. R6; parked cancel: decision)*
+  `resume` (§5.5). *(orig. R6; blocked cancel: decision)*
 
 6.5. `/workflow delete <run-id>` — permanently remove a **stopped** run
-(`crashed`/`cancelled`/`completed`) and its recorded events from history (§8).
-Rejected for a live run (`running`/`parked`) — cancel it first (§6.4), so removal is
-always a deliberate second act. Irreversible: the run can no longer be resumed or
-listed. *(decision)*
+(`crashed`/`cancelled`/`completed`) and its recorded events from history (§8). The
+run-id is **always required**: deletion is irreversible, so it is never inferred.
+Rejected for a live run (`in_progress`/`blocked`) — cancel it first (§6.4), so
+removal is always a deliberate second act. *(decision)*
 
 6.6. `/workflow create` — interview the user and generate a new workflow file.
 Implemented as a **meta-workflow** (an ordinary `WorkflowDefinition` shipped with
 the adapter), so it runs through the same guard, event log, and attended Q&A loop
-as any other run. It receives the project root as its initial input. Shape: an
-input step gathers the goal and target file name; a Q&A agent step (§10.1) asks
-clarifying batches, then presents the plan for Approve/Revise until approved; a
-`.dountil` loop generates the source and validates it by loading it back (§1.4),
-retrying on failure; a final function step writes the file. Because a parked step
-is only answerable while top-level (§8.4), the whole interview — including
-approval — lives inside the single Q&A step rather than in a loop.
+as any other run. It receives the project root as its initial input. Shape: a
+questionnaire step gathers the goal and target file name; a Q&A agent step (§10.1)
+asks clarifying batches; a `.dountil` loop presents the plan for Approve/Revise
+until approved; a further `.dountil` loop generates the source and validates it by
+loading it back (§1.4), retrying on failure; a final function step writes the file.
+Because a step may now block anywhere (§8.5), the approval loop is an ordinary loop
+rather than an interview crammed into one step.
 
 Generation is **non-destructive and contained**: the target must resolve inside the
 project, and an existing file is never written over. Both are hard failures — the
@@ -247,12 +345,13 @@ candidate on unresolvable imports. Loading proves the module imports and commits
 whatever tooling the project has (TypeScript, Biome) and to report plainly when
 none is available rather than claim a check it did not run. *(decision)*
 
-6.7. **Workflow catalog.** A project's workflows live in `<project>/.pi/workflows/`
-as `*.workflow.ts`, alongside the run store (§8.7); discovery filters on the
-suffix. `/workflow list` reports each workflow's name, file, and description — the
-file because two workflows may declare the same name, which `run` then rejects as
-ambiguous; such rows are flagged. Files that fail to load are reported rather than
-omitted.
+6.7. `/workflow list` — list the project's workflows: name, file, and description.
+The file is shown because two workflows may declare the same name, which `run` then
+rejects as ambiguous; such rows are flagged. Files that fail to load are reported
+rather than omitted. *(decision)*
+
+6.8. **Workflow catalog.** A project's workflows live in `<project>/.pi/workflows/`
+as `*.workflow.ts`, alongside the run store (§8.9); discovery filters on the suffix.
 
 Discovery imports every candidate to read its declared name, so workflow modules
 must have no import-time side effects. Because that executes project code,
@@ -260,39 +359,70 @@ resolving a **name** first tries the `<name>.workflow.ts` convention and only fa
 back to a full scan when it does not hold — so running one workflow does not
 normally execute the others. *(decision)*
 
-## 7. Single running run (no concurrent execution)
+## 7. One executing run per project
 
-7.1. At most one run is **`running`** (actively executing a step / the agent loop)
-at any time; there is no concurrent or background execution. Runs in other states
-— `parked`, `crashed`, `cancelled`, `completed` — may coexist and remain listable
-until deleted (§6.5). A `parked` run does **not** block new work. *(decision)*
+7.1. At most one run is **executing** per project at any time. Runs in other states
+— `blocked`, `crashed`, `cancelled`, `completed` — may coexist and remain listable
+until deleted (§6.5). A `blocked` run does **not** block new work. Concurrency
+*within* a run (§3.4/§3.5) is unaffected by this rule: it bounds runs, not steps.
+*(decision)*
 
-7.2. `/workflow run` and `/workflow resume` require that no run is currently
-`running`; they are rejected while one executes. Resuming a `parked` / `crashed` /
-`cancelled` run makes it the single running run, subject to the same rule.
+7.2. **The guard is a lock in the run store**, not a status read — a status can be
+stale, a lock cannot lie about who holds it. An executing run holds
+`.pi/workflows/run.lock` recording `{ runId, pid, host, startedAt }`. `/workflow run`
+and `/workflow resume` acquire it and are rejected while it is held, naming the run
+that holds it. Acquisition is **atomic** (exclusive create), so two contenders racing
+for a free or reclaimable lock cannot both win. This is what makes the rule hold across concurrent PI sessions on the
+same project — sessions that would otherwise each execute steps against the same
+working tree. Separate projects, and separate git worktrees, have separate stores and
+run independently. *(decision)*
 
-7.3. Bare `/workflow cancel` targets the currently `running` run; when nothing is
-running or the target is ambiguous, a run-id is required. `resume` / `delete` take
-a run-id to pick among coexisting runs (omittable when unambiguous). *(decision)*
+7.3. **Stale locks are reclaimed, not waited out.** A contender checks the holder's
+liveness: a dead pid on the same host means the process died mid-run, so the lock is
+taken and the abandoned run is recorded `crashed` (an explicit event, §8.1) and stays
+resumable. That `crashed` event is written **under the acquired lock**, by whichever
+process won it — the one moment a session appends to a run other than its own. A lock held by a live pid, or by a different host, is refused rather than
+guessed at. Pid liveness is meaningless across container boundaries, so a store shared
+between namespaces needs the lock cleared deliberately. *(decision)*
+
+7.4. Bare `/workflow cancel` targets the executing run; when nothing is executing or
+the target is ambiguous, a run-id is required. `resume` takes a run-id to pick among
+coexisting runs (omittable when exactly one is recoverable); `delete` always requires
+one (§6.5). *(decision)*
 
 ## 8. Persistence, durability & resume
 
 8.1. **Recording:** run execution is recorded as an append-only **event log** —
-step started/completed, retries, questions/answers, status changes. This log is
-the source of truth for status, resume, and listing; the active session surfaces it
-live (§12) and it persists in the per-project run store (§8.7). *(orig. R6/R7)*
+step started/completed, retries, questions/answers, state changes. This log is the
+source of truth for state, resume, and listing; the active session surfaces it
+live (§12) and it persists in the per-project run store (§8.9). Under concurrency the
+log's *order* is not deterministic (§4.2), so every event carries the node path it
+belongs to and consumers reconstruct per-step history by path rather than by
+adjacency. *(orig. R6/R7)*
 
-8.2. **Checkpoint granularity:** completed steps are checkpointed. On resume the
-engine continues after the last completed step(s). *(orig. R8)*
+8.2. **Checkpoint granularity:** completed steps are checkpointed, and a foreach
+checkpoints each completed item. On resume the engine continues after the last
+completed step(s) and the last completed item(s). *(orig. R8)*
 
 8.3. **Interrupted (not completed) steps** on resume:
   - **Function step** — treated as idempotent and re-run.
   - **Agent step** — re-run, with the agent told the previous run was interrupted
     (so it can inspect current state before acting).
 
+  With concurrency, several steps may be interrupted at once; each re-runs by the
+  same rule, so the idempotency exposure scales with the fan-out.
+
   > NOTE / author contract: "functions are idempotent" is an assumption the
   > workflow author must uphold. Side-effecting functions (appends, external POST,
   > non-deterministic reads) can double-apply on rerun; author accordingly.
+  >
+  > SECOND author contract — **non-overlapping side effects.** Steps that can run
+  > concurrently (§3.4/§3.5) must not touch the same files, branches, or external
+  > resources. This matters more here than in a general workflow engine: the steps are
+  > agents editing a working tree, so two overlapping steps are two models rewriting
+  > one file. The engine does **not** enforce this — it cannot know what a step or its
+  > subagent will touch. Sequence anything that shares state, or keep it out of a
+  > fan-out.
   *(decision)*
 
 8.4. **Two distinct interruption paths** (must not be conflated):
@@ -302,117 +432,239 @@ engine continues after the last completed step(s). *(orig. R8)*
     **same agent loop resumes** with the user's answer appended, context intact.
   *(clarifies orig. R8 vs R19)*
 
-  Answering requires the park to still be the run's **latest** state. A recorded
-  questionnaire is not proof a run is *currently* parked — it may have been
-  cancelled after asking (§6.4) — so answers arriving afterwards are refused rather
-  than silently reviving a run the user stopped. This matters because the run store
-  is shared across sessions (§8.7) and a prompt may be open while another session
-  cancels. *(decision)*
+  Answering requires the block to still be pending. A recorded questionnaire is not
+  proof a run is *currently* blocked — it may have been cancelled after asking (§6.4)
+  — so answers arriving afterwards are refused rather than silently reviving a run the
+  user stopped. This matters because the run store is shared across sessions (§8.9)
+  and a prompt may be open while another session cancels. *(decision)*
 
-8.5. **Definition drift** (file edited between launch and resume): resume
-re-reads the current file. Completed steps are matched by name (skipped / allowed
-to rerun). If a step's schema no longer matches the recorded I/O, the engine
-reports the incompatibility to the user rather than proceeding silently.
+8.5. **Blocking is legal anywhere.** A Q&A step may sit inside a loop, a foreach, a
+branch arm, or a nested workflow. The block event records the step's full **node
+path** — `until-valid#3/design`, `batch#7/review`, `audit/design` — and the
+checkpoint records the enclosing node's position (iteration counter and the output
+feeding its condition; the item index for a foreach). Resume re-enters the node at
+that position and continues the same agent conversation with the answers appended,
+rather than restarting the node and re-asking. *(decision — replaces the earlier
+top-level-only restriction)*
+
+8.6. **Several steps may be blocked at once** when a fan-out construct blocks in more
+than one arm or item. Blocking suspends only its own step: siblings keep running, and
+the run reads `in_progress` while any of them does (§5.3). Pending questionnaires form
+a **FIFO queue** addressed by node path; the session renders one at a time, and an
+answer is matched to the path it was asked from. *(decision)*
+
+  **Answering is delivery, not resume.** An answer to a run that is still executing
+  goes to the process holding the lock (§7.2), which feeds it to the waiting step in
+  place — it does **not** go through `/workflow resume` and is not subject to the
+  no-executing-run guard (§7.2), which would otherwise make a queued question
+  unanswerable for as long as any sibling runs. It follows that only the session
+  driving a run can answer it while it executes; another session may answer only once
+  nothing is executing, by resuming the run and taking over the lock. Without this
+  split the two rules deadlock: work continues *because* a block is local, yet every
+  route to unblocking it is barred *because* work continues. *(decision)*
+
+8.7. **Definition drift** (file edited between launch and resume): resume re-reads
+the current file and **re-validates each completed step's recorded output against
+that step's current output schema**. A run resumes when the recorded data still
+satisfies the definition — a renamed description, a reordered branch, or a step
+appended later is no obstacle — and is refused, naming the step and the violation,
+when it does not. Cosmetic edits therefore never invalidate a long-running run,
+while an edit that would feed stale data downstream is caught before it does.
 *(decision)*
 
-8.6. **Cancel semantics:** `/workflow cancel` signals a cooperative abort; the
-current step is asked to stop at the next safe point (abort signal); status →
-`cancelled`. Already-applied side effects (files, commits, PRs, commands) are
-**not** rolled back. The run is recoverable — `resume` continues from the last
-completed step (§5.2). *(decision)*
-
-8.7. **Run store (per project).** Runs and their event logs persist in a
-**per-project** store, keyed by `run-id`, independent of any single session — so
-`list` / `resume` / `delete` work across sessions and harness restarts. Each run
-records its workflow `name`/`id` and **file path** (§1.5) so `resume` can reload
-the definition (§8.5). `delete` (§6.5) removes a stopped run from this store.
+8.8. **Cancel semantics:** `/workflow cancel` signals a cooperative abort; executing
+steps are asked to stop at the next safe point (abort signal); status → `cancelled`.
+Already-applied side effects (files, commits, PRs, commands) are **not** rolled back.
+The run is recoverable — `resume` continues from the last checkpoint (§5.5).
 *(decision)*
+
+8.9. **Run store (per project).** Runs and their event logs persist in a
+**per-project** store under `<project>/.pi/workflows/`, keyed by `run-id`,
+independent of any single session — so `list` / `resume` / `delete` work across
+sessions and harness restarts. Each run records its workflow `name`/`id` and **file
+path** (§1.5) so `resume` can reload the definition (§8.7). The store also holds the
+execution lock (§7.2). Because discovery filters on the `*.workflow.ts` suffix
+(§6.8), definitions and run records share the directory without colliding. `delete`
+(§6.5) removes a stopped run from this store. *(decision)*
 
 ## 9. Retry, failure & budgets
 
 9.1. **Unified repeat policy:** a step may declare a repeat policy (`maxRetry`,
-backoff) that covers all failure kinds uniformly. *(orig. R16)*
+backoff) covering thrown errors and budget overruns uniformly. `maxRetry` counts
+attempts **after** the first (default 0 = run once). A retry starts a fresh attempt:
+for an agent step, a fresh session from the original prompt. Retry counters are
+per-attempt-sequence and **reset on resume**, since a resume is a deliberate user act
+— otherwise a crashed run would re-crash immediately with an exhausted budget.
+*(orig. R16; decision)*
 
-9.2. Failure kinds handled within the policy:
-  - **Invalid output vs schema** — the agent's final output does not match the
-    TypeBox output schema; the harness sends a steering message explaining the
-    expected format and retries within the policy. *(orig. R15)*
+9.2. **Invalid output is repaired in-session, not retried.** When an agent's final
+output does not match the TypeBox output schema, the harness sends a steering message
+explaining the violation and lets the agent correct itself within the same
+conversation, up to `maxOutputRepairs` times (default **2**). Only when repairs are
+exhausted does the attempt fail and the repeat policy apply. The two budgets are
+deliberately separate: a repair costs one turn and keeps the agent's own context on
+what it got wrong, whereas a retry discards a working session and re-pays the prompt.
+
+  In-session repair requires a resumable conversation. If PI's subagent facility is
+  one-shot, a `background` step (§2.2) cannot be steered and its invalid output fails
+  the attempt directly, falling back to the repeat policy (§9.1) — a stated
+  consequence of choosing isolation, not a defect to be discovered later.
+  *(orig. R15; decision)*
+
+9.3. Failure kinds handled within the repeat policy:
   - **Thrown error** — a step raised an error.
-  - **Budget/time exceeded** — see 9.3.
+  - **Invalid output** — after in-session repairs were exhausted (§9.2).
+  - **Budget/time exceeded** — see 9.4.
 
-9.3. **Per-step budgets:** a step may declare a max token budget and/or max wall
-time (§orig. R18). Exceeding a budget is a failure kind counted against the
-repeat policy.
+  **Not** covered: an input that fails its schema, which is a wiring failure and
+  crashes without retry (§3.8).
 
-9.4. **Terminal outcome:** when retries are exhausted, the run enters `crashed`
-with the failure reason recorded. *(orig. R16/R18)*
+9.4. **Per-step budgets:** a step may declare a max token budget and/or max wall
+time (§orig. R18). Exceeding a budget is a failure kind counted against the repeat
+policy.
+  - **Wall time** counts only while the step is `in_progress`. Time spent `blocked`
+    is excluded, so a human taking a weekend to answer cannot crash a run.
+  - **Tokens** accumulate across an attempt's turns — prompt, steering repairs, and
+    answer continuations — and reset when a retry starts a fresh attempt, matching
+    what the retry actually restarts. *(decision)*
+
+9.5. **Terminal outcome:** when retries are exhausted the step is `crashed`. With
+concurrency, the run then **drains**: no new steps start, in-flight siblings run to
+completion and checkpoint normally, and the run ends `crashed`. Draining rather than
+aborting preserves work already paid for — which matters most in a foreach, where
+every completed item is a checkpoint a later resume need not redo. *(orig. R16/R18;
+decision)*
+
+  **A drain does not wait on humans.** Steps that are `blocked` (§8.6) are not
+  drained: their pending questions are dropped and those steps are recorded
+  `cancelled`. A blocked step waits indefinitely by design, so draining it would hang
+  a run that is already doomed on an answer that can no longer change the outcome.
+  The questions return if the run is resumed (§5.5). *(decision)*
 
   > NOTE: a retry re-runs the failed step and carries the **same idempotency
   > caveat** as resume (§8.3) — a step that applied side effects before failing
   > (e.g. opened a PR, then failed output validation) may double-apply on retry.
   > The §8.3 author contract applies to retries too.
 
-9.5. **Per-step model:** an agent step may declare the `model` to use — a PI model
-id validated against PI's existing model registry. A workflow may declare a default
-model. Resolution order for a step: step `model` → workflow default → the
-harness/session default. Function steps take no model. *(orig. R17; decision)*
+9.6. **Per-step model:** an agent step may declare the `model` to use — a PI model
+id (`provider/modelId`) validated against PI's existing model registry. A workflow
+may declare a default model. Resolution order for a step: step `model` → workflow
+default → the harness/session default; a background step (§2.2) resolves the same
+way. Function steps take no model. *(orig. R17; decision)*
 
 ## 10. Questions & human input
 
 10.1. **Q&A capability is per-step.** A step may be declared **Q&A-capable**; only
-such steps may ask the user and suspend the run. This is a static property of the
+such steps may ask the user and block the run. This is a static property of the
 workflow definition, not a run-level mode. *(orig. R19/R20; decision)*
   - **Q&A-capable agent step** — output schema is a discriminated union
-    `{ result } | { questionnaire }`, where a questionnaire is a **batch** of
-    questions, not a single one. The step does real work *and* may emit
-    `{questionnaire}` to reduce ambiguity (e.g. a "planning" step), possibly
-    multiple times. Each `{questionnaire}` suspends the run (`parked`), displays
-    the batch, and — on answers — resumes the **same agent loop** with them
-    appended (§8.4), until the step finally emits `{result}`. The framework owns
-    the questionnaire schema and injects the asking protocol, so the author's
-    prompt stays task-only. Questions **do not** use LLM tools.
+    `{ result } | { questions }`, where the question payload is a **batch** of
+    questions, not a single one. The step does real work *and* may emit a
+    `{questions}` to reduce ambiguity (e.g. a "planning" step), possibly multiple
+    times. Each `{questions}` blocks the step, displays the batch, and — on answers —
+    resumes the **same agent loop** with them appended (§8.4), until the step finally
+    emits `{result}`. The framework owns the question schema and injects the asking
+    protocol, so the author's prompt stays task-only. Questions **do not** use LLM
+    tools.
   - **Non-Q&A agent step** — output is `{ result }` only; the agent cannot ask and
-    must decide autonomously.
+    must decide autonomously. A `background` step (§2.2) is always of this kind: a
+    subagent runs isolated and unwatched, so interrupting the parent session for an
+    answer whose reasoning the user never saw is rejected at `.commit()`.
   - **Questionnaire step** (§2.4) — inherently Q&A; only asks, does no other work.
 
-10.2. **Rendering & dismissing a parked question.** When the harness session is
-active, it recognizes a `parked` run's pending question and renders it (the
-questionnaire) inline; answering resumes the run. **Dismissing/exiting the prompt
-does not cancel** — the run stays `parked` and the question resurfaces on return or
-via `resume`. Stopping a parked run requires explicit `/workflow cancel`. With
-several runs parked at once, `list` surfaces them and `resume <run-id>` selects
-which to answer. *(decision)*
+10.2. **Rendering & dismissing a blocked question.** When the harness session is
+active, it recognizes a pending question and renders it inline; answering resumes
+that step. **Dismissing/exiting the prompt does not cancel** — the step stays
+`blocked` and the question resurfaces on return or via `resume`. Stopping a blocked
+run requires explicit `/workflow cancel`. With several questions pending — within one
+run (§8.6) or across runs — `list` surfaces them and the queue is answered in order;
+`resume <run-id>` selects which run to answer. *(decision)*
 
 10.3. **Unattended execution is a design property, not a policy.** A workflow with
 no Q&A steps never blocks on a human. A workflow that reaches a Q&A step with no
-one present simply **parks** indefinitely until resumed. There is no
-attended/unattended run mode and no AFK question-policy. *(decision — replaces
-orig. R20 policy enum)*
+one present simply **blocks** indefinitely until resumed from an interactive session.
+There is no attended/unattended run mode, no AFK question-policy, and **no launch-time
+answer file**: an agent generates its question batches at run time, so no pre-supplied
+set could anticipate them, and a second way to fill a step's output would have to be
+kept consistent with the first for no gain. Workflows meant for CI are written without
+Q&A steps. *(decision — replaces orig. R20 policy enum)*
 
 ## 11. Nested workflows
 
 11.1. A nested-workflow step is tracked **transparently**: its steps fold into
-the parent's event log under the **parent run-id**. `/workflow run list` shows a
-single run; parent resume/cancel naturally cover the child. *(orig. R10;
+the parent's event log under the **parent run-id**, addressed by node path
+(`audit/lint`). `/workflow run list` shows a single run; parent resume/cancel
+naturally cover the child, including a child step that blocks (§8.5). *(orig. R10;
 decision)*
+
+11.2. Step names need only be unique **within their enclosing workflow**, so the same
+sub-workflow may be composed twice in one parent without cloning or renaming; the node
+path disambiguates. Context reads resolve a bare name lexically and require an explicit
+path when ambiguous (§3.9). *(decision)*
 
 ## 12. Progress & observability
 
-12.1. The engine emits step lifecycle events — step started, step completed,
-retry, parked (question shown), answered, crashed — to the session transcript /
-event log (§8.1) as they occur, so a user watching the session sees live progress.
+12.1. The engine emits step lifecycle events — started, completed, retry, blocked
+(question shown), answered, skipped, crashed — to the session transcript / event log
+(§8.1) as they occur, so a user watching the session sees live progress. Each event
+carries its node path, so concurrent steps remain attributable (§8.1). *(decision)*
+
+12.2. **Streaming vs compact rendering.** An agent step streams its output inline
+like a normal PI agent turn **when it is the only step executing**. As soon as
+steps overlap (§3.4/§3.5), concurrent agent steps switch to compact rendering — one
+progress line each, with a summary flushed on completion — because four interleaved
+token streams are unreadable. A `background` step (§2.2) always renders compactly,
+whether or not anything else is running. A blocked step renders its `{questions}`
+inline (§10.2). *(decision)*
+
+12.3. `/workflow run list` (§6.3) reflects each run's derived status (§5.3) and
+current step; per-run detail — step states by node path, event history, pending
+questions, failure reason — is available from the recorded events (§8.1).
 *(decision)*
 
-12.2. A `running` agent step streams its output inline like a normal PI agent turn;
-a Q&A-capable step renders its `{question}` inline (§10.2). *(decision)*
+## 13. Testing
 
-12.3. `/workflow run list` (§6.3) reflects each run's current status and step; per-run
-detail (event history, current step, failure reason) is available from the recorded
-events (§8.1). *(decision)*
+13.1. **Testing is a first-class part of the framework, not a harness concern.** A
+workflow is an ordinary TypeScript value, so it must be executable in a plain test
+runner with **no PI, no network, no model, and no filesystem**. The engine's purity
+and the host seam exist to make this true; `src/testing` is the supported public
+surface, usable from any runner (it ships no runner-specific matchers). *(decision)*
+
+13.2. **A run's behaviour is pinned by three inputs**, and the framework supplies all
+three:
+  - **agent replies** — scripted per step name as a queue consumed in order across
+    sessions, so a retry or an answer-resume simply takes the next entry. Builders
+    cover every turn an agent can take: return a result, ask a question batch, return
+    something schema-invalid (driving §9.2 steering), throw (driving §9.1 retry), or
+    report token usage (driving §9.4);
+  - **answers** — supplied to blocked steps; incomplete or invalid answers re-block
+    with a `violation`, exactly as in a real session (§2.4);
+  - **step overrides** — any step may be replaced by name with a stub. *(decision)*
+
+13.3. **Overrides are schema-checked.** A stub's return value is validated against
+the real step's declared output schema, and an override naming a step the workflow
+does not contain fails immediately. This is what separates a framework override from
+an ad-hoc mock: a stub that has drifted from the contract it stands in for fails the
+test instead of hiding the drift. Overrides exist because the alternative — dependency
+injection through closures — has nowhere to inject when the unit under test is a
+workflow file loaded from disk, and because a function step's failure paths
+(retry, crash, resume-after-crash) are otherwise unreachable without writing code that
+fails on purpose. *(decision)*
+
+13.4. **Inspectable, immutable results.** Each transition returns a new run handle, so
+earlier states stay inspectable: status, output, error, pending question, violation,
+events (and events by type), step output by name or node path, per-step agent script
+state, and recorded sleeps. Cancellation and resume are drivable from a test, so
+§8.3's re-run semantics and §8.5's re-entry into a nested block are directly
+assertable. *(decision)*
+
+13.5. **Not in scope:** recording and replaying real model responses as fixtures. The
+value is real, but a fixture format, a staleness rule for edited prompts, and a
+re-record workflow are a project of their own; hand-scripted replies plus the live
+integration suite cover the ground meanwhile. *(decision)*
 
 ## Open items (TODO)
 
-*None outstanding — all requirements from the original list are resolved. Remaining
-unknowns are implementation-level (e.g. the exact TypeBox shape of the
-`{ result } | { question }` union, and the `.map()` context typing), not spec
-gaps.*
+*None outstanding.* Remaining unknowns are implementation-level — the exact TypeBox
+shape of the `{ result } | { questions }` union, the `.map()` context typing, and the
+node-path encoding in the event log — not spec gaps.
