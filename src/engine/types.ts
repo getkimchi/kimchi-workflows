@@ -34,7 +34,7 @@ export type RunEvent =
   // Control-flow node (branch/loop/foreach/workflow, spec §3.2–§3.4, §11) lifecycle. `node-completed`
   // is a resume checkpoint (spec §8): its output feeds the next node and rebuilds context. Emitted for
   // a branch's own node AND for each taken arm (`path` = the arm's own path, spec §8.5's re-entry).
-  | { type: "node-started"; runId: string; path: string; nodeKind: "branch" | "loop" | "foreach" | "workflow"; at: string }
+  | { type: "node-started"; runId: string; path: string; nodeKind: "branch" | "loop" | "foreach" | "parallel" | "workflow"; at: string }
   | { type: "node-completed"; runId: string; path: string; output: unknown; at: string }
   // Observability (spec §12): which branch arms were taken (`path` = the ARM's own path — the
   // addressing unit a step inside it nests under, spec §8.5), and each loop iteration as it starts
@@ -71,7 +71,14 @@ export type RunEvent =
   // agent's ask — which is an intentional question, not a rejection).
   | { type: "questionnaire-asked"; runId: string; path: string; questionnaire: Questionnaire; conversation: readonly ConversationMessage[]; violation?: string; at: string }
   // The user's structured answers (question `key` → value); resume delivers them back (spec §8.4).
-  | { type: "answers-provided"; runId: string; path: string; answers: Record<string, unknown>; at: string };
+  | { type: "answers-provided"; runId: string; path: string; answers: Record<string, unknown>; at: string }
+  // Drain-then-crash (spec §9.5): a SIBLING step crashed elsewhere in the same concurrent construct
+  // (`.parallel`/`.foreach`, spec §3.4/§3.5), and this step — `blocked`, waiting on a human — is not
+  // drained: its pending question drops and it is recorded `cancelled` directly, rather than waiting
+  // indefinitely on an answer that can no longer change a doomed run's outcome. Distinct from the
+  // blanket `run-crashed` force-close (which turns a lone open step `crashed`, unchanged since P2):
+  // this is scoped to exactly the step being abandoned, emitted BEFORE the run's own `run-crashed`.
+  | { type: "step-cancelled"; runId: string; path: string; at: string };
 
 /** One message of an agent conversation. Opaque to the engine — the host defines the concrete shape. */
 export type ConversationMessage = unknown;

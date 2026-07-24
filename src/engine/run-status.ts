@@ -12,7 +12,8 @@ export type RunStatus = "in_progress" | "blocked" | "completed" | "cancelled" | 
  * Derive a run's status from its event log (spec §5.3), in precedence order:
  *
  *  1. any step `in_progress` → `in_progress` (work is happening, even if another step is simultaneously
- *     `blocked` — relevant once P3 lands real concurrency; today at most one step is ever open);
+ *     `blocked` — genuinely possible under concurrency, spec §3.4/§3.5/§8.6: a `.parallel`/`.foreach`
+ *     arm can block while a sibling is still executing);
  *  2. else any step `blocked` → `blocked`;
  *  3. else the latest recorded run-level terminal event (`run-completed`/`run-cancelled`/`run-crashed`)
  *     decides. `completed` and `cancelled` are run-level facts that cannot be derived from step states
@@ -56,8 +57,9 @@ function hasState(states: ReadonlyMap<StepStateKey, StepState>, target: StepStat
  * The step a listing should show as "current" for a run (spec §6.3): whichever step matches the run's
  * own derived status (its `in_progress`/`blocked` step while live, or the step it stopped at when
  * `crashed`/`cancelled`). `undefined` for a cleanly `completed` run, or one that hasn't touched a step
- * yet. Under today's sequential engine at most one step ever matches; P3 concurrency may need this to
- * report more than one, which is why it takes the already-derived state map rather than re-deriving.
+ * yet. Under concurrency more than one step can genuinely match (spec §3.4/§3.5/§8.6); this reports the
+ * first one found and callers that need the full set (e.g. pending-question counts) use
+ * `pendingQuestionCount`/`deriveStepStates` directly rather than this single-name convenience.
  */
 export function currentStepName(status: RunStatus, states: ReadonlyMap<StepStateKey, StepState>): string | undefined {
   if (status === "completed") return undefined;

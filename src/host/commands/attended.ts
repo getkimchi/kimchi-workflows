@@ -5,7 +5,7 @@
  * Shared by `/workflow run`, `/workflow create`, and `/workflow resume`, all of which can reach a
  * blocked step and must then attend it identically.
  */
-import { resumeWithAnswer } from "../../engine/resume-workflow.ts";
+import { pendingQuestionnaires, resumeWithAnswer } from "../../engine/resume-workflow.ts";
 import type { RunEvent } from "../../engine/types.ts";
 import type { Questionnaire } from "../../flow/questionnaire.ts";
 import { createHostPort } from "../host-port.ts";
@@ -70,11 +70,12 @@ export async function handleAttendedQuestionnaire(
   }
 }
 
-/** The pending questionnaire of a blocked run: the last `questionnaire-asked` payload. */
+/**
+ * The pending questionnaire a `/workflow resume` should show first: the FIFO-first currently-blocked
+ * one (spec §8.6) — i.e. exactly the one `resumeWithAnswer` targets by default when this same answer is
+ * delivered back with no explicit `path`. With several steps blocked at once, showing anything else
+ * (e.g. simply the last EVER asked) would let the user answer a DIFFERENT question than the one displayed.
+ */
 export function pendingQuestionnaire(events: readonly RunEvent[]): Questionnaire | undefined {
-  let questionnaire: Questionnaire | undefined;
-  for (const event of events) {
-    if (event.type === "questionnaire-asked") questionnaire = event.questionnaire;
-  }
-  return questionnaire;
+  return pendingQuestionnaires(events)[0]?.questionnaire;
 }

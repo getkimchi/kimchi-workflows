@@ -12,9 +12,10 @@ export type {
   LoopOptions,
   MapOptions,
   NestedWorkflowOptions,
+  ParallelOptions,
   WorkflowBuilder,
 } from "./create-workflow.ts";
-export { createWorkflow, DEFAULT_MAX_ITERATIONS } from "./create-workflow.ts";
+export { createWorkflow, DEFAULT_FOREACH_CONCURRENCY, DEFAULT_MAX_CONCURRENCY, DEFAULT_MAX_ITERATIONS } from "./create-workflow.ts";
 export type { AnswersCheck, Question, QuestionKind, Questionnaire, QuestionOption } from "./questionnaire.ts";
 export {
   answersToOutput,
@@ -40,6 +41,7 @@ export type {
   LoopNode,
   MapFn,
   NestedWorkflowNode,
+  ParallelNode,
   QuestionnaireStep,
   RetryPolicy,
   RunContext,

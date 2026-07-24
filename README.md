@@ -185,7 +185,7 @@ Run it from inside PI:
 
 Two rules come with fan-out. **Concurrent steps must not touch the same files** — the engine can't know what an agent will edit, so overlapping side effects are yours to avoid; sequence anything that shares state. And **reading a step that's currently in flight throws** rather than returning `undefined`, because a silent `undefined` would make the value depend on who won the race.
 
-Step names need only be unique within their enclosing workflow — the same sub-workflow can be composed twice, and steps are addressed by **node path** (`audit/lint`, `until-valid#3/design`, `batch#7/review`). `ctx.getStepResult("lint")` resolves to the nearest enclosing scope; pass a full path when a bare name would be ambiguous.
+Step names need only be unique within their enclosing workflow — the same sub-workflow can be composed twice, and steps are addressed by **node path** (`audit/lint`, `until-valid#3/design`, `batch@7/review`). `ctx.getStepResult("lint")` resolves to the nearest enclosing scope; pass a full path when a bare name would be ambiguous.
 
 ---
 

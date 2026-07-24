@@ -75,7 +75,7 @@ describe("re-entry (spec §8.5): a blocked step resumes in place, wherever it is
 
     const blocked = await runWorkflow(workflow, undefined, host);
     expect(blocked.status).toBe("blocked");
-    expect(blocked.path).toBe("batch#1/ask-in-item");
+    expect(blocked.path).toBe("batch@1/ask-in-item");
 
     const priorEvents = await store.loadEvents(blocked.runId);
     expect(priorEvents.filter((e) => e.type === "foreach-item-completed")).toHaveLength(1); // only item 0 so far
@@ -90,9 +90,9 @@ describe("re-entry (spec §8.5): a blocked step resumes in place, wherever it is
 
     // Item 0 not re-run; item 1's own "started" is not re-emitted (it was already recorded); item 2 runs fresh.
     const finalEvents = await store.loadEvents(blocked.runId);
-    expect(finalEvents.filter((e) => e.type === "step-started" && e.path === "batch#0/ask-in-item")).toHaveLength(1);
-    expect(finalEvents.filter((e) => e.type === "foreach-item-started" && e.path === "batch#1")).toHaveLength(1);
-    expect(finalEvents.filter((e) => e.type === "foreach-item-started" && e.path === "batch#2")).toHaveLength(1);
+    expect(finalEvents.filter((e) => e.type === "step-started" && e.path === "batch@0/ask-in-item")).toHaveLength(1);
+    expect(finalEvents.filter((e) => e.type === "foreach-item-started" && e.path === "batch@1")).toHaveLength(1);
+    expect(finalEvents.filter((e) => e.type === "foreach-item-started" && e.path === "batch@2")).toHaveLength(1);
   });
 
   it("inside a branch arm: resume re-enters the taken arm without re-evaluating the branch as unresolved", async () => {
