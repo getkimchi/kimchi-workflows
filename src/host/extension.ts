@@ -10,10 +10,10 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { handleCancel, handleCreate, handleDelete, handleListRuns, handleListWorkflows, handleResume, handleRun } from "./commands/index.ts";
 import { createFsStore } from "./fs-store.ts";
 import { createPiAgentBridge } from "./pi-agent.ts";
-import { createRunGuard } from "./run-guard.ts";
+import { createRunLock } from "./run-lock.ts";
 
 export default function piWorkflowsExtension(pi: ExtensionAPI): void {
-  const guard = createRunGuard(); // one active run per process (spec §7)
+  const guard = createRunLock(); // one execution slot per project, backed by the file lock (spec §7)
   const bindAgentStarter = createPiAgentBridge(pi); // one agent_end listener for the extension's lifetime
 
   pi.registerCommand("workflow", {

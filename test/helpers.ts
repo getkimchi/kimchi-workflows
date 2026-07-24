@@ -1,6 +1,7 @@
 import type { HostPort, RunEvent } from "../src/engine/types.ts";
 import { createHostPort, type HostPortOptions } from "../src/host/host-port.ts";
 import { createMemoryStore } from "../src/host/memory-store.ts";
+import type { BeginResult, RunLock } from "../src/host/run-lock.ts";
 import type { RunStore } from "../src/host/types.ts";
 
 export interface TestHost {
@@ -34,4 +35,32 @@ export function createTestHost(options: HostPortOptions = {}): TestHost {
     ...options,
   });
   return { host, store, sleepCalls, events: store.events };
+}
+
+/**
+ * A fake `RunLock` for tests that exercise `runGuarded`/`handleCancel` orchestration without touching
+ * the filesystem — the real file-backed lock's contention/reclaim/atomicity are covered directly in
+ * test/run-lock.test.ts. Mirrors the old in-process guard: at most one active runId in memory at a
+ * time; `begin`/`end` ignore the `projectRoot`/`store` arguments (present only to satisfy `RunLock`'s
+ * shape) since there is no real lock file to touch.
+ */
+export function createFakeRunLock(): RunLock {
+  let active: { runId: string; controller: AbortController } | undefined;
+
+  return {
+    get active() {
+      return active;
+    },
+    async begin(runId: string): Promise<BeginResult> {
+      if (active) {
+        return { ok: false, reason: "held", holder: { runId: active.runId, pid: -1, host: "fake-host", startedAt: "" } };
+      }
+      const controller = new AbortController();
+      active = { runId, controller };
+      return { ok: true, controller };
+    },
+    async end(runId: string): Promise<void> {
+      if (active?.runId === runId) active = undefined;
+    },
+  };
 }

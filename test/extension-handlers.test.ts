@@ -8,11 +8,10 @@ import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunResult } from "../src/engine/types.ts";
 import { createQuestionnaireStep, createStep, createWorkflow } from "../src/flow/index.ts";
 import { handleCancel, handleDelete, handleListRuns, handleListWorkflows, runGuarded } from "../src/host/commands/index.ts";
-import { createRunGuard } from "../src/host/run-guard.ts";
 import { summarizeRun } from "../src/host/summarize-run.ts";
 import type { RunStore, RunSummary } from "../src/host/types.ts";
 import { workflowsDir } from "../src/host/workflow-catalog.ts";
-import { createTestHost } from "./helpers.ts";
+import { createFakeRunLock, createTestHost } from "./helpers.ts";
 
 type NoteType = "info" | "warning" | "error" | undefined;
 function notifySpy() {
@@ -24,12 +23,13 @@ function notifySpy() {
 
 describe("runGuarded", () => {
   const completed: RunResult = { runId: "r1", status: "completed" };
+  const fakeStore = { appendEvent: async () => {} };
 
   it("runs with the run's abort signal and releases the guard on success", async () => {
-    const guard = createRunGuard();
+    const guard = createFakeRunLock();
     const spy = notifySpy();
     let sawSignal: AbortSignal | undefined;
-    const result = await runGuarded(guard, "r1", spy.notify, (signal) => {
+    const result = await runGuarded(guard, "r1", "/fake/project", fakeStore, spy.notify, (signal) => {
       sawSignal = signal;
       expect(guard.active?.runId).toBe("r1"); // held during the run
       return Promise.resolve(completed);
@@ -41,24 +41,24 @@ describe("runGuarded", () => {
   });
 
   it("releases the guard even when the run throws", async () => {
-    const guard = createRunGuard();
+    const guard = createFakeRunLock();
     const spy = notifySpy();
-    await expect(runGuarded(guard, "r1", spy.notify, () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
+    await expect(runGuarded(guard, "r1", "/fake/project", fakeStore, spy.notify, () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
     expect(guard.active).toBeUndefined();
   });
 
-  it("notifies the race message and skips the run when the guard is busy", async () => {
-    const guard = createRunGuard();
-    guard.begin("other"); // occupy the guard
+  it("notifies naming the holder and skips the run when the guard is busy", async () => {
+    const guard = createFakeRunLock();
+    await guard.begin("other", "/fake/project", fakeStore); // occupy the guard
     const spy = notifySpy();
     let ran = false;
-    const result = await runGuarded(guard, "r1", spy.notify, () => {
+    const result = await runGuarded(guard, "r1", "/fake/project", fakeStore, spy.notify, () => {
       ran = true;
       return Promise.resolve(completed);
     });
     expect(result).toBeUndefined();
     expect(ran).toBe(false);
-    expect(spy.notes).toEqual([["workflow: another run became active; try again.", "warning"]]);
+    expect(spy.notes).toEqual([["workflow: run other is already executing (pid -1 on fake-host); cancel it or wait before starting/resuming another.", "warning"]]);
     expect(guard.active?.runId).toBe("other"); // the busy run is untouched
   });
 });
@@ -72,14 +72,14 @@ describe("handleListRuns", () => {
     expect(spy.notes).toEqual([["No workflow runs recorded.", "info"]]);
   });
 
-  it("formats one line per run, using a dash for a missing completedAt", async () => {
+  it("formats one line per run, using a dash for a missing completedAt/currentStep", async () => {
     const spy = notifySpy();
     const runs: RunSummary[] = [
-      { runId: "a1", workflowName: "survey", status: "completed", startedAt: "T0", completedAt: "T1" },
-      { runId: "b2", workflowName: "plan", status: "blocked", startedAt: "T2" },
+      { runId: "a1", workflowName: "survey", status: "completed", startedAt: "T0", completedAt: "T1", pendingQuestions: 0 },
+      { runId: "b2", workflowName: "plan", status: "blocked", startedAt: "T2", currentStep: "ask", pendingQuestions: 1 },
     ];
     await handleListRuns({ ui: { notify: spy.notify } }, { list: () => Promise.resolve(runs) });
-    expect(spy.notes).toEqual([["a1  survey  completed  started=T0  completed=T1\nb2  plan  blocked  started=T2  completed=-", "info"]]);
+    expect(spy.notes).toEqual([["a1  survey  completed  step=-  started=T0  completed=T1\nb2  plan  blocked  step=ask  started=T2  completed=-  questions=1", "info"]]);
   });
 });
 
@@ -180,14 +180,14 @@ async function storeWithRun(kind: "blocked" | "completed"): Promise<{ store: Run
 
 describe("handleCancel", () => {
   it("aborts the executing run", async () => {
-    const guard = createRunGuard();
-    const controller = guard.begin("live");
+    const guard = createFakeRunLock();
+    const begun = await guard.begin("live", "/fake/project", { appendEvent: async () => {} });
     const spy = notifySpy();
     const { store } = await storeWithRun("blocked");
 
     await handleCancel({ ui: { notify: spy.notify } }, guard, store, undefined);
 
-    expect(controller?.signal.aborted).toBe(true);
+    expect(begun.ok && begun.controller.signal.aborted).toBe(true);
     expect(spy.notes[0]?.[0]).toMatch(/cancelling run live at the next step boundary/);
   });
 
@@ -196,7 +196,7 @@ describe("handleCancel", () => {
     const spy = notifySpy();
 
     // No guard entry: a blocked run is not executing (spec §7.1), so there is nothing to abort.
-    await handleCancel({ ui: { notify: spy.notify } }, createRunGuard(), store, runId);
+    await handleCancel({ ui: { notify: spy.notify } }, createFakeRunLock(), store, runId);
 
     expect(summarizeRun(await store.loadEvents(runId))?.status).toBe("cancelled");
     expect(spy.notes[0]?.[0]).toMatch(/cancelled blocked run/);
@@ -206,7 +206,7 @@ describe("handleCancel", () => {
     const { store, runId } = await storeWithRun("blocked");
     const spy = notifySpy();
 
-    await handleCancel({ ui: { notify: spy.notify } }, createRunGuard(), store, undefined);
+    await handleCancel({ ui: { notify: spy.notify } }, createFakeRunLock(), store, undefined);
 
     expect(summarizeRun(await store.loadEvents(runId))?.status).toBe("cancelled");
   });
@@ -215,7 +215,7 @@ describe("handleCancel", () => {
     const { store, runId } = await storeWithRun("completed");
     const spy = notifySpy();
 
-    await handleCancel({ ui: { notify: spy.notify } }, createRunGuard(), store, runId);
+    await handleCancel({ ui: { notify: spy.notify } }, createFakeRunLock(), store, runId);
 
     expect(spy.notes[0]?.[0]).toMatch(/is completed; only an executing or blocked run can be cancelled/);
     expect(summarizeRun(await store.loadEvents(runId))?.status).toBe("completed"); // untouched
@@ -225,7 +225,7 @@ describe("handleCancel", () => {
     const { store } = await storeWithRun("completed");
     const spy = notifySpy();
 
-    await handleCancel({ ui: { notify: spy.notify } }, createRunGuard(), store, undefined);
+    await handleCancel({ ui: { notify: spy.notify } }, createFakeRunLock(), store, undefined);
 
     expect(spy.notes[0]?.[0]).toMatch(/nothing to cancel/);
   });
@@ -257,7 +257,7 @@ describe("handleDelete", () => {
     const { store, runId } = await storeWithRun("blocked");
     const spy = notifySpy();
 
-    await handleCancel({ ui: { notify: spy.notify } }, createRunGuard(), store, runId);
+    await handleCancel({ ui: { notify: spy.notify } }, createFakeRunLock(), store, runId);
     await handleDelete({ ui: { notify: spy.notify } }, store, runId);
 
     expect(await store.loadEvents(runId)).toEqual([]);
@@ -280,7 +280,7 @@ describe("a cancelled run cannot be resurrected by a late answer (adversarial re
     const { host, store } = createTestHost();
 
     const blocked = await runWorkflow(workflow, undefined, host);
-    await handleCancel({ ui: { notify: notifySpy().notify } }, createRunGuard(), store, blocked.runId);
+    await handleCancel({ ui: { notify: notifySpy().notify } }, createFakeRunLock(), store, blocked.runId);
 
     // An answer captured before the cancel (an open prompt, or another session) must not undo it.
     await expect(resumeWithAnswer(workflow, await store.loadEvents(blocked.runId), { name: "Ada" }, host)).rejects.toThrow(/was cancelled after blocking/);
@@ -312,7 +312,7 @@ describe("a cancelled run is still resumable — only stale answers are refused 
     const { host, store } = createTestHost();
 
     const blocked = await runWorkflow(workflow, undefined, host);
-    await handleCancel({ ui: { notify: notifySpy().notify } }, createRunGuard(), store, blocked.runId);
+    await handleCancel({ ui: { notify: notifySpy().notify } }, createFakeRunLock(), store, blocked.runId);
     expect(summarizeRun(await store.loadEvents(blocked.runId))?.status).toBe("cancelled");
 
     // §5.2: cancelled is recoverable. The re-run path (§8.2) re-runs the interrupted step, so the

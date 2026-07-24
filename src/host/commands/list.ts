@@ -14,7 +14,13 @@ import type { NotifyCtx } from "./context.ts";
 export async function handleListRuns(ctx: NotifyCtx, store: Pick<RunStore, "list">): Promise<void> {
   const runs = await store.list();
   if (runs.length === 0) return void ctx.ui.notify("No workflow runs recorded.", "info");
-  const lines = runs.map((run) => `${run.runId}  ${run.workflowName}  ${run.status}  started=${run.startedAt}  completed=${run.completedAt ?? "-"}`);
+  const lines = runs.map((run) => {
+    // Pending-question count is not decoration (spec §6.3): a run reads `in_progress` while any step
+    // executes, even with a sibling step simultaneously `blocked` — without this, a waiting question
+    // would be invisible in the listing.
+    const questions = run.pendingQuestions > 0 ? `  questions=${run.pendingQuestions}` : "";
+    return `${run.runId}  ${run.workflowName}  ${run.status}  step=${run.currentStep ?? "-"}  started=${run.startedAt}  completed=${run.completedAt ?? "-"}${questions}`;
+  });
   ctx.ui.notify(lines.join("\n"), "info");
 }
 

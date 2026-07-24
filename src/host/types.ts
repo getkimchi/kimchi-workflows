@@ -1,12 +1,19 @@
+import type { RunStatus } from "../engine/run-status.ts";
 import type { RunEvent } from "../engine/types.ts";
 
 /** One row of `/workflow list` output (spec §6.3). */
 export interface RunSummary {
   readonly runId: string;
   readonly workflowName: string;
-  readonly status: "in_progress" | "completed" | "crashed" | "cancelled" | "blocked";
+  /** Derived from the event log (spec §5.3) — never an authoritative stored field. */
+  readonly status: RunStatus;
   readonly startedAt: string;
   readonly completedAt?: string;
+  /** The step the run is currently at, if any (spec §6.3): its `in_progress`/`blocked` step while
+   * live, or the step it stopped at when `crashed`/`cancelled`. */
+  readonly currentStep?: string;
+  /** How many steps are currently `blocked` (spec §6.3) — not implied by `status` alone (§5.3). */
+  readonly pendingQuestions: number;
 }
 
 /**

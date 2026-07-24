@@ -4,7 +4,7 @@
  * The two are deliberately sequential — a live run must be cancelled before it can be deleted — so
  * removal is always a second, deliberate act.
  */
-import type { RunGuard } from "../run-guard.ts";
+import type { RunLock } from "../run-lock.ts";
 import { summarizeRun } from "../summarize-run.ts";
 import type { RunStore } from "../types.ts";
 import type { NotifyCtx } from "./context.ts";
@@ -20,7 +20,7 @@ import type { NotifyCtx } from "./context.ts";
  * Bare targets the executing run, or the sole blocked run when none is executing; with several blocked
  * a run-id is required.
  */
-export async function handleCancel(ctx: NotifyCtx, guard: RunGuard, store: Pick<RunStore, "loadEvents" | "appendEvent" | "list">, runIdArg: string | undefined): Promise<void> {
+export async function handleCancel(ctx: NotifyCtx, guard: RunLock, store: Pick<RunStore, "loadEvents" | "appendEvent" | "list">, runIdArg: string | undefined): Promise<void> {
   const active = guard.active;
 
   if (active && (!runIdArg || runIdArg === active.runId)) {
