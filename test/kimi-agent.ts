@@ -34,7 +34,7 @@ interface ChatMessage {
 /**
  * A `startAgent` backed by real kimi chat completions. The gateway is stateless, so each turn sends
  * the FULL accumulated conversation (seeded with `history` on a resumed session) — this is what lets
- * a parked Q&A step's answer turn carry the prior question's context (spec §8.4).
+ * a blocked Q&A step's answer turn carry the prior question's context (spec §8.4).
  */
 export function createKimiAgentStarter(apiKey: string): (request: AgentRequest) => AgentSession {
   return (request) => {

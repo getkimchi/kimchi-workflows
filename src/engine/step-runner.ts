@@ -23,7 +23,7 @@ interface BudgetedStep {
 
 /**
  * How an agent step's conversation begins: a `fresh` run builds the prompt from input+context; an
- * `answer` resume (spec §8.4) seeds the session with the parked conversation and replays the user's
+ * `answer` resume (spec §8.4) seeds the session with the blocked conversation and replays the user's
  * structured answers as the next turn.
  */
 export type AgentEntry = { kind: "fresh" } | { kind: "answer"; answers: Record<string, unknown>; conversation: readonly unknown[] };
@@ -34,14 +34,14 @@ export type AgentEntry = { kind: "fresh" } | { kind: "answer"; answers: Record<s
  *  - `retryable` — a failure the retry policy may re-attempt (thrown error / invalid function output /
  *                  agent transport error / budget exceeded, spec §9.3);
  *  - `fatal`     — a non-retryable failure (an agent whose output stays invalid after steering);
- *  - `parked`    — a Q&A step emitted a `{questionnaire}` batch (spec §10);
+ *  - `blocked`    — a Q&A step emitted a `{questions}` batch (spec §10);
  *  - `cancelled` — the abort signal fired.
  */
 type AttemptResult =
   | { kind: "ok"; output: unknown }
   | { kind: "retryable"; reason: RetryReason; error: string }
   | { kind: "fatal"; error: string }
-  | { kind: "parked"; questionnaire: Questionnaire; conversation: readonly unknown[] }
+  | { kind: "blocked"; questionnaire: Questionnaire; conversation: readonly unknown[] }
   | { kind: "cancelled" };
 
 /** Run a function step under its retry + time budget (spec §9). Emits `step-retry`; the caller emits step lifecycle. */
@@ -69,22 +69,22 @@ async function retryLoop(
   runSignal: AbortSignal,
   attempt: (signal: AbortSignal) => Promise<AttemptResult>,
 ): Promise<StepOutcome> {
-  const maxAttempts = Math.max(1, step.retry?.maxAttempts ?? 1);
+  const totalAttempts = Math.max(1, (step.retry?.maxRetry ?? 0) + 1);
   const backoffMs = step.retry?.backoffMs ?? 0;
   let lastError = "";
 
-  for (let n = 1; n <= maxAttempts; n++) {
+  for (let n = 1; n <= totalAttempts; n++) {
     if (runSignal.aborted) return { kind: "cancelled" };
 
     const result = await withTimeBudget(step, host, runSignal, attempt);
     if (result.kind === "cancelled") return { kind: "cancelled" };
     if (result.kind === "ok") return { kind: "ok", output: result.output };
-    if (result.kind === "parked") return { kind: "parked", questionnaire: result.questionnaire, conversation: result.conversation };
+    if (result.kind === "blocked") return { kind: "blocked", questionnaire: result.questionnaire, conversation: result.conversation };
     if (result.kind === "fatal") return { kind: "crashed", error: result.error };
 
     // Retryable failure (thrown / invalid output / budget exceeded): re-attempt if budget remains.
     lastError = result.error;
-    if (await retryScheduled(host, state.runId, step.name, n, maxAttempts, backoffMs, result.reason, result.error)) continue;
+    if (await retryScheduled(host, state.runId, step.name, n, totalAttempts, backoffMs, result.reason, result.error)) continue;
     return { kind: "crashed", error: lastError };
   }
 
@@ -139,9 +139,9 @@ async function runFunctionAttempt(step: FunctionStep, input: unknown, ctx: RunCo
  * One agent attempt: open a session (seeded with `entry` history), send the first message (prompt or
  * answer), and steer within the same session on invalid output up to `maxOutputRepairs` (spec §9.2).
  * Token usage is summed across turns; exceeding `maxTokens` → retryable `budget-exceeded` (§9.3). A
- * Q&A `{questionnaire}` → `parked` (§10); steering exhausted → `fatal`; transport error → `retryable`.
+ * Q&A `{questions}` → `blocked` (§10); steering exhausted → `fatal`; transport error → `retryable`.
  *
- * When `asks`, the framework owns the questionnaire schema: the reply union is `{result}|{questionnaire}`
+ * When `asks`, the framework owns the questionnaire schema: the reply union is `{result}|{questions}`
  * and the asking protocol is auto-injected into the fresh prompt (so the author's prompt is task-only).
  */
 async function runAgentSession(step: AgentStep, input: unknown, host: HostPort, ctx: RunContext, state: RunState, signal: AbortSignal, entry: AgentEntry): Promise<AttemptResult> {
@@ -177,8 +177,8 @@ async function runAgentSession(step: AgentStep, input: unknown, host: HostPort, 
 
       const check = checkAgentReply(step, turn.text);
       if (check.ok) {
-        if (check.kind === "questionnaire") {
-          return { kind: "parked", questionnaire: check.questionnaire, conversation: session.getConversation() };
+        if (check.kind === "questions") {
+          return { kind: "blocked", questionnaire: check.questions, conversation: session.getConversation() };
         }
         return { kind: "ok", output: check.value };
       }
@@ -198,17 +198,15 @@ async function runAgentSession(step: AgentStep, input: unknown, host: HostPort, 
   }
 }
 
-type ReplyCheck = { ok: true; kind: "result"; value: unknown } | { ok: true; kind: "questionnaire"; questionnaire: Questionnaire } | { ok: false; violation: string };
+type ReplyCheck = { ok: true; kind: "result"; value: unknown } | { ok: true; kind: "questions"; questions: Questionnaire } | { ok: false; violation: string };
 
-/** Validate the agent's reply against the step's output schema — or, for Q&A steps, the `{result}|{questionnaire}` union. */
+/** Validate the agent's reply against the step's output schema — or, for Q&A steps, the `{result}|{questions}` union. */
 function checkAgentReply(step: AgentStep, text: string): ReplyCheck {
   if (step.asks) {
     const check = validateQaOutput(step.outputSchema, text);
     if (!check.ok) return check;
-    // `questionnaire` validated against QuestionnaireSchema above, so the cast is sound.
-    return check.kind === "questionnaire"
-      ? { ok: true, kind: "questionnaire", questionnaire: check.questionnaire as Questionnaire }
-      : { ok: true, kind: "result", value: check.value };
+    // `questions` validated against QuestionnaireSchema above, so the cast is sound.
+    return check.kind === "questions" ? { ok: true, kind: "questions", questions: check.questions as Questionnaire } : { ok: true, kind: "result", value: check.value };
   }
   const check = validateAgentOutput(step.outputSchema, text);
   return check.ok ? { ok: true, kind: "result", value: check.value } : check;
@@ -239,12 +237,12 @@ async function retryScheduled(
   runId: string,
   stepName: string,
   attempt: number,
-  maxAttempts: number,
+  totalAttempts: number,
   backoffMs: number,
   reason: RetryReason,
   error: string,
 ): Promise<boolean> {
-  if (attempt >= maxAttempts) return false;
+  if (attempt >= totalAttempts) return false;
   await host.emit({ type: "step-retry", runId, stepName, attempt, reason, error, at: iso(host) });
   if (backoffMs > 0) await host.sleep(backoffMs);
   return true;

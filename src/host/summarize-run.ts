@@ -6,7 +6,7 @@ import type { RunSummary } from "./types.ts";
  * (memory, filesystem) so listing logic is defined exactly once.
  *
  * Status reflects the *latest* lifecycle transition, so a run that crashed and was then resumed to
- * completion lists as `completed`, and one still executing after a resume lists as `running`.
+ * completion lists as `completed`, and one still executing after a resume lists as `in_progress`.
  */
 export function summarizeRun(events: readonly RunEvent[]): RunSummary | undefined {
   const started = events.find((event): event is Extract<RunEvent, { type: "run-started" }> => event.type === "run-started");
@@ -14,7 +14,7 @@ export function summarizeRun(events: readonly RunEvent[]): RunSummary | undefine
     return undefined;
   }
 
-  let status: RunSummary["status"] = "running";
+  let status: RunSummary["status"] = "in_progress";
   let completedAt: string | undefined;
   for (const event of events) {
     if (event.type === "run-completed") {
@@ -27,10 +27,10 @@ export function summarizeRun(events: readonly RunEvent[]): RunSummary | undefine
       status = "cancelled";
       completedAt = event.at;
     } else if (event.type === "questionnaire-asked") {
-      status = "parked"; // suspended awaiting answers (spec §10); non-terminal, resumable
+      status = "blocked"; // suspended awaiting answers (spec §10); non-terminal, resumable
       completedAt = undefined;
     } else if (event.type === "run-resumed" || event.type === "answers-provided") {
-      status = "running";
+      status = "in_progress";
       completedAt = undefined;
     }
   }

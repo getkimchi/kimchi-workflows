@@ -23,7 +23,7 @@ import { forEachNode } from "../flow/types.ts";
  * {@link usage} — never written by hand, so the wire encoding stays an implementation detail.
  */
 export type AgentTurnScript =
-  /** A `{questionnaire}` reply — the run parks. Only valid for a step declared `asks: true`. */
+  /** A `{questions}` reply — the run blocks. Only valid for a step declared `asks: true`. */
   | { kind: "ask"; questionnaire: Questionnaire; totalTokens?: number }
   /** The step's success payload. Encoded bare or as `{result}` depending on the step's `asks` flag. */
   | { kind: "reply"; value: unknown; totalTokens?: number }
@@ -32,7 +32,7 @@ export type AgentTurnScript =
   /** A transport failure — drives the step's outer retry policy (spec §9.1). */
   | { kind: "throws"; error: Error };
 
-/** Script a `{questionnaire}` turn: the agent asks, and the run parks (spec §10.1). */
+/** Script a `{questions}` turn: the agent asks, and the run blocks (spec §10.1). */
 export function ask(questionnaire: Questionnaire): AgentTurnScript {
   return { kind: "ask", questionnaire };
 }
@@ -86,7 +86,7 @@ export type AgentScripts = Readonly<Record<string, readonly AgentTurnScript[]>>;
 /**
  * Build the double. `nodes` is the workflow's node tree: it resolves each scripted name to its
  * `AgentStep`, which (a) rejects scripts naming a step that is not an agent step, (b) rejects an
- * `ask(...)` scripted against a step that cannot park, and (c) tells `reply(...)` which wire shape to
+ * `ask(...)` scripted against a step that cannot block, and (c) tells `reply(...)` which wire shape to
  * emit. Failing at construction beats failing later as an opaque schema violation.
  */
 export function createAgentDouble(nodes: readonly WorkflowNode[], scripts: AgentScripts): AgentDouble {
@@ -101,7 +101,7 @@ export function createAgentDouble(nodes: readonly WorkflowNode[], scripts: Agent
     }
     const asked = turns.findIndex((turn) => turn.kind === "ask");
     if (asked !== -1 && !step.asks) {
-      throw new Error(`agent script for "${stepName}": ask() at index ${asked} requires a step declared asks: true — a plain agent step can never park`);
+      throw new Error(`agent script for "${stepName}": ask() at index ${asked} requires a step declared asks: true — a plain agent step can never block`);
     }
     queues.set(stepName, [...turns]);
     records.set(stepName, { messages: [], models: [], sessions: 0 });
@@ -163,9 +163,9 @@ function encodeTurn(step: AgentStep, turn: Exclude<AgentTurnScript, { kind: "thr
     case "raw":
       return turn.text;
     case "ask":
-      return JSON.stringify({ questionnaire: turn.questionnaire });
+      return JSON.stringify({ questions: turn.questionnaire });
     case "reply":
-      // A Q&A step's reply is the `{result} | {questionnaire}` union; a plain step's is the bare output.
+      // A Q&A step's reply is the `{result} | {questions}` union; a plain step's is the bare output.
       return JSON.stringify(step.asks ? { result: turn.value } : turn.value);
   }
 }

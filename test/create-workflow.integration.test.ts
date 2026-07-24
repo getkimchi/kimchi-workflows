@@ -69,7 +69,7 @@ function answerOne(question: Question): unknown {
   }
 }
 
-/** Run the meta-workflow to completion, answering every park along the way. */
+/** Run the meta-workflow to completion, answering every block along the way. */
 async function createWorkflowE2E(model: string, fileName: string, projectRoot: string): Promise<{ result: RunResult; rounds: number }> {
   const { host, store } = createTestHost({ startAgent: createKimiAgentStarter(apiKey ?? "") });
 
@@ -79,10 +79,10 @@ async function createWorkflowE2E(model: string, fileName: string, projectRoot: s
   let result = await runWorkflow(underTest, { projectRoot }, host);
   let rounds = 0;
 
-  while (result.status === "parked" && rounds < MAX_ROUNDS) {
+  while (result.status === "blocked" && rounds < MAX_ROUNDS) {
     rounds += 1;
     const questionnaire = result.questionnaire;
-    if (!questionnaire) throw new Error("parked with no questionnaire");
+    if (!questionnaire) throw new Error("blocked with no questionnaire");
 
     // The opening form is the only step whose answers must be exact; the rest are auto-answered.
     const answers = result.stepName === "brief" ? { goal: GOAL, fileName } : autoAnswer(questionnaire);
@@ -123,7 +123,7 @@ async function smokeRun(workflow: WorkflowDefinition, model: string): Promise<Ru
   // Supply top-level input when the workflow declares a schema for it (spec §3.9).
   const input = workflow.inputSchema ? Value.Create(workflow.inputSchema) : undefined;
   let run = await createTestRun(workflow, { agents, input });
-  for (let round = 0; run.status === "parked" && round < MAX_ROUNDS; round++) {
+  for (let round = 0; run.status === "blocked" && round < MAX_ROUNDS; round++) {
     const questionnaire = run.questionnaire;
     if (!questionnaire) break;
     console.log(`[create-e2e ${model}] smoke answering: ${questionnaire.questions.map((q) => q.key).join(", ")}`);

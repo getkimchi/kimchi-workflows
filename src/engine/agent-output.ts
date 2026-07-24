@@ -12,8 +12,8 @@ import { extractJson } from "./extract-json.ts";
 /** Result of checking an agent reply: the parsed value, or a human-readable violation to steer on. */
 export type AgentOutputCheck = { ok: true; value: unknown } | { ok: false; violation: string };
 
-/** Result of checking a Q&A reply (spec §10.1): a validated result, a validated questionnaire batch, or a violation. */
-export type QaOutputCheck = { ok: true; kind: "result"; value: unknown } | { ok: true; kind: "questionnaire"; questionnaire: unknown } | { ok: false; violation: string };
+/** Result of checking a Q&A reply (spec §10.1): a validated result, a validated questions batch, or a violation. */
+export type QaOutputCheck = { ok: true; kind: "result"; value: unknown } | { ok: true; kind: "questions"; questions: unknown } | { ok: false; violation: string };
 
 /** Extract JSON from `text` (tolerantly) and validate it against `schema`. */
 export function validateAgentOutput(schema: TSchema, text: string): AgentOutputCheck {
@@ -29,9 +29,9 @@ export function validateAgentOutput(schema: TSchema, text: string): AgentOutputC
 }
 
 /**
- * Validate a Q&A reply against the discriminated union `{ result } | { questionnaire }` (spec §10.1).
- * The framework owns the questionnaire schema. The branch is chosen by which key is present; a
- * `questionnaire` key takes precedence, then `result`.
+ * Validate a Q&A reply against the discriminated union `{ result } | { questions }` (spec §10.1).
+ * The framework owns the questionnaire schema; the payload is a batch, hence the plural key. The
+ * branch is chosen by which key is present; a `questions` key takes precedence, then `result`.
  */
 export function validateQaOutput(outputSchema: TSchema, text: string): QaOutputCheck {
   const extracted = extractJson(text);
@@ -40,22 +40,22 @@ export function validateQaOutput(outputSchema: TSchema, text: string): QaOutputC
   }
   const value = extracted.value;
   if (!isRecord(value)) {
-    return { ok: false, violation: 'expected a JSON object of the form {"result": ...} or {"questionnaire": ...}' };
+    return { ok: false, violation: 'expected a JSON object of the form {"result": ...} or {"questions": ...}' };
   }
-  if ("questionnaire" in value) {
-    const violation = describeSchemaViolations(QuestionnaireSchema, value.questionnaire);
-    return violation ? { ok: false, violation: `questionnaire: ${violation}` } : { ok: true, kind: "questionnaire", questionnaire: value.questionnaire };
+  if ("questions" in value) {
+    const violation = describeSchemaViolations(QuestionnaireSchema, value.questions);
+    return violation ? { ok: false, violation: `questions: ${violation}` } : { ok: true, kind: "questions", questions: value.questions };
   }
   if ("result" in value) {
     const violation = describeSchemaViolations(outputSchema, value.result);
     return violation ? { ok: false, violation: `result: ${violation}` } : { ok: true, kind: "result", value: value.result };
   }
-  return { ok: false, violation: 'expected a JSON object with a "result" or "questionnaire" key' };
+  return { ok: false, violation: 'expected a JSON object with a "result" or "questions" key' };
 }
 
-/** The JSON Schema shown in a Q&A step's steering correction: the `{result}|{questionnaire}` union. */
+/** The JSON Schema shown in a Q&A step's steering correction: the `{result}|{questions}` union. */
 export function buildQaSchema(outputSchema: TSchema): TSchema {
-  return Type.Union([Type.Object({ result: outputSchema }), Type.Object({ questionnaire: QuestionnaireSchema })]);
+  return Type.Union([Type.Object({ result: outputSchema }), Type.Object({ questions: QuestionnaireSchema })]);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

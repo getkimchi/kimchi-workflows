@@ -8,12 +8,12 @@ import { createTestHost } from "./helpers.ts";
 type StepRetryEvent = Extract<RunEvent, { type: "step-retry" }>;
 
 describe("retry policy (spec §9)", () => {
-  it("retries a thrown error and succeeds within maxAttempts, sleeping the backoff", async () => {
+  it("retries a thrown error and succeeds within maxRetry, sleeping the backoff", async () => {
     let attempts = 0;
     const flaky = createStep({
       name: "flaky",
       output: Type.Object({ ok: Type.Boolean() }),
-      retry: { maxAttempts: 2, backoffMs: 50 },
+      retry: { maxRetry: 1, backoffMs: 50 }, // 1 retry after the first = 2 total attempts
       run: () => {
         attempts += 1;
         if (attempts === 1) throw new Error("transient failure");
@@ -34,11 +34,11 @@ describe("retry policy (spec §9)", () => {
     expect(sleepCalls).toEqual([50]); // backoff requested exactly once
   });
 
-  it("crashes after exhausting maxAttempts, emitting one fewer step-retry than attempts", async () => {
+  it("crashes after exhausting maxRetry, emitting one fewer step-retry than attempts", async () => {
     let attempts = 0;
     const broken = createStep({
       name: "broken",
-      retry: { maxAttempts: 3, backoffMs: 10 },
+      retry: { maxRetry: 2, backoffMs: 10 }, // 2 retries after the first = 3 total attempts
       run: () => {
         attempts += 1;
         throw new Error(`fail ${attempts}`);
@@ -64,7 +64,7 @@ describe("retry policy (spec §9)", () => {
     const strict = createStep({
       name: "strict",
       output: Type.Object({ count: Type.Integer({ minimum: 10 }) }),
-      retry: { maxAttempts: 2 },
+      retry: { maxRetry: 1 }, // 1 retry after the first = 2 total attempts
       run: () => {
         n += 1;
         return { count: n === 1 ? 1 : 10 };
@@ -85,7 +85,7 @@ describe("retry policy (spec §9)", () => {
     const consume = createStep({
       name: "consume",
       input: Type.Object({ n: Type.Number() }), // expects a number `n`, gets a string `v`
-      retry: { maxAttempts: 5 },
+      retry: { maxRetry: 4 }, // 4 retries after the first = 5 total attempts (never reached: input violation crashes first)
       run: () => {
         consumerRuns += 1;
         return { ok: true };

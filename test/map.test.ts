@@ -91,7 +91,7 @@ describe("commit() step validation (spec §2)", () => {
       createWorkflow({ name: "bad" })
         .then(notAStep as never)
         .commit(),
-    ).toThrow(/expects a step from createStep\/createAgentStep\/createInputStep, but received a function \(addStep\)/);
+    ).toThrow(/expects a step from createStep\/createAgentStep\/createQuestionnaireStep, but received a function \(addStep\)/);
   });
 
   it("rejects a plain object that is not a step", () => {

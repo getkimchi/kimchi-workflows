@@ -42,7 +42,7 @@ describe("agent step (Phase 4a, fake host)", () => {
   });
 
   it("retries a thrown transport error with a fresh session, then succeeds", async () => {
-    const flaky = createAgentStep({ name: "summarize", output: outputSchema, retry: { maxAttempts: 2 }, prompt: () => "go" });
+    const flaky = createAgentStep({ name: "summarize", output: outputSchema, retry: { maxRetry: 1 }, prompt: () => "go" }); // 1 retry after the first = 2 total attempts
     const flakyWorkflow = createWorkflow({ name: "agent-retry" }).then(flaky).commit();
     // First session throws (transport error); a fresh second session returns valid JSON.
     const agent = scriptedAgent([[new Error("transport blip")], ['{"summary":"ok","keywords":["k"]}']]);

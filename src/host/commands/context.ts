@@ -32,7 +32,7 @@ const RUN_BUSY_MESSAGE = "workflow: another run became active; try again.";
 /**
  * Own the guard lifecycle for one execution (spec §7): acquire `begin(runId)`; if the guard is busy,
  * emit the shared race message and return `undefined`; otherwise run with the run's abort signal and
- * release on every outcome (including `parked` — parked ≠ running). Returns the run result, or
+ * release on every outcome (including `blocked` — blocked ≠ in_progress). Returns the run result, or
  * `undefined` when the guard was busy.
  */
 export async function runGuarded(guard: RunGuard, runId: string, notify: Notify, run: (signal: AbortSignal) => Promise<RunResult>): Promise<RunResult | undefined> {
@@ -58,14 +58,14 @@ export function rejectIfBusy(ctx: NotifyCtx, guard: RunGuard, verb: string): boo
   return true;
 }
 
-/** Report a run's terminal (or parked) outcome to the user (spec §5.1). */
+/** Report a run's terminal (or blocked) outcome to the user (spec §5.1). */
 export function notifyResult(ctx: NotifyCtx, workflowName: string, result: RunResult): void {
   if (result.status === "completed") {
     ctx.ui.notify(`workflow "${workflowName}" completed (run ${result.runId}).`, "info");
   } else if (result.status === "cancelled") {
     ctx.ui.notify(`workflow "${workflowName}" cancelled (run ${result.runId}); resume to continue.`, "warning");
-  } else if (result.status === "parked") {
-    ctx.ui.notify(`workflow "${workflowName}" parked (run ${result.runId}) awaiting answers.`, "info");
+  } else if (result.status === "blocked") {
+    ctx.ui.notify(`workflow "${workflowName}" blocked (run ${result.runId}) awaiting answers.`, "info");
   } else {
     ctx.ui.notify(`workflow "${workflowName}" crashed (run ${result.runId}): ${result.error}`, "error");
   }

@@ -118,7 +118,7 @@ describe("buildAskingProtocol", () => {
   it("embeds both the Questionnaire schema and the target schema, plus the batch instruction", () => {
     const target = Type.Object({ answer: Type.String() });
     const protocol = buildAskingProtocol(target);
-    expect(protocol).toMatch(/"questionnaire":/); // the ask shape
+    expect(protocol).toMatch(/"questions":/); // the ask shape
     expect(protocol).toMatch(/"result":/); // the finish shape
     expect(protocol).toMatch(/[Bb]atch as many questions/); // batch instruction
     // Both schemas are embedded verbatim.

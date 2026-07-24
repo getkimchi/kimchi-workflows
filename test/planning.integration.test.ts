@@ -8,8 +8,8 @@ import { createTestHost } from "./helpers.ts";
 import { createKimiAgentStarter, resolveKimiApiKey } from "./kimi-agent.ts";
 
 /**
- * Real E2E for Q&A/parked (B2): a Q&A-capable planning input step (agent mode) instructed to ask a
- * clarifying questionnaire first, then plan after the answers. Proves park → answers (history replay)
+ * Real E2E for Q&A/blocked (B2): a Q&A-capable planning agent step instructed to ask a clarifying
+ * questionnaire first, then plan after the answers. Proves block → answers (history replay)
  * → complete on real kimi-k2.7. Gated on KIMCHI_API_KEY; runs only via `npm run test:integration`.
  */
 const apiKey = resolveKimiApiKey();
@@ -17,7 +17,7 @@ const apiKey = resolveKimiApiKey();
 const planSchema = Type.Object({ steps: Type.Array(Type.String()) });
 
 describe.skipIf(!apiKey)("planning Q&A E2E (kimchi-dev/kimi-k2.7)", () => {
-  it("parks on a real questionnaire, then completes after the answers", async () => {
+  it("blocks on a real questionnaire, then completes after the answers", async () => {
     if (!apiKey) throw new Error("unreachable: skipIf guards this");
 
     const plan = createAgentStep({
@@ -35,13 +35,13 @@ describe.skipIf(!apiKey)("planning Q&A E2E (kimchi-dev/kimi-k2.7)", () => {
 
     const { host, store } = createTestHost({ startAgent: createKimiAgentStarter(apiKey) });
 
-    const parked = await runWorkflow(workflow, undefined, host);
-    console.log("[integration] planning parked:", parked.status, "| questionnaire:", JSON.stringify(parked.questionnaire));
-    expect(parked.status).toBe("parked");
-    expect(Value.Check(QuestionnaireSchema, parked.questionnaire)).toBe(true);
+    const blocked = await runWorkflow(workflow, undefined, host);
+    console.log("[integration] planning blocked:", blocked.status, "| questionnaire:", JSON.stringify(blocked.questionnaire));
+    expect(blocked.status).toBe("blocked");
+    expect(Value.Check(QuestionnaireSchema, blocked.questionnaire)).toBe(true);
 
-    const firstKey = parked.questionnaire?.questions[0]?.key ?? "backend";
-    const done = await resumeWithAnswer(workflow, await store.loadEvents(parked.runId), { [firstKey]: "Redis" }, host);
+    const firstKey = blocked.questionnaire?.questions[0]?.key ?? "backend";
+    const done = await resumeWithAnswer(workflow, await store.loadEvents(blocked.runId), { [firstKey]: "Redis" }, host);
     console.log("[integration] planning completed:", done.status, "| plan:", JSON.stringify(done.output));
     expect(done.status).toBe("completed");
     expect(Value.Check(planSchema, done.output)).toBe(true);

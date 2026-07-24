@@ -2,9 +2,9 @@
  * The `/workflow` command handlers (spec §6), one module per concern:
  *
  *   context    shared types, the single-run guard lifecycle, notification helpers
- *   attended   the inline Q&A loop every parking command converges on (§10.2)
+ *   attended   the inline Q&A loop every blocking command converges on (§10.2)
  *   run        starting runs: `run` and `create` (§6.1, §6.6)
- *   resume     continuing a parked/stopped run (§6.2)
+ *   resume     continuing a blocked/stopped run (§6.2)
  *   lifecycle  stopping and removing: `cancel` and `delete` (§6.4, §6.5)
  *   list       the two listings: workflows and runs (§6.7, §6.3)
  *

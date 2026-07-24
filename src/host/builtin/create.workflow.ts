@@ -2,20 +2,20 @@
  * The `/workflow create` meta-workflow: a workflow that writes workflows.
  *
  * It is an ordinary `WorkflowDefinition` — same authoring API, same engine, same event log — which
- * means it parks, resumes, retries, and is testable exactly like any workflow a user writes.
+ * means it blocks, resumes, retries, and is testable exactly like any workflow a user writes.
  *
  * Shape (five top-level nodes):
  *
- *   brief          input step   — what to build, and what to call the file
- *   target         function     — settle the destination, failing fast on a bad or taken name
- *   design         Q&A agent    — interview → propose plan → approve, all by re-batching
- *   until-valid    loop         — generate the source, load it back, retry on failure
- *   write          function     — write the validated source into .pi/workflows/
+ *   brief          questionnaire step — what to build, and what to call the file
+ *   target         function            — settle the destination, failing fast on a bad or taken name
+ *   design         Q&A agent           — interview → propose plan → approve, all by re-batching
+ *   until-valid    loop                — generate the source, load it back, retry on failure
+ *   write          function            — write the validated source into .pi/workflows/
  *
- * `design` deliberately owns the entire interview *inside one step*. A parked step can only be
+ * `design` deliberately owns the entire interview *inside one step*. A blocked step can only be
  * answered when it is top-level (see resume-workflow.ts: "nested Q&A resume is out of scope"), so an
- * approval loop built from `.dountil` + an input step could never be resumed. A Q&A agent already
- * re-batches until it is satisfied, so the loop lives in the agent's own turn-taking and every park
+ * approval loop built from `.dountil` + a questionnaire step could never be resumed. A Q&A agent already
+ * re-batches until it is satisfied, so the loop lives in the agent's own turn-taking and every block
  * stays top-level. The `until-valid` loop contains no Q&A, so nesting is legal there.
  */
 import { randomUUID } from "node:crypto";
@@ -23,7 +23,7 @@ import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { type Static, Type } from "typebox";
-import { createAgentStep, createInputStep, createStep, createWorkflow } from "../../flow/index.ts";
+import { createAgentStep, createQuestionnaireStep, createStep, createWorkflow } from "../../flow/index.ts";
 import type { RunContext } from "../../flow/types.ts";
 import { loadWorkflowFile } from "../load-workflow.ts";
 import { WORKFLOW_SUFFIX, workflowsDir } from "../workflow-catalog.ts";
@@ -39,7 +39,7 @@ export const specSchema = Type.Object({
   steps: Type.Array(
     Type.Object({
       name: Type.String(),
-      kind: Type.Union([Type.Literal("function"), Type.Literal("agent"), Type.Literal("input")]),
+      kind: Type.Union([Type.Literal("function"), Type.Literal("agent"), Type.Literal("questionnaire")]),
       purpose: Type.String(),
     }),
     { description: "The steps to generate, in order." },
@@ -60,14 +60,14 @@ const briefSchema = Type.Object({
  * is what actually prevents it.
  */
 const API_EXAMPLE = `import { Type } from "typebox";
-import { createStep, createAgentStep, createInputStep, createWorkflow } from "pi-workflows/src/flow";
+import { createStep, createAgentStep, createQuestionnaireStep, createWorkflow } from "pi-workflows/src/flow";
 
 const askSchema = Type.Object({
   topic: Type.String({ description: "What should we write about?" }),
 });
 const draftSchema = Type.Object({ draft: Type.String() });
 
-const ask = createInputStep({ name: "ask", output: askSchema });
+const ask = createQuestionnaireStep({ name: "ask", output: askSchema });
 
 const write = createAgentStep({
   name: "write",
@@ -101,7 +101,7 @@ const sourceSchema = Type.Object({
 const checkSchema = Type.Object({ ok: Type.Boolean(), source: Type.String(), error: Type.Optional(Type.String()) });
 
 /** Step 1 — the opening form. Deterministic, no LLM: two questions derived from the schema. */
-const brief = createInputStep({
+const brief = createQuestionnaireStep({
   name: "brief",
   description: "What to build, and where to put it",
   output: briefSchema,
@@ -189,10 +189,10 @@ const generate = createAgentStep({
       "  - every step needs a unique `name`; declare TypeBox `input`/`output` so steps hand off",
       "  - a function step's `run` receives ONE argument: `{ input, ctx, abortSignal, logger }`",
       "  - an agent step needs `output` and `prompt`; `prompt` is a function returning a string",
-      "  - an input step needs only `name` and `output` — the questions come from the schema",
+      "  - a questionnaire step needs only `name` and `output` — the questions come from the schema",
       "  - no side effects at import time — the module must only define and export the workflow",
       "  - EVERY step's input must come from somewhere: the previous step's output, or — for the FIRST",
-      "    step — either a `createInputStep` ahead of it or `input:` declared on `createWorkflow({...})`.",
+      "    step — either a `createQuestionnaireStep` ahead of it or `input:` declared on `createWorkflow({...})`.",
       "    A first step with an `input` schema and no source can never run.",
       "",
       "CHECK YOUR OWN WORK. If the project has TypeScript or Biome available, run them over what you",

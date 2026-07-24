@@ -27,14 +27,14 @@ function dialogPicker(ui: DialogUI): Picker {
 /**
  * Drive the questionnaire through native dialogs and return the structured answers keyed by
  * `question.key`. Returns `undefined` if the user dismisses any dialog: dismiss ≠ cancel, so the
- * caller keeps the run parked (spec §10.2).
+ * caller keeps the run blocked (spec §10.2).
  */
 export async function collectViaDialogs(ui: DialogUI, questionnaire: Questionnaire): Promise<Record<string, unknown> | undefined> {
   const picker = dialogPicker(ui);
   const raw: Record<string, RawSelection> = {};
   for (const question of questionnaire.questions) {
     const selection = await collectQuestion(ui, picker, question);
-    if (selection === undefined) return undefined; // dismissed → leave the run parked
+    if (selection === undefined) return undefined; // dismissed → leave the run blocked
     raw[question.key] = selection;
   }
   return assembleAnswers(questionnaire, raw);

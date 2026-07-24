@@ -25,7 +25,7 @@ describe("token budget (Phase 7a, spec §9.3)", () => {
   });
 
   it("counts budget-exceeded against the retry policy, resetting per fresh session, then crashes", async () => {
-    const step = createAgentStep({ name: "big", output: outputSchema, maxTokens: 100, retry: { maxAttempts: 2 }, prompt: () => "go" });
+    const step = createAgentStep({ name: "big", output: outputSchema, maxTokens: 100, retry: { maxRetry: 1 }, prompt: () => "go" }); // 1 retry after the first = 2 total attempts
     const workflow = createWorkflow({ name: "token-retry" }).then(step).commit();
     const agent = scriptedAgent([[validReply(150)], [validReply(150)]]); // two fresh sessions
     const { host, store } = createTestHost({ startAgent: agent.startAgent });

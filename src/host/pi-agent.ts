@@ -10,7 +10,7 @@
  * is unambiguous. `pi.on` exposes no unsubscribe, so `dispose()` clears the pending resolver rather
  * than removing the listener.
  *
- * `getConversation()` returns the last `agent_end` messages so a parked Q&A step can be resumed
+ * `getConversation()` returns the last `agent_end` messages so a blocked Q&A step can be resumed
  * (spec §8.4). Cross-process history replay (seeding a fresh PI session from a stored conversation)
  * is a real-harness concern deferred to 6b — the deterministic proof of the mechanism is offline.
  */

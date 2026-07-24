@@ -9,7 +9,7 @@ import { createManualClock } from "./manual-clock.ts";
 const okSchema = Type.Object({ ok: Type.Boolean() });
 
 /** A step that never resolves on its own — it settles only when its abort signal fires. */
-const awaitsAbort = (name: string, retry?: { maxAttempts: number }) =>
+const awaitsAbort = (name: string, retry?: { maxRetry: number }) =>
   createStep({
     name,
     output: okSchema,
@@ -44,7 +44,7 @@ describe("time budget (Phase 7a, spec §9.3)", () => {
     const clock = createManualClock();
     const { host, store } = createTestHost({ sleep: clock.sleep });
     const workflow = createWorkflow({ name: "timeout-retry" })
-      .then(awaitsAbort("slow", { maxAttempts: 2 }))
+      .then(awaitsAbort("slow", { maxRetry: 1 })) // 1 retry after the first = 2 total attempts
       .commit();
 
     const promise = runWorkflow(workflow, undefined, host);

@@ -15,7 +15,7 @@ export interface CreateStepOptions<TInputSchema extends TSchema | undefined = un
   input?: TInputSchema;
   /** TypeBox schema for the step's output. */
   output?: TOutputSchema;
-  /** Unified repeat policy (spec §9.1): retry thrown errors / invalid output up to `maxAttempts`. */
+  /** Unified repeat policy (spec §9.1): retry thrown errors / invalid output up to `maxRetry` times. */
   retry?: RetryPolicy;
   /** Per-step wall-time budget in ms (spec §9.3): exceeding it aborts the step → `budget-exceeded`. */
   maxDurationMs?: number;

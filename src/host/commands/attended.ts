@@ -1,9 +1,9 @@
 /**
- * The attended inline Q&A loop (spec §10.2) — the one place a parked run is turned back into a
- * running one by asking the user.
+ * The attended inline Q&A loop (spec §10.2) — the one place a blocked run is turned back into an
+ * in_progress one by asking the user.
  *
  * Shared by `/workflow run`, `/workflow create`, and `/workflow resume`, all of which can reach a
- * parked step and must then attend it identically.
+ * blocked step and must then attend it identically.
  */
 import { resumeWithAnswer } from "../../engine/resume-workflow.ts";
 import type { RunEvent } from "../../engine/types.ts";
@@ -18,10 +18,10 @@ import { type CommandCtx, describe, notifier, notifyResult, runGuarded, type Sta
 /**
  * Render the pending questionnaire (rich `ctx.ui.custom` form when a TUI is present, native dialogs
  * otherwise — see {@link collectAnswers}), collect structured answers, and continue via
- * `resumeWithAnswer` — looping while it re-parks.
+ * `resumeWithAnswer` — looping while it re-blocks.
  *
- * Dismissing the prompt leaves the run `parked` (dismiss ≠ cancel, spec §10.2). The guard is acquired
- * only around each resume execution, so while parked/prompting it is released and does not block new
+ * Dismissing the prompt leaves the run `blocked` (dismiss ≠ cancel, spec §10.2). The guard is acquired
+ * only around each resume execution, so while blocked/prompting it is released and does not block new
  * runs (spec §7.1).
  */
 export async function handleAttendedQuestionnaire(
@@ -36,12 +36,12 @@ export async function handleAttendedQuestionnaire(
 ): Promise<void> {
   let questionnaire = initialQuestionnaire;
   for (;;) {
-    if (!questionnaire) return void ctx.ui.notify(`workflow: run ${runId} is parked but has no recorded questions.`, "warning");
+    if (!questionnaire) return void ctx.ui.notify(`workflow: run ${runId} is blocked but has no recorded questions.`, "warning");
 
     const answers = await collectAnswers(ctx, questionnaire);
     if (answers === undefined) {
-      // Dismiss ≠ cancel (spec §10.2): the run stays parked and is resumable later.
-      ctx.ui.notify(`workflow: run ${runId} is still parked; answer later via "/workflow resume ${runId}", or "/workflow cancel ${runId}" to stop it.`, "info");
+      // Dismiss ≠ cancel (spec §10.2): the run stays blocked and is resumable later.
+      ctx.ui.notify(`workflow: run ${runId} is still blocked; answer later via "/workflow resume ${runId}", or "/workflow cancel ${runId}" to stop it.`, "info");
       return;
     }
 
@@ -59,10 +59,10 @@ export async function handleAttendedQuestionnaire(
       ctx.ui.notify(`workflow: ${describe(err)}`, "warning");
       return;
     }
-    if (!result) return; // guard was busy (race) — already notified; the run stays parked
+    if (!result) return; // guard was busy (race) — already notified; the run stays blocked
 
-    if (result.status === "parked") {
-      questionnaire = result.questionnaire; // re-park (another batch, or invalid answers) → ask again
+    if (result.status === "blocked") {
+      questionnaire = result.questionnaire; // re-block (another batch, or invalid answers) → ask again
       continue;
     }
     notifyResult(ctx, workflowName, result);
@@ -70,7 +70,7 @@ export async function handleAttendedQuestionnaire(
   }
 }
 
-/** The pending questionnaire of a parked run: the last `questionnaire-asked` payload. */
+/** The pending questionnaire of a blocked run: the last `questionnaire-asked` payload. */
 export function pendingQuestionnaire(events: readonly RunEvent[]): Questionnaire | undefined {
   let questionnaire: Questionnaire | undefined;
   for (const event of events) {
