@@ -2,23 +2,22 @@
  * Step-state derivation (spec §5.1, §5.4): a pure function over the event log. No fs, no PI, no
  * clock reads of its own — it only walks events already carrying their own `at` timestamps.
  */
+import { parsePath, staticKeyOf } from "./node-path.ts";
 import type { RunEvent } from "./types.ts";
 
 /** A step's lifecycle state (spec §5.1). Exactly one at a time. */
 export type StepState = "todo" | "in_progress" | "blocked" | "completed" | "skipped" | "cancelled" | "crashed";
 
 /**
- * The addressing key a step's state is keyed by (spec §5.4: "static node path"). Node-path
- * addressing (enclosing nodes + iteration/item index + name) is P2 work; today the tree is globally
- * name-unique (`assertUniqueNames` in create-workflow.ts), so the step/arm name alone is already a
- * collision-free key. Kept as a distinct type — not a bare `string` at call sites — so P2 can swap
- * `keyOf` below for real path construction without changing `deriveStepStates`'s callers.
+ * The addressing key a step's state is keyed by (spec §5.4: "static node path" — the node path with
+ * iteration/item indices dropped, e.g. `until-valid/design`). Latest execution wins: a step re-entered
+ * by a new loop iteration or foreach item simply overwrites its own map entry.
  */
 export type StepStateKey = string;
 
-/** Today: the key IS the name. P2 replaces this with node-path construction (enclosing scope + iteration/item index + name). */
-function keyOf(name: string): StepStateKey {
-  return name;
+/** An event's dynamic `path` (spec §8.5), reduced to the static key `deriveStepStates` keys its map by. */
+function keyOf(path: string): StepStateKey {
+  return staticKeyOf(parsePath(path));
 }
 
 /**
@@ -44,8 +43,8 @@ export function deriveStepStates(events: readonly RunEvent[]): Map<StepStateKey,
   const states = new Map<StepStateKey, StepState>();
   const open = new Set<StepStateKey>(); // keys currently in_progress or blocked
 
-  const set = (name: string, state: StepState): void => {
-    const key = keyOf(name);
+  const set = (path: string, state: StepState): void => {
+    const key = keyOf(path);
     states.set(key, state);
     if (state === "in_progress" || state === "blocked") {
       open.add(key);
@@ -65,23 +64,23 @@ export function deriveStepStates(events: readonly RunEvent[]): Map<StepStateKey,
       case "step-retry":
       case "agent-steer":
       case "answers-provided":
-        set(event.stepName, "in_progress");
+        set(event.path, "in_progress");
         break;
       case "step-completed":
-        set(event.stepName, "completed");
+        set(event.path, "completed");
         break;
       case "questionnaire-asked":
-        set(event.stepName, "blocked");
+        set(event.path, "blocked");
         break;
       case "branch-arm":
-        if (!event.taken) set(event.armName, "skipped");
+        if (!event.taken) set(event.path, "skipped");
         break;
       case "run-crashed":
-        if (event.stepName) set(event.stepName, "crashed");
+        if (event.path) set(event.path, "crashed");
         closeOpen("crashed");
         break;
       case "run-cancelled":
-        if (event.stepName) set(event.stepName, "cancelled");
+        if (event.path) set(event.path, "cancelled");
         closeOpen("cancelled");
         break;
       default:

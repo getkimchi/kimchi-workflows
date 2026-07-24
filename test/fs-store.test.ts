@@ -91,7 +91,7 @@ describe("filesystem run store (spec §8.7)", () => {
       lastAppend = store.appendEvent({
         type: "step-log",
         runId,
-        stepName: "s",
+        path: "s",
         level: "info",
         message: `m${i}`,
         at: "t",

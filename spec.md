@@ -114,8 +114,8 @@ resume (§8.7), and node-path addressing (§8.5).
 
 `.commit()` is the authoring-time gate: it rejects a workflow with no nodes,
 duplicate names within a scope, a name containing `/` or `#` (both are node-path
-syntax, §8.5, and a name carrying either makes a path unparseable), an ambiguous
-bare-name context read (§3.9), a per-construct `concurrency` above the workflow
+syntax, §8.5, and a name carrying either makes a path unparseable), a per-construct
+`concurrency` above the workflow
 ceiling (§3.6), a `background` step that also asks (§2.2), or a node that is
 **not a step** —
 anything not produced by one of the step constructors (§2). Without that last
@@ -179,9 +179,11 @@ retried**, since re-running cannot change the result. *(orig. R13/R14; decision)
 step): use a `.map()` between steps, or read the **run context** inside a step's
 body. The context exposes prior step outputs, the workflow's initial input, and run
 metadata. Lookups take either a **bare name**, resolved lexically to the nearest
-enclosing scope, or an explicit **node path** (`audit/lint`). A bare name that is
-ambiguous at authoring time is rejected by `.commit()` rather than resolved by
-guesswork. (Mastra parity: `.map({ step, path } | fn)`, `getStepResult(step)`,
+enclosing scope, or an explicit **node path** (`audit/lint`). Lexical resolution walks
+the reading step's own ancestors outward and stops at the first match, so with
+names unique within a scope (§3) a bare read is always deterministic — there is no
+ambiguity for `.commit()` to reject. A name that matches nothing in scope reads
+`undefined`; reach into a sibling scope with an explicit path. (Mastra parity: `.map({ step, path } | fn)`, `getStepResult(step)`,
 `getInitData()`.) *(decision)*
 
   **Reads never race.** A lookup naming a step that is currently **in flight** throws

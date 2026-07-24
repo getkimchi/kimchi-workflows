@@ -55,7 +55,7 @@ describe(".map() construct (spec §3.7)", () => {
 
     expect(downstreamRan).toBe(false);
     // The map completes (it produced a value); the crash is at the downstream step's input boundary.
-    const types = events.map((event) => ("stepName" in event ? `${event.type}:${event.stepName}` : event.type));
+    const types = events.map((event) => ("path" in event ? `${event.type}:${event.path}` : event.type));
     expect(types).toEqual(["run-started", "step-started:source", "step-completed:source", "step-started:map-1", "step-completed:map-1", "run-crashed:consumer"]);
   });
 

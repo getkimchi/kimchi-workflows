@@ -13,8 +13,14 @@ export interface RunContext {
   readonly runId: string;
   /** The workflow's declared name. */
   readonly workflowName: string;
-  /** Look up a prior step's output by step name (undefined if not yet run). */
-  getStepResult<T = unknown>(stepName: string): T | undefined;
+  /**
+   * Look up a prior step's output (spec §3.9), either by a BARE name — resolved lexically to the
+   * nearest enclosing scope, walking outward from the calling step's own scope to the root — or by
+   * an explicit node path (`until-valid/design`, spec §8.5; `/`/`#` in the argument select this
+   * form). A step that has not been reached, or was skipped, reads `undefined` — a structural fact,
+   * not an error. Undefined if not yet run.
+   */
+  getStepResult<T = unknown>(stepNameOrPath: string): T | undefined;
   /** The workflow's initial input, if any (undefined for workflows with no input schema). */
   getInitData<T = unknown>(): T | undefined;
 }

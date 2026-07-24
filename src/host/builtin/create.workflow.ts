@@ -4,19 +4,20 @@
  * It is an ordinary `WorkflowDefinition` — same authoring API, same engine, same event log — which
  * means it blocks, resumes, retries, and is testable exactly like any workflow a user writes.
  *
- * Shape (five top-level nodes):
+ * Shape (five top-level nodes, spec §6.6):
  *
  *   brief          questionnaire step — what to build, and what to call the file
  *   target         function            — settle the destination, failing fast on a bad or taken name
- *   design         Q&A agent           — interview → propose plan → approve, all by re-batching
+ *   review         loop (.dountil)     — design proposes/revises a plan; approve asks approve/revise
+ *     design         Q&A agent           — interview → propose (or revise) a plan
+ *     approve        questionnaire       — approve this plan, or ask for changes
  *   until-valid    loop                — generate the source, load it back, retry on failure
  *   write          function            — write the validated source into .pi/workflows/
  *
- * `design` deliberately owns the entire interview *inside one step*. A blocked step can only be
- * answered when it is top-level (see resume-workflow.ts: "nested Q&A resume is out of scope"), so an
- * approval loop built from `.dountil` + a questionnaire step could never be resumed. A Q&A agent already
- * re-batches until it is satisfied, so the loop lives in the agent's own turn-taking and every block
- * stays top-level. The `until-valid` loop contains no Q&A, so nesting is legal there.
+ * A block is now legal anywhere in the tree (spec §8.5), so the Approve/Revise cycle is an ordinary
+ * `.dountil` loop around a real questionnaire step, rather than a whole interview crammed into one
+ * agent step re-batching internally — this is the phase's proof that re-entry into a blocked loop
+ * iteration works.
  */
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -35,7 +36,7 @@ export const createInputSchema = Type.Object({ projectRoot: Type.String() });
 export const specSchema = Type.Object({
   name: Type.String({ description: "The workflow's name (kebab-case)." }),
   description: Type.String({ description: "One line describing what the workflow does." }),
-  summary: Type.String({ description: "The agreed plan, in prose, as approved by the user." }),
+  summary: Type.String({ description: "The current plan, in prose." }),
   steps: Type.Array(
     Type.Object({
       name: Type.String(),
@@ -49,6 +50,15 @@ export const specSchema = Type.Object({
 const briefSchema = Type.Object({
   goal: Type.String({ title: "Goal", description: "What should this workflow do?", chat: true }),
   fileName: Type.String({ title: "File name", description: "File to write, e.g. `deploy.workflow.ts` (saved under .pi/workflows/)." }),
+});
+
+/** The Approve/Revise decision (spec §6.6) — a plain questionnaire, since it only ever collects a choice + optional feedback. */
+const approveSchema = Type.Object({
+  decision: Type.Union([Type.Literal("approve"), Type.Literal("revise")], {
+    title: "Decision",
+    description: "Approve the plan above, or ask for changes?",
+  }),
+  feedback: Type.Optional(Type.String({ title: "Feedback", description: "If revising, what should change?" })),
 });
 
 /**
@@ -124,35 +134,64 @@ const settleTarget = createStep({
 });
 
 /**
- * Step 3 — the interview. The framework injects the asking protocol, so this prompt is task-only; it
- * describes *when* to ask, *what* to propose, and the bar for emitting a result.
+ * Step 3a — the interview (spec §6.6). Runs once per `review` iteration: on the first pass it
+ * clarifies and proposes a plan; on a later pass (an `approve` re-block recorded "revise") it
+ * incorporates that feedback into a revised plan. The framework injects the asking protocol, so this
+ * prompt is task-only.
  */
 const design = createAgentStep({
   name: "design",
-  description: "Interview the user, propose a plan, and get approval",
+  description: "Interview the user (first pass) or incorporate feedback (a revision pass), and propose a plan",
   // No input schema (spec §3.6): the preceding node is `target`, so the brief is read from run
   // context rather than the linear hand-off.
   output: specSchema,
   asks: true,
-  prompt: ({ ctx }) =>
-    [
-      "You are designing a PI workflow on the user's behalf.",
+  prompt: ({ ctx }) => {
+    const goal = ctx.getStepResult<Static<typeof briefSchema>>("brief")?.goal ?? "(not stated)";
+    const priorApproval = ctx.getStepResult<Static<typeof approveSchema>>("approve");
+
+    if (!priorApproval) {
+      return [
+        "You are designing a PI workflow on the user's behalf.",
+        "",
+        `Their goal: ${goal}`,
+        "",
+        "Ask batched questions until you genuinely know what to build: the steps, their order, which",
+        "need an LLM, which need input from the user, and how the workflow decides it is finished. Do",
+        "not guess at anything that would change the generated code. Do not ask what you can infer.",
+        "",
+        "Once confident, emit your result: a proposed plan. Do NOT ask for approval yourself — a",
+        "separate step presents your plan and collects the decision.",
+      ].join("\n");
+    }
+
+    // A revision pass: `approve` re-blocked with "revise" (spec §8.5 — this step is being re-entered
+    // inside the SAME `review` loop iteration's body, not restarted from scratch).
+    return [
+      "The user asked to REVISE the plan you proposed. Their goal, for reference:",
+      `  ${goal}`,
       "",
-      `Their goal: ${ctx.getStepResult<Static<typeof briefSchema>>("brief")?.goal ?? "(not stated)"}`,
+      `Feedback: ${priorApproval.feedback || "(no specific feedback given — use your judgment)"}`,
       "",
-      "Work in two phases, using questionnaires for both:",
-      "1. CLARIFY — ask batched questions until you genuinely know what to build: the steps, their order,",
-      "   which need an LLM, which need input from the user, and how the workflow decides it is finished.",
-      "   Do not guess at anything that would change the generated code. Do not ask what you can infer.",
-      "2. APPROVE — once confident, present the plan for approval. Ask a single-choice question",
-      '   ("Approve this plan?" with options "Approve" and "Revise") plus a free-text question for changes.',
-      "   State the plan in the question text: the workflow name, and each step with its kind and purpose.",
-      "",
-      "If the user chooses Revise, incorporate the feedback and present the revised plan for approval again.",
-      "Emit your result ONLY after the user has explicitly approved. The result's `summary` must be the",
-      "plan exactly as approved.",
-    ].join("\n"),
+      "Incorporate it and propose a revised plan. Ask brief clarifying questions only if genuinely",
+      "needed; otherwise emit your revised result directly. Do NOT ask for approval yourself.",
+    ].join("\n");
+  },
 });
+
+/**
+ * Step 3b — present the plan for approval (spec §6.6). A plain questionnaire: `design`'s own agent
+ * turn already surfaced the plan in the session, so this only needs to collect the decision. Blocking
+ * here is legal precisely because a Q&A step may now sit inside a loop (spec §8.5) — resume re-enters
+ * this exact iteration and continues, rather than restarting the whole interview.
+ */
+const approve = createQuestionnaireStep({
+  name: "approve",
+  description: "Approve the plan design just proposed, or ask for changes",
+  output: approveSchema,
+});
+
+const reviewBody = createWorkflow({ name: "review-body" }).then(design).then(approve).commit();
 
 /**
  * Step 4a — generate the file's TypeScript. On a retry the previous validation error is in run
@@ -165,7 +204,10 @@ const generate = createAgentStep({
   // iteration's `check` output, not the spec — so the spec is read from run context instead.
   output: sourceSchema,
   prompt: ({ ctx }) => {
-    const input = ctx.getStepResult<Static<typeof specSchema>>("design");
+    // Explicit path (spec §3.9): `design` lives inside the `review` loop, a SIBLING of `until-valid`
+    // (not an ancestor of it), so a bare "design" would not resolve here — `generate` is outside its
+    // lexical scope. The node path reaches it directly regardless of scope.
+    const input = ctx.getStepResult<Static<typeof specSchema>>("review/design");
     if (!input) throw new Error("generate: the design step produced no spec");
     const previous = ctx.getStepResult<{ ok: boolean; error?: string }>("check");
     const retry = previous?.error ? ["", "Your previous attempt FAILED to load with:", previous.error, "Fix it."] : [];
@@ -242,7 +284,7 @@ function assertAvailable(target: string, fileName: string): void {
 }
 
 /**
- * Step 4b — validate by actually loading it, in the directory the file will really live in.
+ * Step 4c — validate by actually loading it, in the directory the file will really live in.
  *
  * The probe MUST sit next to its final destination: module resolution is relative to the importing
  * file, so a generated `import { Type } from "typebox"` resolves only from inside the project. An
@@ -286,7 +328,9 @@ const write = createStep({
     // Re-resolved here (not carried from `check`) so the availability guard is re-applied against the
     // filesystem as it is now, immediately before the write.
     const target = resolveTarget(ctx);
-    const verification = ctx.getStepResult<{ verification?: string }>("generate")?.verification;
+    // Explicit path (spec §3.9): `generate` lives inside the `until-valid` loop, not `write`'s own
+    // top-level scope, so a bare "generate" would not resolve here.
+    const verification = ctx.getStepResult<{ verification?: string }>("until-valid/generate")?.verification;
     if (verification) logger.info(`generator's own checks: ${verification}`);
 
     await mkdir(path.dirname(target), { recursive: true });
@@ -302,7 +346,7 @@ const createWorkflowWorkflow = createWorkflow({
 })
   .then(brief)
   .then(settleTarget)
-  .then(design)
+  .dountil(reviewBody, (_ctx, lastOutput) => (lastOutput as Static<typeof approveSchema>).decision === "approve", { name: "review", maxIterations: 10 })
   .dountil(generateAndCheck, (ctx) => ctx.getStepResult<{ ok: boolean }>("check")?.ok === true, { name: "until-valid", maxIterations: 3 })
   .then(write)
   .commit();

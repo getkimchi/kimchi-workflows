@@ -64,8 +64,8 @@ describe("node-atomic resume (spec §8): control-flow node re-runs wholesale", (
 
     // The loop node never reached node-completed; `before` did reach step-completed.
     const priorEvents = await store.loadEvents(first.runId);
-    expect(priorEvents.some((e) => e.type === "step-completed" && e.stepName === "before")).toBe(true);
-    expect(priorEvents.some((e) => e.type === "node-completed" && e.nodeName === "counter-loop")).toBe(false);
+    expect(priorEvents.some((e) => e.type === "step-completed" && e.path === "before")).toBe(true);
+    expect(priorEvents.some((e) => e.type === "node-completed" && e.path === "counter-loop")).toBe(false);
 
     // Resume: fix the body and continue.
     fixBody();
@@ -81,11 +81,11 @@ describe("node-atomic resume (spec §8): control-flow node re-runs wholesale", (
 
     // Resume re-entered at the loop node, not `before`.
     const resumedEvent = priorEventsAfterResume(await store.loadEvents(first.runId));
-    expect(resumedEvent?.fromStepName).toBe("counter-loop");
+    expect(resumedEvent?.fromPath).toBe("counter-loop");
     expect((await store.list())[0]).toMatchObject({ status: "completed" });
   });
 });
 
 function priorEventsAfterResume(events: Awaited<ReturnType<ReturnType<typeof createTestHost>["store"]["loadEvents"]>>) {
-  return events.find((e) => e.type === "run-resumed") as { type: "run-resumed"; fromStepName?: string } | undefined;
+  return events.find((e) => e.type === "run-resumed") as { type: "run-resumed"; fromPath?: string } | undefined;
 }

@@ -32,7 +32,7 @@ describe("branch node (spec §3.2, multi-match)", () => {
     expect(result.output).toEqual({ "arm-a": { picked: "A" }, "arm-b": { picked: "B" } });
 
     const arms = (await store.loadEvents(result.runId)).filter((e): e is Extract<RunEvent, { type: "branch-arm" }> => e.type === "branch-arm");
-    expect(arms.map((e) => [e.armName, e.taken])).toEqual([
+    expect(arms.map((e) => [e.path, e.taken])).toEqual([
       ["arm-a", true],
       ["arm-b", true],
     ]);

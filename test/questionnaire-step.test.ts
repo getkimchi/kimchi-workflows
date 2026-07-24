@@ -34,7 +34,7 @@ describe("questionnaire step — form mode (B2, spec §2.4)", () => {
     const blocked = await createTestRun(workflow);
 
     expect(blocked.status).toBe("blocked");
-    expect(blocked.stepName).toBe("ask");
+    expect(blocked.path).toBe("ask");
     expect(blocked.questionKeys()).toEqual(["name", "env", "tags", "address.city"]); // nested key qualified
     expect(blocked.questionnaire?.questions.map((q) => q.kind)).toEqual(["text", "single", "multi", "text"]);
     expect(blocked.questionnaire?.questions.find((q) => q.key === "address.city")?.section).toBe("Address");

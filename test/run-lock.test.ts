@@ -118,7 +118,7 @@ describe("run lock (spec §7.2/§7.3): per-project file lock", () => {
     const store = createMemoryStore();
     // Simulate an abandoned run mid-execution: run-started + step-started, no completion.
     await store.appendEvent({ type: "run-started", runId: "abandoned-run", workflowName: "w", input: undefined, at: "t0" });
-    await store.appendEvent({ type: "step-started", runId: "abandoned-run", stepIndex: 0, stepName: "s", input: undefined, at: "t0" });
+    await store.appendEvent({ type: "step-started", runId: "abandoned-run", path: "s", input: undefined, at: "t0" });
 
     const dead = createRunLock(fakeEnv({ pid: 111 }), fixedClock("2026-01-01T00:00:00.000Z"));
     await dead.begin("abandoned-run", projectRoot, store); // records the (soon-to-be-stale) lock

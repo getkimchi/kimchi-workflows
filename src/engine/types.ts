@@ -9,53 +9,69 @@ import type { Questionnaire } from "../flow/questionnaire.ts";
 /** Why a step is being retried (spec §9.2/§9.3). Input-schema violations are never retried. */
 export type RetryReason = "thrown-error" | "invalid-output" | "budget-exceeded";
 
-/** Append-only lifecycle events (spec §8.1, §12.1), each tagged with the run id and an ISO timestamp. */
+/**
+ * Append-only lifecycle events (spec §8.1, §12.1), each tagged with the run id and an ISO timestamp.
+ *
+ * Every event that names a step or node carries its `path` — the full DYNAMIC node path (spec §8.5),
+ * indices included (`until-valid#3/design`, `batch#7/review`), formatted by `formatPath`
+ * (node-path.ts). Under concurrency the log's order is not deterministic (spec §4.2/§8.1), so
+ * consumers reconstruct per-step history by path, not by adjacency. This is a P2 log-format change:
+ * a log written before this phase has no `path` field and is not readable by this build (no
+ * migration, by design) — `parsePath` fails loudly rather than mis-parsing it.
+ */
 export type RunEvent =
   | { type: "run-started"; runId: string; workflowName: string; input: unknown; at: string }
   // A resume (spec §8) continuing an existing run: appended to the same log instead of a second
-  // `run-started`. `fromStepName` is the step execution resumes at (absent if nothing remained).
-  | { type: "run-resumed"; runId: string; fromStepName?: string; at: string }
-  | { type: "step-started"; runId: string; stepIndex: number; stepName: string; input: unknown; at: string }
+  // `run-started`. `fromPath` is the node path execution resumes at (absent if nothing remained).
+  | { type: "run-resumed"; runId: string; fromPath?: string; at: string }
+  | { type: "step-started"; runId: string; path: string; input: unknown; at: string }
   // A failed attempt is being retried (spec §9.1). `attempt` is the 1-based attempt that just failed.
-  | { type: "step-retry"; runId: string; stepName: string; attempt: number; reason: RetryReason; error: string; at: string }
+  | { type: "step-retry"; runId: string; path: string; attempt: number; reason: RetryReason; error: string; at: string }
   // An in-session output-steering correction (spec §9.2): the agent's reply was invalid and a
   // correction was sent within the same session. `attempt` is the 1-based repair number.
-  | { type: "agent-steer"; runId: string; stepName: string; attempt: number; violation: string; at: string }
-  | { type: "step-completed"; runId: string; stepIndex: number; stepName: string; output: unknown; at: string }
-  // Control-flow node (branch/loop/foreach, spec §3.2–§3.4) lifecycle. `node-completed` is the
-  // node-atomic resume checkpoint (spec §8): its output feeds the next node and rebuilds context.
-  | { type: "node-started"; runId: string; nodeName: string; nodeKind: "branch" | "loop" | "foreach" | "workflow"; at: string }
-  | { type: "node-completed"; runId: string; nodeName: string; output: unknown; at: string }
-  // Observability (spec §12): which branch arms were taken, and each loop iteration as it starts.
-  | { type: "branch-arm"; runId: string; nodeName: string; armName: string; taken: boolean; at: string }
-  | { type: "loop-iteration"; runId: string; nodeName: string; iteration: number; at: string }
-  // Foreach (spec §3.4). `foreach-item-completed` is the per-item resume checkpoint (spec §8): a
-  // top-level foreach resumes at the first item with no such event. `count` is the selected length.
-  | { type: "foreach-started"; runId: string; nodeName: string; count: number; at: string }
-  | { type: "foreach-item-started"; runId: string; nodeName: string; index: number; at: string }
-  | { type: "foreach-item-completed"; runId: string; nodeName: string; index: number; output: unknown; at: string }
+  | { type: "agent-steer"; runId: string; path: string; attempt: number; violation: string; at: string }
+  | { type: "step-completed"; runId: string; path: string; output: unknown; at: string }
+  // Control-flow node (branch/loop/foreach/workflow, spec §3.2–§3.4, §11) lifecycle. `node-completed`
+  // is a resume checkpoint (spec §8): its output feeds the next node and rebuilds context. Emitted for
+  // a branch's own node AND for each taken arm (`path` = the arm's own path, spec §8.5's re-entry).
+  | { type: "node-started"; runId: string; path: string; nodeKind: "branch" | "loop" | "foreach" | "workflow"; at: string }
+  | { type: "node-completed"; runId: string; path: string; output: unknown; at: string }
+  // Observability (spec §12): which branch arms were taken (`path` = the ARM's own path — the
+  // addressing unit a step inside it nests under, spec §8.5), and each loop iteration as it starts
+  // (`path` = that iteration's path, e.g. `until-valid#3`).
+  | { type: "branch-arm"; runId: string; path: string; taken: boolean; at: string }
+  | { type: "loop-iteration"; runId: string; path: string; iteration: number; at: string }
+  // Foreach (spec §3.4). `foreach-item-completed` is the per-item resume checkpoint (spec §8.2): a
+  // foreach resumes at the first item with no such event. `count` is the selected length; `path` on
+  // `foreach-started` is the foreach's own path (no index), on the item events the item's path (indexed).
+  | { type: "foreach-started"; runId: string; path: string; count: number; at: string }
+  | { type: "foreach-item-started"; runId: string; path: string; index: number; at: string }
+  | { type: "foreach-item-completed"; runId: string; path: string; index: number; output: unknown; at: string }
   | {
       type: "step-log";
       runId: string;
-      stepName: string;
+      path: string;
       level: "info" | "warn" | "error";
       message: string;
       data?: Record<string, unknown>;
       at: string;
     }
   | { type: "run-completed"; runId: string; output: unknown; at: string }
-  // `stepName` is omitted when the failure is the workflow's own input validation (no step ran yet).
-  | { type: "run-crashed"; runId: string; stepName?: string; error: string; at: string }
+  // `path` is omitted when the failure is the workflow's own input validation (no step ran yet) or a
+  // resume-time definition-drift check (spec §8.7, no single step to attribute to).
+  | { type: "run-crashed"; runId: string; path?: string; error: string; at: string }
   // A cooperative cancel (spec §5, §8.6): applied side effects are NOT rolled back; the run is
-  // recoverable via resume. `stepName` is the step the run was cancelled at, if one was executing.
-  | { type: "run-cancelled"; runId: string; stepName?: string; at: string }
-  // A Q&A suspension (spec §8.4/§10): a step asked a `questions` BATCH → the run is `blocked`.
-  // `conversation` is the opaque agent history needed to resume the SAME loop (empty for a questionnaire step).
-  // `violation` is set only on a RE-block of a questionnaire step: why the delivered answers were rejected
-  // (absent on a first ask, and on an agent's ask — which is an intentional question, not a rejection).
-  | { type: "questionnaire-asked"; runId: string; stepName: string; questionnaire: Questionnaire; conversation: readonly ConversationMessage[]; violation?: string; at: string }
+  // recoverable via resume. `path` is the step the run was cancelled at, if one was executing.
+  | { type: "run-cancelled"; runId: string; path?: string; at: string }
+  // A Q&A suspension (spec §8.4/§8.5/§10): a step asked a `questions` BATCH → the run is `blocked`.
+  // `path` is the step's full node path — legal anywhere (inside a loop, foreach, branch arm, or
+  // nested workflow, spec §8.5), not just top-level. `conversation` is the opaque agent history needed
+  // to resume the SAME loop (empty for a questionnaire step). `violation` is set only on a RE-block of
+  // a questionnaire step: why the delivered answers were rejected (absent on a first ask, and on an
+  // agent's ask — which is an intentional question, not a rejection).
+  | { type: "questionnaire-asked"; runId: string; path: string; questionnaire: Questionnaire; conversation: readonly ConversationMessage[]; violation?: string; at: string }
   // The user's structured answers (question `key` → value); resume delivers them back (spec §8.4).
-  | { type: "answers-provided"; runId: string; stepName: string; answers: Record<string, unknown>; at: string };
+  | { type: "answers-provided"; runId: string; path: string; answers: Record<string, unknown>; at: string };
 
 /** One message of an agent conversation. Opaque to the engine — the host defines the concrete shape. */
 export type ConversationMessage = unknown;
@@ -127,7 +143,7 @@ export interface RunOptions {
 
 /**
  * Outcome of a single run/resume call (spec §5.1). Only `completed` is terminal; `crashed`,
- * `cancelled`, and `blocked` are resumable. `blocked` carries the pending `questionnaire` + `stepName`.
+ * `cancelled`, and `blocked` are resumable. `blocked` carries the pending `questionnaire` + `path`.
  */
 export interface RunResult {
   readonly runId: string;
@@ -136,7 +152,8 @@ export interface RunResult {
   readonly error?: string;
   /** Present when `blocked`: the questionnaire batch the step asked, and the step that asked it. */
   readonly questionnaire?: Questionnaire;
-  readonly stepName?: string;
+  /** The step's full node path (spec §8.5) — present when `blocked`, and when `crashed`/`cancelled` named a step. */
+  readonly path?: string;
   /** Present when a questionnaire step RE-blocked: why the delivered answers were rejected (spec §2.4). */
   readonly violation?: string;
 }

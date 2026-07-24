@@ -319,7 +319,7 @@ describe("a cancelled run is still resumable — only stale answers are refused 
     // question is asked afresh rather than the stale block being silently continued.
     const revived = await resumeWorkflow(workflow, await store.loadEvents(blocked.runId), host);
     expect(revived.status).toBe("blocked");
-    expect(revived.stepName).toBe("ask");
+    expect(revived.path).toBe("ask");
 
     // ...and answering THAT block works, because it is now the run's latest state.
     const done = await resumeWithAnswer(workflow, await store.loadEvents(blocked.runId), { name: "Ada" }, host);

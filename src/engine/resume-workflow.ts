@@ -2,18 +2,21 @@
  * Resume entry points for the deterministic engine (spec §8). Rebuild run state purely from the
  * recorded event log — no filesystem, no PI, no network.
  *
- * Two distinct resume paths:
+ * Two distinct resume paths (spec §8.4):
  *  - `resumeWorkflow` — for `crashed`/`cancelled` runs: node-atomic re-run (spec §8.2/§8.3). Skip
- *    completed top-level nodes and re-run the first incomplete node wholesale (with per-item resume
- *    for a top-level foreach, spec §3.4).
- *  - `resumeWithAnswer` — for a `blocked` run: the §8.4 same-loop path. Reconstruct the blocked Q&A
- *    step's session from the recorded conversation and replay the answer — continuing the SAME agent
- *    loop, NOT re-running the step from scratch.
+ *    completed top-level nodes and re-run the first incomplete node wholesale (a foreach among them
+ *    still skips its own completed items, spec §8.2).
+ *  - `resumeWithAnswer` — for a `blocked` run: the §8.4/§8.5 same-loop path. A block is legal anywhere
+ *    in the node tree — inside a loop, foreach, branch arm, or nested workflow — so this navigates
+ *    straight to that exact position (re-entry, spec §8.5) and continues the SAME agent loop with the
+ *    answers appended, rather than restarting the enclosing node and re-asking.
  */
-import type { WorkflowDefinition, WorkflowNode } from "../flow/types.ts";
-import { collectNodeNames, nodeName } from "../flow/types.ts";
+import { nodeName, type StepDefinition, type WorkflowDefinition, type WorkflowNode } from "../flow/types.ts";
+import { describeSchemaViolations } from "../flow/validation.ts";
 import { iso } from "./context.ts";
-import { execute, type ForeachResume } from "./execute.ts";
+import { execute, type Reentry } from "./execute.ts";
+import { formatPath, parsePath, staticKeyOf } from "./node-path.ts";
+import { deriveStepStates } from "./step-state.ts";
 import type { HostPort, RunEvent, RunOptions, RunResult } from "./types.ts";
 
 type RunStartedEvent = Extract<RunEvent, { type: "run-started" }>;
@@ -23,28 +26,48 @@ export async function resumeWorkflow(workflow: WorkflowDefinition, priorEvents: 
   const started = requireRunStarted(priorEvents);
   const { runId, input: initialInput } = started;
 
-  const completedByName = recoverCompleted(priorEvents);
-  const drift = await checkDrift(workflow, completedByName, runId, host);
+  const fullStepOutputs = rebuildStepOutputs(priorEvents);
+  const drift = await checkDrift(workflow, priorEvents, fullStepOutputs, runId, host);
   if (drift) return drift;
 
-  // Node-atomic checkpoint: skip completed top-level nodes; re-run the first incomplete node onward.
-  const startIndex = firstIncompleteIndex(workflow.nodes, completedByName);
-  const { stepOutputs, previousOutput } = seedPrefix(workflow, completedByName, startIndex, initialInput);
-
+  // Node-atomic checkpoint (spec §8.2/§8.3): skip completed top-level nodes; re-run the first
+  // incomplete node onward. A top-level node's own completion is recorded under its bare name (no
+  // path prefix at the root), so presence in `fullStepOutputs` (rebuilt from every step-/node-completed
+  // event, static-keyed) is exactly "this node finished".
+  const startIndex = firstIncompleteTopLevelIndex(workflow.nodes, fullStepOutputs);
   const startNode = workflow.nodes[startIndex];
-  await host.emit({ type: "run-resumed", runId, fromStepName: startNode ? nodeName(startNode) : undefined, at: iso(host) });
 
-  // Per-item resume (spec §3.4): a top-level foreach resumes at the first unprocessed item.
-  const foreachResume = startNode?.kind === "foreach" ? buildForeachResume(startNode.name, priorEvents) : undefined;
+  // The node at `startIndex` restarts WHOLESALE (spec §8.2/§8.3) — so anything previously recorded
+  // INSIDE it (a partial loop iteration, a branch arm's steps, a nested workflow's progress) must NOT
+  // leak into the fresh attempt: seed only the completed PREFIX's own subtree outputs. Without this, a
+  // bare-name read inside the restarted node could see a stale value from the discarded attempt
+  // instead of `undefined`, exactly as a genuinely fresh run would see it.
+  const prefixNames = new Set(workflow.nodes.slice(0, startIndex).map((node) => nodeName(node)));
+  const stepOutputs = new Map<string, unknown>();
+  for (const [key, value] of fullStepOutputs) {
+    if (prefixNames.has(key.split("/")[0] ?? key)) stepOutputs.set(key, value);
+  }
 
-  return execute(workflow, host, { runId, initialInput, stepOutputs, previousOutput, startIndex, foreachResume }, options.signal);
+  let previousOutput: unknown = initialInput;
+  if (startIndex > 0) {
+    const previous = workflow.nodes[startIndex - 1];
+    if (previous) previousOutput = stepOutputs.get(nodeName(previous));
+  }
+
+  await host.emit({ type: "run-resumed", runId, fromPath: startNode ? nodeName(startNode) : undefined, at: iso(host) });
+
+  // Foreach item history (spec §8.2) is deliberately NOT filtered to the prefix: a foreach's own
+  // per-item checkpoints survive a wholesale restart of whatever encloses it — the one granularity
+  // finer than "node-atomic" the spec carves out.
+  const foreachItemHistory = buildForeachItemHistory(priorEvents);
+  return execute(workflow, host, { runId, initialInput, stepOutputs, previousOutput, startIndex, foreachItemHistory }, options.signal);
 }
 
 /**
- * Resume a `blocked` run by delivering the user's structured `answers` (spec §8.4). Continues the
- * blocked step's SAME loop: an agent step re-batches or emits `{result}`; a questionnaire step
- * reassembles + validates the answers into its output. On another `{questions}` the run re-blocks.
- * Supported for a **top-level** blocked step.
+ * Resume a `blocked` run by delivering the user's structured `answers` (spec §8.4/§8.5). Re-enters
+ * the blocked step's exact position — however deeply nested — and continues its SAME loop: an agent
+ * step re-batches or emits `{result}`; a questionnaire step reassembles + validates the answers into
+ * its output. On another `{questions}` the run re-blocks at that same position.
  */
 export async function resumeWithAnswer(
   workflow: WorkflowDefinition,
@@ -70,35 +93,16 @@ export async function resumeWithAnswer(
     throw new Error(`cannot answer run ${runId}: it was ${settled} after blocking; answering would undo that`);
   }
 
-  const blockedIndex = topLevelStepIndex(workflow, pending.stepName);
-  if (blockedIndex === -1) {
-    const error = `cannot answer run ${runId}: blocked step "${pending.stepName}" is not a top-level step (nested Q&A resume is out of scope)`;
-    await host.emit({ type: "run-crashed", runId, stepName: pending.stepName, error, at: iso(host) });
-    return { runId, status: "crashed", error, stepName: pending.stepName };
-  }
-
-  const completedByName = recoverCompleted(priorEvents);
-  const drift = await checkDrift(workflow, completedByName, runId, host);
+  const stepOutputs = rebuildStepOutputs(priorEvents);
+  const drift = await checkDrift(workflow, priorEvents, stepOutputs, runId, host);
   if (drift) return drift;
 
-  // Seed the prefix before the blocked step; the blocked step continues via the answer hint (not re-run).
-  const { stepOutputs, previousOutput } = seedPrefix(workflow, completedByName, blockedIndex, initialInput);
+  const foreachItemHistory = buildForeachItemHistory(priorEvents);
+  await host.emit({ type: "answers-provided", runId, path: pending.path, answers, at: iso(host) });
 
-  await host.emit({ type: "answers-provided", runId, stepName: pending.stepName, answers, at: iso(host) });
+  const reentry: Reentry = { path: parsePath(pending.path), answer: { answers, conversation: pending.conversation } };
 
-  return execute(
-    workflow,
-    host,
-    {
-      runId,
-      initialInput,
-      stepOutputs,
-      previousOutput,
-      startIndex: blockedIndex,
-      answerResume: { stepName: pending.stepName, answers, conversation: pending.conversation },
-    },
-    options.signal,
-  );
+  return execute(workflow, host, { runId, initialInput, stepOutputs, previousOutput: initialInput, startIndex: 0, foreachItemHistory, reentry }, options.signal);
 }
 
 function requireRunStarted(priorEvents: readonly RunEvent[]): RunStartedEvent {
@@ -109,52 +113,104 @@ function requireRunStarted(priorEvents: readonly RunEvent[]): RunStartedEvent {
   return started;
 }
 
-/** Recover every completed step/node output (spec §8.2: a checkpoint is a completed step or node). */
-function recoverCompleted(priorEvents: readonly RunEvent[]): Map<string, unknown> {
-  const completedByName = new Map<string, unknown>();
+/**
+ * Rebuild `RunState.stepOutputs` (spec §5.4: static-keyed, latest execution wins) from every
+ * recorded `step-completed`/`node-completed` event, at every depth — not just a top-level prefix.
+ * This is what lets a resume (either path) reconstruct bare-name reads and linear hand-off anywhere
+ * in the tree, and what makes a node/step's presence here exactly mean "recorded complete".
+ */
+function rebuildStepOutputs(priorEvents: readonly RunEvent[]): Map<string, unknown> {
+  const outputs = new Map<string, unknown>();
   for (const event of priorEvents) {
-    if (event.type === "step-completed") completedByName.set(event.stepName, event.output);
-    else if (event.type === "node-completed") completedByName.set(event.nodeName, event.output);
+    if (event.type === "step-completed" || event.type === "node-completed") {
+      outputs.set(staticKeyOf(parsePath(event.path)), event.output);
+    }
   }
-  return completedByName;
+  return outputs;
 }
 
-/** Drift check (spec §8.5): a recorded completion must still exist by name somewhere in the tree. */
-async function checkDrift(workflow: WorkflowDefinition, completedByName: ReadonlyMap<string, unknown>, runId: string, host: HostPort): Promise<RunResult | undefined> {
-  const currentNames = collectNodeNames(workflow.nodes);
-  for (const name of completedByName.keys()) {
-    if (!currentNames.has(name)) {
-      const error = `cannot resume run ${runId}: previously-completed "${name}" no longer exists in workflow "${workflow.name}" (definition drift, spec §8.5)`;
-      await host.emit({ type: "run-crashed", runId, error, at: iso(host) });
-      return { runId, status: "crashed", error };
+/**
+ * Rebuild every foreach's recorded per-item outputs (spec §8.2), keyed by the foreach's own DYNAMIC
+ * path (ancestor indices preserved, its own trailing index dropped — e.g. `until-valid#3/batch`).
+ * Generalizes the old top-level-only foreach resume to any foreach in the tree, at any depth.
+ */
+function buildForeachItemHistory(priorEvents: readonly RunEvent[]): Map<string, Map<number, unknown>> {
+  const history = new Map<string, Map<number, unknown>>();
+  for (const event of priorEvents) {
+    if (event.type !== "foreach-item-completed") continue;
+    const segments = parsePath(event.path);
+    const last = segments[segments.length - 1];
+    if (!last || last.index === undefined) continue; // defensive: an item's own path segment always carries an index
+    const foreachKey = formatPath([...segments.slice(0, -1), { name: last.name }]);
+    const perItem = history.get(foreachKey) ?? new Map<number, unknown>();
+    perItem.set(event.index, event.output);
+    history.set(foreachKey, perItem);
+  }
+  return history;
+}
+
+/**
+ * Definition drift (spec §8.7): re-validate each currently-completed step's recorded output against
+ * that step's CURRENT output schema, resolved in the just-reloaded `workflow` by its static path. A
+ * step no longer reachable at that path, or whose recorded output no longer satisfies its schema,
+ * refuses the resume naming the step and the violation. Cosmetic edits (renamed description, a
+ * reordered branch, an appended step) never trip this — only a change that would feed stale data
+ * downstream does.
+ */
+async function checkDrift(
+  workflow: WorkflowDefinition,
+  priorEvents: readonly RunEvent[],
+  stepOutputs: ReadonlyMap<string, unknown>,
+  runId: string,
+  host: HostPort,
+): Promise<RunResult | undefined> {
+  const states = deriveStepStates(priorEvents);
+  for (const [staticKey, state] of states) {
+    if (state !== "completed") continue;
+
+    const step = resolveStepAtStaticPath(workflow.nodes, staticKey.split("/"));
+    if (!step) {
+      const error = `cannot resume run ${runId}: previously-completed step "${staticKey}" no longer exists in workflow "${workflow.name}" (definition drift, spec §8.7)`;
+      await host.emit({ type: "run-crashed", runId, path: staticKey, error, at: iso(host) });
+      return { runId, status: "crashed", error, path: staticKey };
+    }
+
+    if (step.outputSchema) {
+      const violation = describeSchemaViolations(step.outputSchema, stepOutputs.get(staticKey));
+      if (violation) {
+        const error = `cannot resume run ${runId}: previously-completed step "${staticKey}" no longer satisfies its current output schema (definition drift, spec §8.7): ${violation}`;
+        await host.emit({ type: "run-crashed", runId, path: staticKey, error, at: iso(host) });
+        return { runId, status: "crashed", error, path: staticKey };
+      }
     }
   }
   return undefined;
 }
 
-/**
- * Seed the run context ONLY from the completed prefix nodes `[0, startIndex)` and their descendants —
- * exactly the state a fresh run would hold when the node at `startIndex` is about to start (fresh ≡
- * resume). `previousOutput` is the last completed top-level node's output (or the initial input).
- */
-function seedPrefix(
-  workflow: WorkflowDefinition,
-  completedByName: ReadonlyMap<string, unknown>,
-  startIndex: number,
-  initialInput: unknown,
-): { stepOutputs: Map<string, unknown>; previousOutput: unknown } {
-  const priorNames = collectNodeNames(workflow.nodes.slice(0, startIndex));
-  const stepOutputs = new Map<string, unknown>();
-  for (const name of priorNames) {
-    if (completedByName.has(name)) stepOutputs.set(name, completedByName.get(name));
-  }
+/** Resolve the step definition at a STATIC path (e.g. `["until-valid", "design"]`) in the current tree, or undefined. */
+function resolveStepAtStaticPath(nodes: readonly WorkflowNode[], segments: readonly string[]): StepDefinition | undefined {
+  const [head, ...rest] = segments;
+  if (head === undefined) return undefined;
 
-  let previousOutput: unknown = initialInput;
-  if (startIndex > 0) {
-    const previous = workflow.nodes[startIndex - 1];
-    if (previous) previousOutput = completedByName.get(nodeName(previous));
+  for (const node of nodes) {
+    if (node.kind === "step") {
+      if (node.step.name === head) return rest.length === 0 ? node.step : undefined;
+      continue;
+    }
+    if (node.kind === "branch") {
+      for (const arm of node.arms) {
+        if (arm.name === head) return resolveStepAtStaticPath(arm.body.nodes, rest);
+      }
+      continue;
+    }
+    if ((node.kind === "loop" || node.kind === "foreach") && node.name === head) {
+      return resolveStepAtStaticPath(node.body.nodes, rest);
+    }
+    if (node.kind === "workflow" && node.name === head) {
+      return resolveStepAtStaticPath(node.workflow.nodes, rest);
+    }
   }
-  return { stepOutputs, previousOutput };
+  return undefined;
 }
 
 /**
@@ -179,25 +235,11 @@ function lastQuestionnaireAsked(priorEvents: readonly RunEvent[]): Questionnaire
   return pending;
 }
 
-/** Index of the top-level step node with `name`, or -1 (nested / not a step). */
-function topLevelStepIndex(workflow: WorkflowDefinition, name: string): number {
-  return workflow.nodes.findIndex((node) => node.kind === "step" && node.step.name === name);
-}
-
-function buildForeachResume(targetNodeName: string, priorEvents: readonly RunEvent[]): ForeachResume | undefined {
-  const items = new Map<number, unknown>();
-  for (const event of priorEvents) {
-    if (event.type === "foreach-item-completed" && event.nodeName === targetNodeName) {
-      items.set(event.index, event.output);
-    }
-  }
-  return items.size > 0 ? { nodeName: targetNodeName, items } : undefined;
-}
-
-function firstIncompleteIndex(nodes: readonly WorkflowNode[], completedByName: ReadonlyMap<string, unknown>): number {
+/** Index of the first top-level node with no recorded completion (its own bare name absent from `stepOutputs`). */
+function firstIncompleteTopLevelIndex(nodes: readonly WorkflowNode[], stepOutputs: ReadonlyMap<string, unknown>): number {
   for (let index = 0; index < nodes.length; index++) {
     const node = nodes[index];
-    if (node && !completedByName.has(nodeName(node))) {
+    if (node && !stepOutputs.has(nodeName(node))) {
       return index;
     }
   }

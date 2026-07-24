@@ -72,7 +72,7 @@ describe("agent scripting by step name", () => {
     });
 
     expect(run.status).toBe("completed");
-    expect(run.eventsOf("step-retry")).toMatchObject([{ stepName: "flaky", attempt: 1, reason: "thrown-error" }]);
+    expect(run.eventsOf("step-retry")).toMatchObject([{ path: "flaky", attempt: 1, reason: "thrown-error" }]);
     expect(run.sleepCalls).toEqual([25]);
     expect(run.agent("flaky").sessions).toBe(2); // a retry opens a fresh session
   });
@@ -133,7 +133,7 @@ describe("questionnaire step answer matrix (spec §2.4)", () => {
   it("blocks with the derived questionnaire, and no violation on the first ask", async () => {
     const blocked = await createTestRun(workflow);
     expect(blocked.status).toBe("blocked");
-    expect(blocked.stepName).toBe("form");
+    expect(blocked.path).toBe("form");
     expect(blocked.questionKeys()).toEqual(["name", "environment"]);
     expect(blocked.violation).toBeUndefined();
   });

@@ -64,7 +64,7 @@ describe("cancellation (spec §5, §8.6)", () => {
     const events = await store.loadEvents(result.runId);
     expect(events.some((event) => event.type === "run-cancelled")).toBe(true);
     expect(events.some((event) => event.type === "run-crashed")).toBe(false);
-    const started = events.filter((event) => event.type === "step-started").map((event) => event.stepName);
+    const started = events.filter((event) => event.type === "step-started").map((event) => event.path);
     expect(started).toEqual(["s1"]); // s2 and s3 never started
   });
 
