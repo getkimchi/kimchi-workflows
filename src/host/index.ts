@@ -31,6 +31,8 @@ export { createPiAgentBridge } from "./pi-agent.ts";
 export type { DialogUI } from "./questionnaire-fallback.ts";
 export { collectViaDialogs } from "./questionnaire-fallback.ts";
 export { collectAnswers } from "./questionnaire-render.ts";
+export type { RenderMode } from "./render-mode.ts";
+export { stepRenderMode } from "./render-mode.ts";
 export type { ResumeAction, RunStatus } from "./resume-router.ts";
 export { resumeAction } from "./resume-router.ts";
 export type { AcquireResult, ActiveRun, BeginResult, LockInfo, ProcessEnv, RunLock } from "./run-lock.ts";

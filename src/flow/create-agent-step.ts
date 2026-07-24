@@ -27,6 +27,11 @@ export interface CreateAgentStepOptions<TInputSchema extends TSchema | undefined
   maxDurationMs?: number;
   /** Per-step token budget (spec §9.3): summed turn usage over this → `budget-exceeded`. */
   maxTokens?: number;
+  /**
+   * Run as an isolated PI subagent (spec §2.2): own context window and tool loop, no access to the
+   * parent session's history. Never combine with `asks: true` — `.commit()` rejects it (spec §10.1).
+   */
+  background?: boolean;
 }
 
 /** Agent step (spec §2.2). Runs the agent loop via the host and validates its structured output. */
@@ -45,6 +50,7 @@ export function createAgentStep<TInputSchema extends TSchema | undefined = undef
     maxOutputRepairs: options.maxOutputRepairs,
     maxDurationMs: options.maxDurationMs,
     maxTokens: options.maxTokens,
+    background: options.background,
     // Single, narrow type-erasure boundary: the author's `prompt` is precisely typed against the
     // declared input schema; the engine calls it with a runtime-validated `unknown` input.
     buildPrompt: (args) => options.prompt(args as AgentPromptArgs<InferInput<TInputSchema>>),
