@@ -34,7 +34,7 @@ describe("step context (spec §2.5): { input, ctx, abortSignal, logger }", () =>
     const logEvent = events.find((event) => event.type === "step-log");
     expect(logEvent).toMatchObject({
       type: "step-log",
-      stepName: "introspect",
+      path: "introspect",
       level: "info",
       message: "hello from the step",
       data: { answer: 42 },

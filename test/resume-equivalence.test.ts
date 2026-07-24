@@ -75,10 +75,11 @@ describe("fresh ≡ resume invariant (spec §8): resume state matches an interru
     const { host, store } = createTestHost();
     const first = await runWorkflow(run.workflow, undefined, host);
     expect(first.status).toBe("crashed");
-    // producer completed once (iteration 1) → it IS recorded in the log.
+    // producer completed once (iteration 1) → it IS recorded in the log, under iteration 1's own
+    // dynamic path (spec §8.5).
     const priorEvents = await store.loadEvents(first.runId);
-    expect(priorEvents.some((e) => e.type === "step-completed" && e.stepName === "producer")).toBe(true);
-    expect(priorEvents.some((e) => e.type === "node-completed" && e.nodeName === "probe-loop")).toBe(false);
+    expect(priorEvents.some((e) => e.type === "step-completed" && e.path === "probe-loop#1/producer")).toBe(true);
+    expect(priorEvents.some((e) => e.type === "node-completed" && e.path === "probe-loop")).toBe(false);
 
     // Resume with a fixed producer; `resumeRun` has its own fresh `observed` array (empty at start).
     const resumeRun = buildProbeWorkflow(false);

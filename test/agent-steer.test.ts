@@ -34,7 +34,7 @@ describe("output steering (Phase 4b, spec §9.2)", () => {
 
     const steers = steerEvents(await store.loadEvents(result.runId));
     expect(steers).toHaveLength(1);
-    expect(steers[0]).toMatchObject({ stepName: "summarize", attempt: 1 });
+    expect(steers[0]).toMatchObject({ path: "summarize", attempt: 1 });
     expect(steers[0]?.violation).toMatch(/keywords/);
   });
 

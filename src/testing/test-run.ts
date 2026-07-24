@@ -11,6 +11,7 @@
  * `resume()` read as a chain of states, and an earlier state stays inspectable for comparison.
  */
 
+import { parsePath, staticKeyOf } from "../engine/node-path.ts";
 import { resumeWithAnswer, resumeWorkflow } from "../engine/resume-workflow.ts";
 import { runWorkflow } from "../engine/run-workflow.ts";
 import type { HostPort, RunEvent, RunResult } from "../engine/types.ts";
@@ -60,8 +61,8 @@ export interface TestRun {
   readonly error: string | undefined;
   /** The pending questionnaire when `blocked`. */
   readonly questionnaire: Questionnaire | undefined;
-  /** The step that blocked, or the step a crash/cancel occurred at. */
-  readonly stepName: string | undefined;
+  /** The full node path (spec §8.5) of the step that blocked, or that a crash/cancel occurred at. */
+  readonly path: string | undefined;
   /** Why a questionnaire step RE-blocked: the schema violation in the delivered answers (spec §2.4). */
   readonly violation: string | undefined;
   /** The full event log so far, across every transition of this run. */
@@ -73,7 +74,7 @@ export interface TestRun {
   questionKeys(): string[];
   /** Events of one type, narrowed. */
   eventsOf<T extends RunEvent["type"]>(type: T): Extract<RunEvent, { type: T }>[];
-  /** A completed step's (or node's) recorded output. */
+  /** A completed step's (or node's) recorded output, addressed by bare name (top-level) or static node path. */
   stepOutput(name: string): unknown;
   /** What an agent step's double recorded: messages sent to it, models, sessions opened. */
   agent(stepName: string): AgentRecord;
@@ -135,9 +136,10 @@ export async function createTestRun(workflow: WorkflowDefinition, options: TestR
 }
 
 /**
- * A one-shot cancel armed by a step name. Each transition gets a fresh `AbortController`, and the
- * abort fires at most once — so `start()` can cancel at a step and the following `resume()` still
- * completes, which is the whole point of testing the cancel/resume pair (spec §8.3).
+ * A one-shot cancel armed by a step's node path (a bare name matches a top-level step, since its path
+ * IS its bare name). Each transition gets a fresh `AbortController`, and the abort fires at most once
+ * — so `start()` can cancel at a step and the following `resume()` still completes, which is the whole
+ * point of testing the cancel/resume pair (spec §8.3).
  */
 interface Canceller {
   /** Begin a transition: a fresh signal, or `undefined` once the cancel has already fired. */
@@ -157,7 +159,7 @@ function createCanceller(cancelAt: string | undefined): Canceller | undefined {
       return controller.signal;
     },
     observe(event: RunEvent): void {
-      if (fired || event.type !== "step-started" || event.stepName !== cancelAt) return;
+      if (fired || event.type !== "step-started" || event.path !== cancelAt) return;
       fired = true;
       controller?.abort();
     },
@@ -183,7 +185,7 @@ async function toTestRun(context: RunContextForTest, result: RunResult): Promise
     output: result.output,
     error: result.error,
     questionnaire: result.questionnaire,
-    stepName: result.stepName,
+    path: result.path,
     violation: result.violation,
     events,
     sleepCalls: context.sleepCalls,
@@ -197,11 +199,12 @@ async function toTestRun(context: RunContextForTest, result: RunResult): Promise
     },
 
     stepOutput(name: string): unknown {
-      // Last write wins: a step inside a loop completes once per iteration.
+      // Last write wins (spec §5.4): a step inside a loop/foreach completes once per iteration/item,
+      // and `name` is matched against the STATIC key (indices dropped) so a bare top-level name or an
+      // explicit static path (`"until-valid/design"`) both work without the caller tracking iteration.
       let output: unknown;
       for (const event of events) {
-        if (event.type === "step-completed" && event.stepName === name) output = event.output;
-        else if (event.type === "node-completed" && event.nodeName === name) output = event.output;
+        if ((event.type === "step-completed" || event.type === "node-completed") && staticKeyOf(parsePath(event.path)) === name) output = event.output;
       }
       return output;
     },

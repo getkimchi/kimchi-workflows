@@ -63,7 +63,7 @@ describe("foreach per-item resume (spec §3.4/§8)", () => {
 
     const priorEvents = await store.loadEvents(first.runId);
     expect(completedItemIndices(priorEvents)).toEqual([0, 1]); // only 0,1 checkpointed
-    expect(priorEvents.some((e) => e.type === "node-completed" && e.nodeName === "each")).toBe(false);
+    expect(priorEvents.some((e) => e.type === "node-completed" && e.path === "each")).toBe(false);
 
     // Resume with the body fixed.
     const resumeRun = buildForeachResumeWorkflow();

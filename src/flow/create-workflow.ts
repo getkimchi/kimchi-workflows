@@ -3,6 +3,16 @@ import { createMapStep } from "./create-map-step.ts";
 import type { BranchCondition, ForeachSelector, LoopCondition, MapFn, StepDefinition, WorkflowDefinition, WorkflowNode } from "./types.ts";
 import { forEachNode, nodeName } from "./types.ts";
 
+/**
+ * `/` and `#` are node-path syntax (spec §8.5, engine/node-path.ts): a name carrying either would
+ * make a path built from it unparseable. Duplicated here (rather than importing engine/node-path.ts)
+ * to keep `src/flow` free of a dependency on `src/engine` — flow is the pure authoring layer the
+ * engine depends on, not the reverse.
+ */
+function isValidNodeName(name: string): boolean {
+  return name.length > 0 && !name.includes("/") && !name.includes("#");
+}
+
 /** Default loop guard: a loop that neither satisfies its condition nor errors within this many iterations crashes. */
 export const DEFAULT_MAX_ITERATIONS = 100;
 
@@ -139,7 +149,7 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
         throw new Error(`workflow "${options.name}" must declare at least one node before commit()`);
       }
       assertWellFormed(options.name, nodes);
-      assertUniqueNames(options.name, nodes);
+      assertScopeNames(options.name, nodes);
       return {
         name: options.name,
         description: options.description,
@@ -165,11 +175,6 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
   return builder;
 }
 
-/**
- * Names address data flow and match the event log (spec §3), so every step/branch/loop name must
- * be unique across the whole workflow tree (including branch-arm and loop bodies). Global
- * uniqueness lets node-atomic resume identify a completed node from the log unambiguously.
- */
 /** The three things `.then()` accepts — anything else is not a step (spec §2). */
 const STEP_KINDS = new Set(["function", "agent", "questionnaire"]);
 
@@ -201,13 +206,43 @@ function describeValue(value: unknown): string {
   return kind === undefined ? "an object with no `kind`" : `an object with kind "${String(kind)}"`;
 }
 
-function assertUniqueNames(workflowName: string, nodes: readonly WorkflowNode[]): void {
+/**
+ * Names need only be unique WITHIN their enclosing scope (spec §3.9/§11.2), not across the whole
+ * tree: a branch arm, loop body, foreach body, and nested workflow are each pre-committed as their
+ * OWN `WorkflowDefinition` (this same check already ran on them at their own `.commit()`), so this
+ * scope is exactly `nodes` — the list being committed right now. No recursion is needed, which is
+ * precisely what lets the SAME sub-workflow be composed twice in one parent (§11.2 — the node path,
+ * not the name, disambiguates the two instances at run time).
+ *
+ * A branch node contributes MORE than one addressable name to this scope: its own construct name
+ * (used for its `node-started`/`node-completed` lifecycle) AND each arm's name (an arm is a PEER
+ * scope of the branch's own name for addressing purposes, spec §8.5 — a step inside it is
+ * `armName/stepName`, not `branchName/armName/stepName`). Both pools are checked together, since a
+ * bare-name context read (spec §3.9) of either would be ambiguous if duplicated.
+ *
+ * This also enforces the `/`/`#` ban (spec §3): both are node-path syntax, and a name carrying either
+ * would make a path built from it unparseable.
+ */
+function assertScopeNames(workflowName: string, nodes: readonly WorkflowNode[]): void {
   const seen = new Set<string>();
-  forEachNode(nodes, (node) => {
-    const name = nodeName(node);
+  const check = (name: string): void => {
+    if (!isValidNodeName(name)) {
+      throw new Error(`workflow "${workflowName}": name "${name}" is invalid — step/node names may not be empty or contain "/" or "#" (both are node-path syntax, spec §3)`);
+    }
     if (seen.has(name)) {
-      throw new Error(`workflow "${workflowName}" has a duplicate node/step name "${name}"; names must be unique across the whole workflow`);
+      throw new Error(
+        `workflow "${workflowName}" has a duplicate node/step name "${name}"; names must be unique within their enclosing scope (spec §3.9/§11.2) — a duplicate here would make a bare context read of "${name}" ambiguous`,
+      );
     }
     seen.add(name);
-  });
+  };
+
+  for (const node of nodes) {
+    if (node.kind === "branch") {
+      check(node.name);
+      for (const arm of node.arms) check(arm.name);
+    } else {
+      check(nodeName(node));
+    }
+  }
 }

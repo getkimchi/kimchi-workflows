@@ -2,6 +2,7 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
+import { parsePath, staticKeyOf } from "../src/engine/node-path.ts";
 import { resumeWithAnswer } from "../src/engine/resume-workflow.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunResult } from "../src/engine/types.ts";
@@ -85,17 +86,19 @@ async function createWorkflowE2E(model: string, fileName: string, projectRoot: s
     if (!questionnaire) throw new Error("blocked with no questionnaire");
 
     // The opening form is the only step whose answers must be exact; the rest are auto-answered.
-    const answers = result.stepName === "brief" ? { goal: GOAL, fileName } : autoAnswer(questionnaire);
+    const answers = result.path === "brief" ? { goal: GOAL, fileName } : autoAnswer(questionnaire);
 
-    console.log(`[create-e2e ${model}] round ${rounds} @ ${result.stepName}:`, questionnaire.questions.map((q) => q.key).join(", "));
+    console.log(`[create-e2e ${model}] round ${rounds} @ ${result.path}:`, questionnaire.questions.map((q) => q.key).join(", "));
     const started = Date.now();
     result = await resumeWithAnswer(underTest, await store.loadEvents(result.runId), answers, host);
     console.log(`[create-e2e ${model}]   round ${rounds} took ${Math.round((Date.now() - started) / 1000)}s → ${result.status}`);
   }
 
   // Surface why generation failed, if it did — the check step records the loader's complaint.
+  // `check` lives inside the `until-valid` loop (spec §6.6), so match by STATIC path (spec §5.4),
+  // not the bare name — its dynamic path carries the iteration index.
   for (const event of await store.loadEvents(result.runId)) {
-    if (event.type === "step-completed" && event.stepName === "check") {
+    if (event.type === "step-completed" && staticKeyOf(parsePath(event.path)) === "until-valid/check") {
       const output = event.output as { ok: boolean; error?: string; source: string };
       if (!output.ok) {
         console.log(`[create-e2e ${model}] check REJECTED: ${output.error}`);

@@ -41,8 +41,8 @@ describe("hello workflow (Phase 1 tracer bullet)", () => {
     expect(result.runId).toBe("run-fixed-1");
     expect(events).toEqual([
       { type: "run-started", runId: "run-fixed-1", workflowName: "hello", input: undefined, at },
-      { type: "step-started", runId: "run-fixed-1", stepIndex: 0, stepName: "say-hello", input: undefined, at },
-      { type: "step-completed", runId: "run-fixed-1", stepIndex: 0, stepName: "say-hello", output: { message: "Hello, PI workflows!" }, at },
+      { type: "step-started", runId: "run-fixed-1", path: "say-hello", input: undefined, at },
+      { type: "step-completed", runId: "run-fixed-1", path: "say-hello", output: { message: "Hello, PI workflows!" }, at },
       { type: "run-completed", runId: "run-fixed-1", output: { message: "Hello, PI workflows!" }, at },
     ]);
   });

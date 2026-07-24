@@ -25,15 +25,15 @@ describe("deriveStepStates (spec §5.1, §5.4): one state per case", () => {
   });
 
   it("in_progress — step-started with nothing after it", () => {
-    const events: RunEvent[] = [started, { type: "step-started", runId, stepIndex: 0, stepName: "s", input: undefined, at }];
+    const events: RunEvent[] = [started, { type: "step-started", runId, path: "s", input: undefined, at }];
     expect(stepState(deriveStepStates(events), "s")).toBe("in_progress");
   });
 
   it("in_progress — a retry keeps the step in_progress (spec §5.1: 'including retries and output steering')", () => {
     const events: RunEvent[] = [
       started,
-      { type: "step-started", runId, stepIndex: 0, stepName: "s", input: undefined, at },
-      { type: "step-retry", runId, stepName: "s", attempt: 1, reason: "thrown-error", error: "boom", at },
+      { type: "step-started", runId, path: "s", input: undefined, at },
+      { type: "step-retry", runId, path: "s", attempt: 1, reason: "thrown-error", error: "boom", at },
     ];
     expect(stepState(deriveStepStates(events), "s")).toBe("in_progress");
   });
@@ -41,8 +41,8 @@ describe("deriveStepStates (spec §5.1, §5.4): one state per case", () => {
   it("in_progress — an agent-steer correction keeps the step in_progress", () => {
     const events: RunEvent[] = [
       started,
-      { type: "step-started", runId, stepIndex: 0, stepName: "s", input: undefined, at },
-      { type: "agent-steer", runId, stepName: "s", attempt: 1, violation: "bad json", at },
+      { type: "step-started", runId, path: "s", input: undefined, at },
+      { type: "agent-steer", runId, path: "s", attempt: 1, violation: "bad json", at },
     ];
     expect(stepState(deriveStepStates(events), "s")).toBe("in_progress");
   });
@@ -50,65 +50,57 @@ describe("deriveStepStates (spec §5.1, §5.4): one state per case", () => {
   it("in_progress — answers-provided reopens a blocked step (spec §8.4 resume)", () => {
     const events: RunEvent[] = [
       started,
-      { type: "step-started", runId, stepIndex: 0, stepName: "s", input: undefined, at },
-      { type: "questionnaire-asked", runId, stepName: "s", questionnaire: { questions: [] }, conversation: [], at },
-      { type: "answers-provided", runId, stepName: "s", answers: {}, at },
+      { type: "step-started", runId, path: "s", input: undefined, at },
+      { type: "questionnaire-asked", runId, path: "s", questionnaire: { questions: [] }, conversation: [], at },
+      { type: "answers-provided", runId, path: "s", answers: {}, at },
     ];
     expect(stepState(deriveStepStates(events), "s")).toBe("in_progress");
   });
 
   it("blocked — questionnaire-asked", () => {
-    const events: RunEvent[] = [started, { type: "questionnaire-asked", runId, stepName: "ask", questionnaire: { questions: [] }, conversation: [], at }];
+    const events: RunEvent[] = [started, { type: "questionnaire-asked", runId, path: "ask", questionnaire: { questions: [] }, conversation: [], at }];
     expect(stepState(deriveStepStates(events), "ask")).toBe("blocked");
   });
 
   it("completed — step-completed", () => {
-    const events: RunEvent[] = [
-      started,
-      { type: "step-started", runId, stepIndex: 0, stepName: "s", input: undefined, at },
-      { type: "step-completed", runId, stepIndex: 0, stepName: "s", output: { ok: true }, at },
-    ];
+    const events: RunEvent[] = [started, { type: "step-started", runId, path: "s", input: undefined, at }, { type: "step-completed", runId, path: "s", output: { ok: true }, at }];
     expect(stepState(deriveStepStates(events), "s")).toBe("completed");
   });
 
   it("skipped — a branch-arm event with taken: false (spec §3.2)", () => {
-    const events: RunEvent[] = [started, { type: "branch-arm", runId, nodeName: "branch-1", armName: "arm-b", taken: false, at }];
+    const events: RunEvent[] = [started, { type: "branch-arm", runId, path: "arm-b", taken: false, at }];
     expect(stepState(deriveStepStates(events), "arm-b")).toBe("skipped");
   });
 
   it("a taken branch arm is not itself recorded skipped", () => {
-    const events: RunEvent[] = [started, { type: "branch-arm", runId, nodeName: "branch-1", armName: "arm-a", taken: true, at }];
+    const events: RunEvent[] = [started, { type: "branch-arm", runId, path: "arm-a", taken: true, at }];
     expect(stepState(deriveStepStates(events), "arm-a")).toBe("todo"); // the arm's own steps report their state, not the arm
   });
 
   it("cancelled — a step-attributed run-cancelled (mid-step boundary cancel)", () => {
-    const events: RunEvent[] = [started, { type: "step-started", runId, stepIndex: 0, stepName: "s", input: undefined, at }, { type: "run-cancelled", runId, stepName: "s", at }];
+    const events: RunEvent[] = [started, { type: "step-started", runId, path: "s", input: undefined, at }, { type: "run-cancelled", runId, path: "s", at }];
     expect(stepState(deriveStepStates(events), "s")).toBe("cancelled");
   });
 
   it("crashed — a step-attributed run-crashed (retries exhausted, spec §9.5)", () => {
-    const events: RunEvent[] = [
-      started,
-      { type: "step-started", runId, stepIndex: 0, stepName: "s", input: undefined, at },
-      { type: "run-crashed", runId, stepName: "s", error: "boom", at },
-    ];
+    const events: RunEvent[] = [started, { type: "step-started", runId, path: "s", input: undefined, at }, { type: "run-crashed", runId, path: "s", error: "boom", at }];
     expect(stepState(deriveStepStates(events), "s")).toBe("crashed");
   });
 
   it("a run-level terminal event force-closes a step left open, even without naming it", () => {
-    // A cold cancel of a blocked run (spec §6.4) records `run-cancelled` with NO stepName — but the
+    // A cold cancel of a blocked run (spec §6.4) records `run-cancelled` with NO path — but the
     // step that was blocked is definitely no longer waiting on anyone (spec §5.1: blocked means, and
     // only ever means, waiting on a human), so it must not read `blocked` forever.
     const cancelled: RunEvent[] = [
       started,
-      { type: "questionnaire-asked", runId, stepName: "ask", questionnaire: { questions: [] }, conversation: [], at },
+      { type: "questionnaire-asked", runId, path: "ask", questionnaire: { questions: [] }, conversation: [], at },
       { type: "run-cancelled", runId, at },
     ];
     expect(stepState(deriveStepStates(cancelled), "ask")).toBe("cancelled");
 
-    // Symmetrically for a node-level crash with no stepName (e.g. a resume's drift check, spec §8.7)
+    // Symmetrically for a node-level crash with no path (e.g. a resume's drift check, spec §8.7)
     // hitting a step still recorded in_progress from before.
-    const crashed: RunEvent[] = [started, { type: "step-started", runId, stepIndex: 0, stepName: "s", input: undefined, at }, { type: "run-crashed", runId, error: "drift", at }];
+    const crashed: RunEvent[] = [started, { type: "step-started", runId, path: "s", input: undefined, at }, { type: "run-crashed", runId, error: "drift", at }];
     expect(stepState(deriveStepStates(crashed), "s")).toBe("crashed");
   });
 
@@ -117,10 +109,10 @@ describe("deriveStepStates (spec §5.1, §5.4): one state per case", () => {
     // already-completed/todo/skipped steps must be untouched.
     const events: RunEvent[] = [
       started,
-      { type: "step-started", runId, stepIndex: 0, stepName: "seed", input: undefined, at },
-      { type: "step-completed", runId, stepIndex: 0, stepName: "seed", output: { n: 0 }, at },
-      { type: "branch-arm", runId, nodeName: "branch-1", armName: "unused-arm", taken: false, at },
-      { type: "run-crashed", runId, error: "loop exceeded max iterations", at }, // no stepName
+      { type: "step-started", runId, path: "seed", input: undefined, at },
+      { type: "step-completed", runId, path: "seed", output: { n: 0 }, at },
+      { type: "branch-arm", runId, path: "unused-arm", taken: false, at },
+      { type: "run-crashed", runId, error: "loop exceeded max iterations", at }, // no path
     ];
     const states = deriveStepStates(events);
     expect(stepState(states, "seed")).toBe("completed");
@@ -129,16 +121,18 @@ describe("deriveStepStates (spec §5.1, §5.4): one state per case", () => {
   });
 
   it("latest execution wins — a step re-entered by a loop reflects only its most recent iteration (spec §5.4)", () => {
+    // Each iteration's event carries the FULL dynamic path (indexed) — `deriveStepStates` collapses
+    // them to the static key ("count-loop/inc"), so all three iterations share one map entry.
     const events: RunEvent[] = [
       started,
-      { type: "step-started", runId, stepIndex: 0, stepName: "inc", input: { count: 0 }, at },
-      { type: "step-completed", runId, stepIndex: 0, stepName: "inc", output: { count: 1 }, at },
-      { type: "step-started", runId, stepIndex: 0, stepName: "inc", input: { count: 1 }, at },
-      { type: "step-completed", runId, stepIndex: 0, stepName: "inc", output: { count: 2 }, at },
-      { type: "step-started", runId, stepIndex: 0, stepName: "inc", input: { count: 2 }, at }, // 3rd iteration in flight
+      { type: "step-started", runId, path: "count-loop#1/inc", input: { count: 0 }, at },
+      { type: "step-completed", runId, path: "count-loop#1/inc", output: { count: 1 }, at },
+      { type: "step-started", runId, path: "count-loop#2/inc", input: { count: 1 }, at },
+      { type: "step-completed", runId, path: "count-loop#2/inc", output: { count: 2 }, at },
+      { type: "step-started", runId, path: "count-loop#3/inc", input: { count: 2 }, at }, // 3rd iteration in flight
     ];
     const states = deriveStepStates(events);
-    expect(stepState(states, "inc")).toBe("in_progress");
+    expect(stepState(states, "count-loop/inc")).toBe("in_progress");
     expect(states.size).toBe(1); // one key, not one per iteration — bounded regardless of iteration count (spec §5.4)
   });
 });
@@ -162,7 +156,8 @@ describe("deriveStepStates against real engine runs", () => {
     expect(result.status).toBe("completed");
 
     const states = deriveStepStates(await store.loadEvents(result.runId));
-    expect(stepState(states, "inc")).toBe("completed");
+    // "inc" is keyed by its STATIC path (spec §5.4): the loop's own name, no iteration index.
+    expect(stepState(states, "count-loop/inc")).toBe("completed");
     expect(states.size).toBe(2); // seed + inc — not one entry per iteration
   });
 
@@ -187,9 +182,11 @@ describe("deriveStepStates against real engine runs", () => {
     expect(result.status).toBe("completed");
 
     const states = deriveStepStates(await store.loadEvents(result.runId));
+    // A taken arm is a peer addressing scope of the branch's own name (spec §8.5): its steps nest
+    // under the ARM's own name (`arm-yes/yes-step`), not the branch's.
     expect(stepState(states, "arm-no")).toBe("skipped");
-    expect(stepState(states, "yes-step")).toBe("completed");
-    expect(stepState(states, "no-step")).toBe("todo"); // never reached — the skip is recorded on the arm, not walked into its body
+    expect(stepState(states, "arm-yes/yes-step")).toBe("completed");
+    expect(stepState(states, "arm-no/no-step")).toBe("todo"); // never reached — the skip is recorded on the arm, not walked into its body
   });
 
   it("a definition-drift crash during resumeWithAnswer closes the previously-blocked step (real resumeWithAnswer path)", async () => {
@@ -231,15 +228,15 @@ describe("deriveRunStatus (spec §5.3): precedence", () => {
   });
 
   it("blocked when a step is blocked and nothing is in_progress", () => {
-    const events: RunEvent[] = [started, { type: "questionnaire-asked", runId, stepName: "ask", questionnaire: { questions: [] }, conversation: [], at }];
+    const events: RunEvent[] = [started, { type: "questionnaire-asked", runId, path: "ask", questionnaire: { questions: [] }, conversation: [], at }];
     expect(deriveRunStatus(events)).toBe("blocked");
   });
 
   it("in_progress wins over a simultaneously blocked step (spec §5.3: work is happening even if another step is blocked)", () => {
     const events: RunEvent[] = [
       started,
-      { type: "questionnaire-asked", runId, stepName: "ask", questionnaire: { questions: [] }, conversation: [], at },
-      { type: "step-started", runId, stepIndex: 1, stepName: "other", input: undefined, at },
+      { type: "questionnaire-asked", runId, path: "ask", questionnaire: { questions: [] }, conversation: [], at },
+      { type: "step-started", runId, path: "other", input: undefined, at },
     ];
     expect(deriveRunStatus(events)).toBe("in_progress");
     // ...and the pending-question count still surfaces the blocked one (spec §6.3) even though the
@@ -253,7 +250,7 @@ describe("deriveRunStatus (spec §5.3): precedence", () => {
     expect(deriveRunStatus([started, { type: "run-cancelled", runId, at }])).toBe("cancelled");
   });
 
-  it("crashed from a run-crashed event with no stepName (workflow input violation, no step ever ran)", () => {
+  it("crashed from a run-crashed event with no path (workflow input violation, no step ever ran)", () => {
     const events: RunEvent[] = [started, { type: "run-crashed", runId, error: "bad input", at }];
     expect(deriveRunStatus(events)).toBe("crashed");
   });
@@ -261,11 +258,11 @@ describe("deriveRunStatus (spec §5.3): precedence", () => {
   it("a later resume supersedes an earlier terminal event", () => {
     const events: RunEvent[] = [
       started,
-      { type: "step-started", runId, stepIndex: 0, stepName: "s", input: undefined, at },
-      { type: "run-crashed", runId, stepName: "s", error: "boom", at },
-      { type: "run-resumed", runId, fromStepName: "s", at },
-      { type: "step-started", runId, stepIndex: 0, stepName: "s", input: undefined, at },
-      { type: "step-completed", runId, stepIndex: 0, stepName: "s", output: {}, at },
+      { type: "step-started", runId, path: "s", input: undefined, at },
+      { type: "run-crashed", runId, path: "s", error: "boom", at },
+      { type: "run-resumed", runId, fromPath: "s", at },
+      { type: "step-started", runId, path: "s", input: undefined, at },
+      { type: "step-completed", runId, path: "s", output: {}, at },
       { type: "run-completed", runId, output: {}, at },
     ];
     expect(deriveRunStatus(events)).toBe("completed");
@@ -274,13 +271,13 @@ describe("deriveRunStatus (spec §5.3): precedence", () => {
 
 describe("currentStepName (spec §6.3)", () => {
   it("reports the in_progress step when the run is in_progress", () => {
-    const events: RunEvent[] = [started, { type: "step-started", runId, stepIndex: 0, stepName: "s", input: undefined, at }];
+    const events: RunEvent[] = [started, { type: "step-started", runId, path: "s", input: undefined, at }];
     const status = deriveRunStatus(events);
     expect(status && currentStepName(status, deriveStepStates(events))).toBe("s");
   });
 
   it("reports the blocked step when the run is blocked", () => {
-    const events: RunEvent[] = [started, { type: "questionnaire-asked", runId, stepName: "ask", questionnaire: { questions: [] }, conversation: [], at }];
+    const events: RunEvent[] = [started, { type: "questionnaire-asked", runId, path: "ask", questionnaire: { questions: [] }, conversation: [], at }];
     const status = deriveRunStatus(events);
     expect(status && currentStepName(status, deriveStepStates(events))).toBe("ask");
   });
@@ -288,8 +285,8 @@ describe("currentStepName (spec §6.3)", () => {
   it("is undefined for a cleanly completed run", () => {
     const events: RunEvent[] = [
       started,
-      { type: "step-started", runId, stepIndex: 0, stepName: "s", input: undefined, at },
-      { type: "step-completed", runId, stepIndex: 0, stepName: "s", output: {}, at },
+      { type: "step-started", runId, path: "s", input: undefined, at },
+      { type: "step-completed", runId, path: "s", output: {}, at },
       { type: "run-completed", runId, output: {}, at },
     ];
     const status = deriveRunStatus(events);

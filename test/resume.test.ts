@@ -41,14 +41,14 @@ describe("resume (spec §8): continue after the last completed step", () => {
     await resumeWorkflow(workflow, priorEvents, host);
 
     const fullLog = await store.loadEvents(first.runId);
-    const timeline = fullLog.map((event) => ("stepName" in event ? `${event.type}:${event.stepName}` : event.type));
+    const timeline = fullLog.map((event) => ("path" in event ? `${event.type}:${event.path}` : event.type));
     expect(timeline).toEqual([
       "run-started",
       "step-started:s1",
       "step-completed:s1",
       "step-started:s2",
       "run-crashed:s2",
-      "run-resumed", // carries fromStepName, asserted below
+      "run-resumed", // carries fromPath, asserted below
       "step-started:s2",
       "step-completed:s2",
       "step-started:s3",
@@ -60,7 +60,7 @@ describe("resume (spec §8): continue after the last completed step", () => {
     expect(fullLog.filter((event) => event.type === "run-started")).toHaveLength(1);
     const resumedEvents = fullLog.filter((event) => event.type === "run-resumed");
     expect(resumedEvents).toHaveLength(1);
-    expect(resumedEvents[0]).toMatchObject({ type: "run-resumed", fromStepName: "s2" });
+    expect(resumedEvents[0]).toMatchObject({ type: "run-resumed", fromPath: "s2" });
   });
 
   it("lists a resumed-to-completed run as completed", async () => {
@@ -80,9 +80,9 @@ describe("resume (spec §8): continue after the last completed step", () => {
     // Prior log records step "s1" as completed...
     const priorEvents: RunEvent[] = [
       { type: "run-started", runId: "drift-run", workflowName: "toggle", input: undefined, at: "t0" },
-      { type: "step-started", runId: "drift-run", stepIndex: 0, stepName: "s1", input: undefined, at: "t1" },
-      { type: "step-completed", runId: "drift-run", stepIndex: 0, stepName: "s1", output: { a: 1 }, at: "t2" },
-      { type: "run-crashed", runId: "drift-run", stepName: "s2", error: "boom", at: "t3" },
+      { type: "step-started", runId: "drift-run", path: "s1", input: undefined, at: "t1" },
+      { type: "step-completed", runId: "drift-run", path: "s1", output: { a: 1 }, at: "t2" },
+      { type: "run-crashed", runId: "drift-run", path: "s2", error: "boom", at: "t3" },
     ];
 
     // ...but the reloaded workflow renamed s1 -> s1b, so s1 is gone.

@@ -19,7 +19,7 @@ describe("pipeline workflow (Phase 2: linear hand-off + .map non-adjacent data f
 
     await runWorkflow(pipelineWorkflow, undefined, host);
 
-    const countStarted = events.find((event) => event.type === "step-started" && event.stepName === "count");
+    const countStarted = events.find((event) => event.type === "step-started" && event.path === "count");
     expect(countStarted).toMatchObject({ type: "step-started", input: { words: ["hello", "workflow", "pipeline"] } });
   });
 
@@ -29,7 +29,7 @@ describe("pipeline workflow (Phase 2: linear hand-off + .map non-adjacent data f
     await runWorkflow(pipelineWorkflow, undefined, host);
 
     // summarize's input is the map's output: parse's firstWord (non-adjacent) + count's count.
-    const summarizeStarted = events.find((event) => event.type === "step-started" && event.stepName === "summarize");
+    const summarizeStarted = events.find((event) => event.type === "step-started" && event.path === "summarize");
     expect(summarizeStarted).toMatchObject({ type: "step-started", input: { count: 3, firstWord: "hello" } });
   });
 
@@ -38,10 +38,10 @@ describe("pipeline workflow (Phase 2: linear hand-off + .map non-adjacent data f
 
     await runWorkflow(pipelineWorkflow, undefined, host);
 
-    const mapEvents = events.filter((event) => "stepName" in event && event.stepName === "combine").map((event) => event.type);
+    const mapEvents = events.filter((event) => "path" in event && event.path === "combine").map((event) => event.type);
     expect(mapEvents).toEqual(["step-started", "step-completed"]);
 
-    const mapCompleted = events.find((event) => event.type === "step-completed" && event.stepName === "combine");
+    const mapCompleted = events.find((event) => event.type === "step-completed" && event.path === "combine");
     expect(mapCompleted).toMatchObject({ type: "step-completed", output: { count: 3, firstWord: "hello" } });
   });
 
@@ -50,7 +50,7 @@ describe("pipeline workflow (Phase 2: linear hand-off + .map non-adjacent data f
 
     await runWorkflow(pipelineWorkflow, undefined, host);
 
-    const stepStarts = events.filter((event) => event.type === "step-started").map((event) => event.stepName);
+    const stepStarts = events.filter((event) => event.type === "step-started").map((event) => event.path);
     expect(stepStarts).toEqual(["parse", "count", "combine", "summarize"]);
   });
 });

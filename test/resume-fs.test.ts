@@ -33,7 +33,7 @@ describe("resume across a fresh store instance (fs, spec §8.7)", () => {
     fixStep2();
     const readerStore = createFsStore(projectRoot);
     const priorEvents = await readerStore.loadEvents(first.runId);
-    expect(priorEvents.some((event) => event.type === "step-completed" && event.stepName === "s1")).toBe(true);
+    expect(priorEvents.some((event) => event.type === "step-completed" && event.path === "s1")).toBe(true);
 
     const resumed = await resumeWorkflow(workflow, priorEvents, createHostPort(readerStore));
     expect(resumed.status).toBe("completed");

@@ -30,7 +30,7 @@ describe("retry policy (spec §9)", () => {
 
     const retries = (await store.loadEvents(result.runId)).filter((event): event is StepRetryEvent => event.type === "step-retry");
     expect(retries).toHaveLength(1);
-    expect(retries[0]).toMatchObject({ stepName: "flaky", attempt: 1, reason: "thrown-error" });
+    expect(retries[0]).toMatchObject({ path: "flaky", attempt: 1, reason: "thrown-error" });
     expect(sleepCalls).toEqual([50]); // backoff requested exactly once
   });
 

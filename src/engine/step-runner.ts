@@ -9,6 +9,7 @@ import type { AgentStep, FunctionStep, RetryPolicy, RunContext, StepLogger } fro
 import { describeSchemaViolations } from "../flow/validation.ts";
 import { buildCorrectionMessage, buildQaSchema, validateAgentOutput, validateQaOutput } from "./agent-output.ts";
 import { createRunContext, createStepLogger, iso, type RunState, type StepOutcome } from "./context.ts";
+import type { NodePath } from "./node-path.ts";
 import type { AgentTurn, HostPort, RetryReason } from "./types.ts";
 
 /** Default in-session output-steering budget (spec §9.2) when an agent step declares none. */
@@ -45,10 +46,18 @@ type AttemptResult =
   | { kind: "cancelled" };
 
 /** Run a function step under its retry + time budget (spec §9). Emits `step-retry`; the caller emits step lifecycle. */
-export async function runFunctionStep(step: FunctionStep, input: unknown, host: HostPort, state: RunState, signal: AbortSignal): Promise<StepOutcome> {
-  const ctx = createRunContext(state);
-  const logger = createStepLogger(host, state.runId, step.name);
-  return retryLoop(step, host, state, signal, (sig) => runFunctionAttempt(step, input, ctx, logger, sig));
+export async function runFunctionStep(
+  step: FunctionStep,
+  input: unknown,
+  host: HostPort,
+  state: RunState,
+  signal: AbortSignal,
+  parentPath: NodePath,
+  path: string,
+): Promise<StepOutcome> {
+  const ctx = createRunContext(state, parentPath);
+  const logger = createStepLogger(host, state.runId, path);
+  return retryLoop(step, host, state, signal, path, (sig) => runFunctionAttempt(step, input, ctx, logger, sig));
 }
 
 /**
@@ -56,9 +65,18 @@ export async function runFunctionStep(step: FunctionStep, input: unknown, host: 
  * and Q&A (§10). `entry` selects a fresh run or an answer-resume that continues the same loop (§8.4).
  * Emits `step-retry`/`agent-steer`; the caller emits step lifecycle + `questionnaire-asked`.
  */
-export async function runAgentStep(step: AgentStep, input: unknown, host: HostPort, state: RunState, signal: AbortSignal, entry: AgentEntry): Promise<StepOutcome> {
-  const ctx = createRunContext(state);
-  return retryLoop(step, host, state, signal, (sig) => runAgentSession(step, input, host, ctx, state, sig, entry));
+export async function runAgentStep(
+  step: AgentStep,
+  input: unknown,
+  host: HostPort,
+  state: RunState,
+  signal: AbortSignal,
+  parentPath: NodePath,
+  path: string,
+  entry: AgentEntry,
+): Promise<StepOutcome> {
+  const ctx = createRunContext(state, parentPath);
+  return retryLoop(step, host, state, signal, path, (sig) => runAgentSession(step, input, host, ctx, state, sig, path, entry));
 }
 
 /** Shared retry loop (spec §9): wrap each attempt in the time budget, re-attempt `retryable` failures within budget. */
@@ -67,6 +85,7 @@ async function retryLoop(
   host: HostPort,
   state: RunState,
   runSignal: AbortSignal,
+  path: string,
   attempt: (signal: AbortSignal) => Promise<AttemptResult>,
 ): Promise<StepOutcome> {
   const totalAttempts = Math.max(1, (step.retry?.maxRetry ?? 0) + 1);
@@ -84,7 +103,7 @@ async function retryLoop(
 
     // Retryable failure (thrown / invalid output / budget exceeded): re-attempt if budget remains.
     lastError = result.error;
-    if (await retryScheduled(host, state.runId, step.name, n, totalAttempts, backoffMs, result.reason, result.error)) continue;
+    if (await retryScheduled(host, state.runId, path, n, totalAttempts, backoffMs, result.reason, result.error)) continue;
     return { kind: "crashed", error: lastError };
   }
 
@@ -144,7 +163,16 @@ async function runFunctionAttempt(step: FunctionStep, input: unknown, ctx: RunCo
  * When `asks`, the framework owns the questionnaire schema: the reply union is `{result}|{questions}`
  * and the asking protocol is auto-injected into the fresh prompt (so the author's prompt is task-only).
  */
-async function runAgentSession(step: AgentStep, input: unknown, host: HostPort, ctx: RunContext, state: RunState, signal: AbortSignal, entry: AgentEntry): Promise<AttemptResult> {
+async function runAgentSession(
+  step: AgentStep,
+  input: unknown,
+  host: HostPort,
+  ctx: RunContext,
+  state: RunState,
+  signal: AbortSignal,
+  path: string,
+  entry: AgentEntry,
+): Promise<AttemptResult> {
   const model = step.model ?? state.defaultModel; // step → workflow default; host applies the session default when undefined (spec §9.5)
   const maxRepairs = Math.max(0, step.maxOutputRepairs ?? DEFAULT_MAX_OUTPUT_REPAIRS);
   const steerSchema = step.asks ? buildQaSchema(step.outputSchema) : step.outputSchema;
@@ -185,7 +213,7 @@ async function runAgentSession(step: AgentStep, input: unknown, host: HostPort, 
       lastViolation = check.violation;
 
       if (repair < maxRepairs) {
-        await host.emit({ type: "agent-steer", runId: state.runId, stepName: step.name, attempt: repair + 1, violation: lastViolation, at: iso(host) });
+        await host.emit({ type: "agent-steer", runId: state.runId, path, attempt: repair + 1, violation: lastViolation, at: iso(host) });
         message = buildCorrectionMessage(steerSchema, lastViolation);
         continue;
       }
@@ -235,7 +263,7 @@ function anySignal(signals: readonly AbortSignal[]): AbortSignal {
 async function retryScheduled(
   host: HostPort,
   runId: string,
-  stepName: string,
+  path: string,
   attempt: number,
   totalAttempts: number,
   backoffMs: number,
@@ -243,7 +271,7 @@ async function retryScheduled(
   error: string,
 ): Promise<boolean> {
   if (attempt >= totalAttempts) return false;
-  await host.emit({ type: "step-retry", runId, stepName, attempt, reason, error, at: iso(host) });
+  await host.emit({ type: "step-retry", runId, path, attempt, reason, error, at: iso(host) });
   if (backoffMs > 0) await host.sleep(backoffMs);
   return true;
 }
