@@ -6,7 +6,7 @@
  * blocked step and must then attend it identically.
  */
 import { pendingQuestionnaires, resumeWithAnswer } from "../../engine/resume-workflow.ts";
-import type { RunEvent } from "../../engine/types.ts";
+import type { RunEvent, RunResult } from "../../engine/types.ts";
 import type { Questionnaire } from "../../flow/questionnaire.ts";
 import { createHostPort } from "../host-port.ts";
 import { loadWorkflowFile } from "../load-workflow.ts";
@@ -15,10 +15,23 @@ import type { RunLock } from "../run-lock.ts";
 import type { RunStore } from "../types.ts";
 import { type CommandCtx, describe, notifier, notifyResult, runGuarded, type StartAgent } from "./context.ts";
 
+/** A blocked step's pending batch plus the node path (spec §8.5) that batch belongs to. */
+export interface PendingAsk {
+  readonly path: string;
+  readonly questionnaire: Questionnaire;
+}
+
 /**
  * Render the pending questionnaire (rich `ctx.ui.custom` form when a TUI is present, native dialogs
  * otherwise — see {@link collectAnswers}), collect structured answers, and continue via
  * `resumeWithAnswer` — looping while it re-blocks.
+ *
+ * The answers are delivered to the exact `path` whose questions were just shown, never to whichever
+ * block the engine's own default would pick: under concurrency several steps can be blocked at once
+ * (spec §8.6), and a step that RE-blocks (invalid answers, or a follow-up batch) becomes the most
+ * recently asked while a sibling remains the earliest — so "the one just displayed" and "the FIFO-first
+ * pending one" are genuinely different steps, and answering the latter would file the user's reply
+ * under a question they never saw.
  *
  * Dismissing the prompt leaves the run `blocked` (dismiss ≠ cancel, spec §10.2). The guard is acquired
  * only around each resume execution, so while blocked/prompting it is released and does not block new
@@ -32,19 +45,20 @@ export async function handleAttendedQuestionnaire(
   workflowFilePath: string,
   startAgent: StartAgent,
   runId: string,
-  initialQuestionnaire: Questionnaire | undefined,
+  initialAsk: PendingAsk | undefined,
 ): Promise<void> {
-  let questionnaire = initialQuestionnaire;
+  let ask = initialAsk;
   for (;;) {
-    if (!questionnaire) return void ctx.ui.notify(`workflow: run ${runId} is blocked but has no recorded questions.`, "warning");
+    if (!ask) return void ctx.ui.notify(`workflow: run ${runId} is blocked but has no recorded questions.`, "warning");
 
-    const answers = await collectAnswers(ctx, questionnaire);
+    const answers = await collectAnswers(ctx, ask.questionnaire);
     if (answers === undefined) {
       // Dismiss ≠ cancel (spec §10.2): the run stays blocked and is resumable later.
       ctx.ui.notify(`workflow: run ${runId} is still blocked; answer later via "/workflow resume ${runId}", or "/workflow cancel ${runId}" to stop it.`, "info");
       return;
     }
 
+    const targetPath = ask.path; // answer the block we just showed, not whatever the engine would default to
     // The run may have been stopped while the prompt was open (another session, spec §8.7); the
     // engine refuses such an answer rather than undoing the cancellation, and we report it plainly.
     let result: Awaited<ReturnType<typeof runGuarded>>;
@@ -53,7 +67,7 @@ export async function handleAttendedQuestionnaire(
         const workflow = await loadWorkflowFile(workflowFilePath);
         const events = await store.loadEvents(runId);
         const host = createHostPort(store, { startAgent });
-        return resumeWithAnswer(workflow, events, answers, host, { signal });
+        return resumeWithAnswer(workflow, events, answers, host, { signal, path: targetPath });
       });
     } catch (err) {
       ctx.ui.notify(`workflow: ${describe(err)}`, "warning");
@@ -62,7 +76,7 @@ export async function handleAttendedQuestionnaire(
     if (!result) return; // guard was busy (race) — already notified; the run stays blocked
 
     if (result.status === "blocked") {
-      questionnaire = result.questionnaire; // re-block (another batch, or invalid answers) → ask again
+      ask = askOf(result); // re-block (another batch, invalid answers, or a still-pending sibling) → ask again
       continue;
     }
     notifyResult(ctx, workflowName, result);
@@ -70,12 +84,17 @@ export async function handleAttendedQuestionnaire(
   }
 }
 
+/** The block a `blocked` {@link RunResult} is reporting — its questions together with the path they belong to. */
+export function askOf(result: RunResult): PendingAsk | undefined {
+  return result.questionnaire && result.path ? { path: result.path, questionnaire: result.questionnaire } : undefined;
+}
+
 /**
- * The pending questionnaire a `/workflow resume` should show first: the FIFO-first currently-blocked
- * one (spec §8.6) — i.e. exactly the one `resumeWithAnswer` targets by default when this same answer is
- * delivered back with no explicit `path`. With several steps blocked at once, showing anything else
- * (e.g. simply the last EVER asked) would let the user answer a DIFFERENT question than the one displayed.
+ * The block a `/workflow resume` should show first: the FIFO-first currently-blocked one (spec §8.6).
+ * With several steps blocked at once, the path travels with the questions so the answer is delivered
+ * back to the step that asked them.
  */
-export function pendingQuestionnaire(events: readonly RunEvent[]): Questionnaire | undefined {
-  return pendingQuestionnaires(events)[0]?.questionnaire;
+export function pendingAsk(events: readonly RunEvent[]): PendingAsk | undefined {
+  const pending = pendingQuestionnaires(events)[0];
+  return pending && { path: pending.path, questionnaire: pending.questionnaire };
 }

@@ -13,7 +13,7 @@ import { createHostPort } from "../host-port.ts";
 import type { RunLock } from "../run-lock.ts";
 import type { RunStore } from "../types.ts";
 import { resolveWorkflow } from "../workflow-catalog.ts";
-import { handleAttendedQuestionnaire } from "./attended.ts";
+import { askOf, handleAttendedQuestionnaire } from "./attended.ts";
 import { type CommandCtx, notifier, notifyResult, rejectIfBusy, runGuarded, type StartAgent } from "./context.ts";
 
 /** `/workflow run <name|file.ts>` — start a workflow named either by declared name or by path. */
@@ -65,7 +65,7 @@ async function startRun(
 
   // Attended flow: if the run blocked, render the questionnaire inline and loop until it settles.
   if (result.status === "blocked") {
-    await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, workflowFilePath, startAgent, runId, result.questionnaire);
+    await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, workflowFilePath, startAgent, runId, askOf(result));
   } else {
     notifyResult(ctx, workflow.name, result);
   }

@@ -5,6 +5,7 @@ import { deriveRunStatus } from "../src/engine/run-status.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import { deriveStepStates, stepState } from "../src/engine/step-state.ts";
 import { createQuestionnaireStep, createStep, createWorkflow } from "../src/flow/index.ts";
+import { createTestRun } from "../src/testing/index.ts";
 import { createTestHost } from "./helpers.ts";
 
 const nameSchema = Type.Object({ name: Type.String() });
@@ -90,6 +91,41 @@ describe(".parallel: several blocked arms at once, answered FIFO (spec §8.6)", 
     const afterA = await resumeWithAnswer(workflow, midEvents, { name: "Ada" }, host, { path: "par/askA" });
     expect(afterA.status).toBe("completed");
     expect(afterA.output).toEqual({ askA: { name: "Ada" }, askB: { name: "Bob" } });
+  });
+
+  it("a RE-blocked step keeps receiving the answers it asked for, rather than handing them to a sibling", async () => {
+    const workflow = buildTwoAsks();
+
+    // The attended loop (src/host/commands/attended.ts) and `TestRun.answer` both answer the block they
+    // just displayed. That is not the same as the engine's own default (FIFO by latest ask): once askA
+    // re-blocks, ITS question is the most recent while askB's is the earliest, so a default-targeted
+    // answer would land on askB — the question the user never saw.
+    const blocked = await createTestRun(workflow);
+    expect(blocked.path).toBe("par/askA");
+
+    const reblocked = await blocked.answer({ wrong: "field" }); // invalid → askA re-asks
+    expect(reblocked.status).toBe("blocked");
+    expect(reblocked.path).toBe("par/askA");
+    expect(reblocked.violation).toMatch(/name/);
+    expect(reblocked.pendingQuestions.map((p) => p.path)).toEqual(["par/askB", "par/askA"]); // askA is now LAST
+
+    const afterA = await reblocked.answer({ name: "Ada" }); // must still go to askA, not askB
+    expect(afterA.stepOutput("par/askA")).toEqual({ name: "Ada" });
+    expect(afterA.status).toBe("blocked");
+    expect(afterA.path).toBe("par/askB");
+
+    const done = await afterA.answer({ name: "Bob" });
+    expect(done.status).toBe("completed");
+    expect(done.output).toEqual({ askA: { name: "Ada" }, askB: { name: "Bob" } });
+  });
+
+  it("an explicit path from pendingQuestions answers a different pending block than the reported one", async () => {
+    const blocked = await createTestRun(buildTwoAsks());
+    expect(blocked.path).toBe("par/askA");
+
+    const afterB = await blocked.answer({ name: "Bob" }, "par/askB");
+    expect(afterB.stepOutput("par/askB")).toEqual({ name: "Bob" });
+    expect(afterB.path).toBe("par/askA");
   });
 
   it("rejects answering a path that was never asked", async () => {

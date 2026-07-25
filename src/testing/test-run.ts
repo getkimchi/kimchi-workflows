@@ -113,8 +113,13 @@ export interface TestRun {
    * Deliver structured answers to the blocked step (spec §8.4). Complete + valid answers let the run
    * continue; incomplete or invalid ones re-block with `violation` set — a questionnaire step is never
    * cancelled by a bad answer, exactly as leaving a mandatory question blank leaves it pending.
+   *
+   * The answers go to the step this state is REPORTING ({@link TestRun.path}) — the one whose
+   * `questionnaire` was just read — so a test answers the question it looked at even when several steps
+   * are blocked at once (spec §8.6). Pass a `path` from {@link TestRun.pendingQuestions} to target a
+   * different pending block instead.
    */
-  answer(answers: Record<string, unknown>): Promise<TestRun>;
+  answer(answers: Record<string, unknown>, path?: string): Promise<TestRun>;
   /**
    * Node-atomic resume of a `crashed`/`cancelled` run (spec §8.2/§8.3): completed nodes are skipped
    * and the first incomplete node re-runs wholesale. Not the answer path — see {@link answer}.
@@ -260,11 +265,11 @@ async function toTestRun(context: RunContextForTest, result: RunResult): Promise
       return context.double.record(stepName);
     },
 
-    async answer(answers: Record<string, unknown>): Promise<TestRun> {
+    async answer(answers: Record<string, unknown>, path?: string): Promise<TestRun> {
       if (result.status !== "blocked") {
         throw new Error(`answer(): the run is ${result.status}, not blocked — nothing is asking a question`);
       }
-      const next = await resumeWithAnswer(context.workflow, events, answers, context.host, { signal: context.canceller?.arm() });
+      const next = await resumeWithAnswer(context.workflow, events, answers, context.host, { signal: context.canceller?.arm(), path: path ?? result.path });
       return toTestRun(context, next);
     },
 
