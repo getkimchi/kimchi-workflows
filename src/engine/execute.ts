@@ -254,7 +254,7 @@ async function runStepNodeBody(
         elapsedMs: reentry.answer.elapsedMs,
         tokensUsed: reentry.answer.tokensUsed,
       });
-      return finishStep(formattedPath, host, state, outcome);
+      return finishStep(formattedPath, host, state, outcome, step.optional === true);
     }
     if (step.kind === "questionnaire") {
       return finishStep(formattedPath, host, state, answerQuestionnaireStep(step, reentry.answer.answers));
@@ -291,7 +291,7 @@ async function runStepNodeBody(
     step.kind === "agent"
       ? await runAgentStep(step, stepInput, host, state, signal, parentPath, formattedPath, { kind: "fresh" })
       : await runFunctionStep(step, stepInput, host, state, signal, parentPath, formattedPath);
-  return finishStep(formattedPath, host, state, outcome);
+  return finishStep(formattedPath, host, state, outcome, step.optional === true);
 }
 
 /** The questionnaire a questionnaire step blocks with: the explicit override, or one derived from its target. */
@@ -310,13 +310,14 @@ function answerQuestionnaireStep(step: QuestionnaireStep, answers: Record<string
 }
 
 /**
- * Turn a step's `StepOutcome` into an `ExecOutcome`: emit `step-completed` on success. On `blocked`,
+ * Turn a step's `StepOutcome` into an `ExecOutcome`: emit `step-completed` on success, or — when the
+ * step is `optional` — record a `step-failed` and carry on with an `undefined` output. On `blocked`,
  * emit `questionnaire-asked` right here — at the point this step actually blocked — rather than
  * leaving it to whoever eventually reports the outcome (spec §8.6: under concurrency several steps can
  * block in the SAME round, and each needs its own recorded event, independent of which one a
  * concurrent construct's settlement picks to surface as "the" result of this call).
  */
-async function finishStep(path: string, host: HostPort, state: RunState, outcome: StepOutcome): Promise<ExecOutcome> {
+async function finishStep(path: string, host: HostPort, state: RunState, outcome: StepOutcome, optional = false): Promise<ExecOutcome> {
   switch (outcome.kind) {
     case "ok":
       await host.emit({ type: "step-completed", runId: state.runId, path, output: outcome.output, at: iso(host) });
@@ -335,6 +336,13 @@ async function finishStep(path: string, host: HostPort, state: RunState, outcome
       });
       return { kind: "blocked", path, questionnaire: outcome.questionnaire, conversation: outcome.conversation, violation: outcome.violation };
     case "crashed":
+      if (optional) {
+        // Record the loss and hand `undefined` to the next node (spec §9.1's `optional`). The run is
+        // not crashed: whatever this step did land stays, and a following step gets its chance to see
+        // it — which is the entire reason an author would ask for this.
+        await host.emit({ type: "step-failed", runId: state.runId, path, error: outcome.error, at: iso(host) });
+        return { kind: "ok", output: undefined };
+      }
       return { kind: "crashed", error: outcome.error, path };
     case "cancelled":
       return { kind: "cancelled", path };

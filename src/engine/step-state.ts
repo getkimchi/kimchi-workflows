@@ -70,6 +70,11 @@ export function deriveStepStates(events: readonly RunEvent[]): Map<StepStateKey,
       case "step-completed":
         set(event.path, "completed");
         break;
+      case "step-failed":
+        // The STEP crashed even though the run continued (spec §9.1's `optional`), and a listing that
+        // said otherwise would hide exactly the thing an author turned this on to find out about.
+        set(event.path, "crashed");
+        break;
       case "questionnaire-asked":
         set(event.path, "blocked");
         break;

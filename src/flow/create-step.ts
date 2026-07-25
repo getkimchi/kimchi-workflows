@@ -19,6 +19,8 @@ export interface CreateStepOptions<TInputSchema extends TSchema | undefined = un
   retry?: RetryPolicy;
   /** Per-step wall-time budget in ms (spec §9.3): exceeding it aborts the step → `budget-exceeded`. */
   maxDurationMs?: number;
+  /** Let the run continue when this step fails for good (spec §9.1): records `step-failed`, output is `undefined`. */
+  optional?: boolean;
   run: StepRunFn<InferInput<TInputSchema>, InferOutput<TOutputSchema>>;
 }
 
@@ -34,6 +36,7 @@ export function createStep<TInputSchema extends TSchema | undefined = undefined,
     outputSchema: options.output,
     retry: options.retry,
     maxDurationMs: options.maxDurationMs,
+    optional: options.optional,
     // Single, narrow type-erasure boundary: the author's `run` is precisely typed against
     // the declared schemas; the engine calls steps with a runtime-determined `unknown` input
     // and validates it against `inputSchema` before this cast is ever exercised.
