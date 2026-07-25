@@ -27,12 +27,28 @@ export function createFsStore(projectRoot: string): RunStore {
   const logFilePath = (runId: string) => path.join(dir, `${runId}.jsonl`);
   const metaFilePath = (runId: string) => path.join(dir, `${runId}.meta.json`);
 
+  /**
+   * Read a run's log, tolerating one truncated line at the END and nothing else.
+   *
+   * A process killed mid-append (the very case the lock's stale-reclaim exists for, spec §7.3) can
+   * leave a half-written final line. That append never completed, so the event it carried never
+   * happened, and dropping it is exactly right. A malformed line anywhere EARLIER is genuine
+   * corruption and throws naming the file and line: skipping those would silently rewrite history —
+   * lose a `run-cancelled` and a run the user stopped comes back to life (spec §8.4).
+   */
   async function readEvents(filePath: string): Promise<RunEvent[]> {
     const content = await readFile(filePath, "utf8").catch(() => "");
-    return content
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .map((line) => JSON.parse(line) as RunEvent);
+    const lines = content.split("\n").filter((line) => line.trim().length > 0);
+    const events: RunEvent[] = [];
+    for (const [index, line] of lines.entries()) {
+      try {
+        events.push(JSON.parse(line) as RunEvent);
+      } catch (err) {
+        if (index === lines.length - 1) break; // truncated tail: the write never landed
+        throw new Error(`corrupt run log ${filePath} at line ${index + 1}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return events;
   }
 
   return {

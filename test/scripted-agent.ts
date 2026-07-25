@@ -40,6 +40,8 @@ export function scriptedAgent(sessionScripts: readonly (readonly ScriptedTurn[])
   let opened = 0;
   let disposed = 0;
   let sessionIndex = 0;
+  /** The step whose in-session turn is currently in flight — PI allows at most one (spec §2.2). */
+  let inSessionTurn: string | undefined;
 
   const startAgent = (request: AgentRequest): AgentSession => {
     opened += 1;
@@ -49,17 +51,34 @@ export function scriptedAgent(sessionScripts: readonly (readonly ScriptedTurn[])
     isolateds.push(request.isolated);
     const script = sessionScripts[sessionIndex++] ?? [];
     const conversation: unknown[] = [...(request.history ?? [])];
+    const sharesTheSession = request.background !== true && request.isolated !== true;
     let turn = 0;
     return {
       async sendAndAwaitEnd(message: string) {
-        messages.push(message);
-        conversation.push({ role: "user", content: message });
-        const response = script[turn++];
-        if (response === undefined) throw new Error("scripted session ran out of responses");
-        if (response instanceof Error) throw response;
-        const text = typeof response === "string" ? response : response.text;
-        conversation.push({ role: "assistant", content: text });
-        return typeof response === "string" ? { text } : { text, usage: { totalTokens: response.totalTokens } };
+        // Model PI's real constraint: a session hosts ONE conversation, so a second in-session turn
+        // while another is in flight is an error there (spec §2.2). A double that quietly allows it is
+        // how concurrent agent steps cross-talked in the real harness while every offline test stayed
+        // green — the offline suite could not see the bug it was supposed to be guarding.
+        if (sharesTheSession) {
+          if (inSessionTurn) {
+            throw new Error(`scripted agent: step "${request.stepName}" started an in-session turn while "${inSessionTurn}"'s turn was still in flight — it should have been isolated (spec §2.2)`);
+          }
+          inSessionTurn = request.stepName;
+        }
+        try {
+          messages.push(message);
+          conversation.push({ role: "user", content: message });
+          const response = script[turn++];
+          if (response === undefined) throw new Error("scripted session ran out of responses");
+          if (response instanceof Error) throw response;
+          const text = typeof response === "string" ? response : response.text;
+          conversation.push({ role: "assistant", content: text });
+          return typeof response === "string" ? { text } : { text, usage: { totalTokens: response.totalTokens } };
+        } finally {
+          // Every exit path, including a scripted transport error: a turn that threw is no longer in
+          // flight, and the retry that follows opens a fresh session PI would happily accept.
+          if (sharesTheSession) inSessionTurn = undefined;
+        }
       },
       getConversation() {
         return conversation;

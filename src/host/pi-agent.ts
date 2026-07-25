@@ -221,7 +221,14 @@ function backgroundSession(pi: ExtensionAPI, modelRegistry: ModelRegistry, reque
       args.push(message);
 
       const invocation = invocationResolver(args);
-      const result = await pi.exec(invocation.command, [...invocation.args]);
+      // Hand the attempt's signal to the child (spec §8.8/§9.4). Without it a cancelled run reports
+      // itself stopped while this process keeps spending tokens and writing files, a wall-time budget
+      // fails the attempt but orphans the process it was supposed to bound, and — with no budget, the
+      // default — an unresponsive subagent hangs the run with nothing able to interrupt it.
+      const result = await pi.exec(invocation.command, [...invocation.args], { signal: request.signal });
+      if (request.signal?.aborted) {
+        throw new Error(`background subagent step "${request.stepName}" was aborted`);
+      }
       if (result.code !== 0) {
         throw new Error(`background subagent step "${request.stepName}" exited with code ${result.code}: ${result.stderr.trim() || "(no stderr)"}`);
       }
