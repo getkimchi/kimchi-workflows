@@ -66,8 +66,8 @@ describe("tb-solver: the round loop", () => {
       input: roomyInput(),
       agents: {
         survey: [reply(plan)],
-        implement: Array.from({ length: 12 }, () => reply(work)),
-        verify: Array.from({ length: 12 }, () => failing),
+        implement: Array.from({ length: 18 }, () => reply(work)),
+        verify: Array.from({ length: 18 }, () => failing),
       },
     });
 
@@ -77,7 +77,7 @@ describe("tb-solver: the round loop", () => {
     expect(run.output).toMatchObject({ allPass: false });
     const rounds = (run.output as { rounds: number }).rounds;
     expect(rounds).toBeGreaterThan(3); // more than the fixed maximum this replaced
-    expect(rounds).toBeLessThanOrEqual(10);
+    expect(rounds).toBeLessThanOrEqual(15); // the safety valve, which must stop it cleanly
   });
 
   it("stops opening rounds when the clock runs out", async () => {
@@ -108,6 +108,14 @@ describe("tb-solver: what the steps are told", () => {
       },
     });
     expect(run.status).toBe("completed");
+
+    // Every step is told its OWN box, not just the run's remaining time: a step that thinks it owns the
+    // whole budget overruns its cap and is killed mid-thought (measured: 4 in 10 surveys).
+    for (const step of ["survey", "implement", "verify"]) {
+      expect(run.agent(step).messages[0], step).toContain("for THIS step");
+    }
+    const surveyPrompt = run.agent("survey").messages[0] as string;
+    expect(surveyPrompt).toContain(`about ${Math.round(900 * 0.25)}s for THIS step`);
 
     const implementPrompt = run.agent("implement").messages[0] as string;
     expect(implementPrompt).toContain("[c1] cli prints ok");
@@ -160,8 +168,8 @@ describe("tb-solver: what the steps are told", () => {
     expect(round).toBeLessThan(budgetMs * 0.8);
     // No absolute ceilings on the workers: they must scale with the budget, or a long task gets the
     // same seven-minute window as a short one (measured: 7% of a 12000s budget spent, then stopped).
-    expect(steps.get("implement")?.maxDurationMs).toBe(Math.round(900 * 0.45 * 1000));
-    expect(steps.get("verify")?.maxDurationMs).toBe(Math.round(900 * 0.15 * 1000));
+    expect(steps.get("implement")?.maxDurationMs).toBe(Math.round(900 * 0.2 * 1000));
+    expect(steps.get("verify")?.maxDurationMs).toBe(Math.round(900 * 0.12 * 1000));
 
     // The workers may be cut short; that must cost the round, not the run.
     expect(steps.get("implement")?.optional).toBe(true);

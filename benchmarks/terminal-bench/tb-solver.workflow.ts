@@ -58,20 +58,37 @@ const BUDGET_SEC = Math.max(60, Number(process.env.TB_AGENT_TIMEOUT_SEC ?? 900))
  * implementation window however long it actually had. A full-benchmark run then spent a mean of 50% of
  * the budget on long tasks (`build-pov-ray`: 7% of 12000s, then stopped). Only `survey` keeps a ceiling:
  * reconnaissance does not get better for taking twenty minutes.
+ *
+ * The sizes come from what the steps actually cost, measured over a run: implement median 141s, verify
+ * median 33s, survey median 135s. Two things follow.
+ *
+ * `implement` is 20%, not the 45% it was, because a box stopped being a deadline the moment the step
+ * became `optional` (running out costs the round, not the run) and `resumable` (the next round continues
+ * the same session). It is now a CHECKPOINT INTERVAL, and the right interval is the shortest one that
+ * still gets work done between verifications — every checkpoint buys a calibrated list of what is still
+ * broken. At 20% the median implement finishes inside its box, and three to four rounds fit where one
+ * did before.
+ *
+ * `verify` is 12% because it is cheap (median 33s, max 107s), so more rounds cost little overhead.
+ *
+ * `survey` gets 25% (ceiling 400s) rather than 15%, because at 15% FOUR IN TEN surveys hit the cap — and
+ * a survey that times out leaves the run with no acceptance criteria at all, which is the one thing
+ * everything downstream is built on. The cap is only half the fix: every step is now told ITS OWN box
+ * (see `timeLine`), so it paces itself instead of exploring as though it owned the whole run.
  */
-const SURVEY_CAP_MS = Math.round(Math.min(BUDGET_SEC * 0.15, 300) * 1000);
-const IMPLEMENT_CAP_MS = Math.round(BUDGET_SEC * 0.45 * 1000);
-const VERIFY_CAP_MS = Math.round(BUDGET_SEC * 0.15 * 1000);
+const SURVEY_CAP_MS = Math.round(Math.min(BUDGET_SEC * 0.25, 400) * 1000);
+const IMPLEMENT_CAP_MS = Math.round(BUDGET_SEC * 0.2 * 1000);
+const VERIFY_CAP_MS = Math.round(BUDGET_SEC * 0.12 * 1000);
 
 /** Slack kept back so the last round settles instead of being cut off mid-write. */
-const ROUND_MARGIN_SEC = 30;
+const ROUND_MARGIN_SEC = 60;
 /**
  * A safety valve, NOT the policy — the clock decides when rounds end. This exists for the pathological
  * case the clock cannot catch: rounds so cheap they never consume the budget (every attempt failing in
  * seconds), which would otherwise spin until the loop's `maxIterations` guard CRASHED the run and
  * skipped the final report. Set far above any round count a real budget can pay for.
  */
-const ROUND_SAFETY_VALVE = 10;
+const ROUND_SAFETY_VALVE = 15;
 
 // -- Steps ------------------------------------------------------------------------------------------
 
@@ -112,7 +129,7 @@ const survey = createAgentStep({
       "",
       GRADING_CONTRACT,
       "",
-      timeLine(budget?.remainingSec ?? 0),
+      timeLine(SURVEY_CAP_MS / 1000, budget?.remainingSec ?? 0),
       "",
       "First look around (ls, cat, find, git status/log, running processes, installed tooling) until you",
       "know what is actually here — do not plan against a machine you have imagined. Be quick about it:",
@@ -214,7 +231,7 @@ const implement = createAgentStep({
       "",
       GRADING_CONTRACT,
       "",
-      timeLine(round?.remainingSec ?? 0),
+      timeLine(IMPLEMENT_CAP_MS / 1000, round?.remainingSec ?? 0),
       "",
       "You are time-boxed. If you cannot finish everything, land the most important criteria FIRST and",
       "leave the machine in a working state — a partial result that runs beats a half-applied edit that",
@@ -261,7 +278,7 @@ const verify = createAgentStep({
       "CRITERIA TO CHECK — run each command and observe the real result:",
       (design?.criteria?.length ?? 0) > 0 ? criteriaBlock(design?.criteria ?? []) : "  (none were derived — judge the task statement above on its own terms, end to end)",
       "",
-      timeLine(round?.remainingSec ?? 0),
+      timeLine(VERIFY_CAP_MS / 1000, round?.remainingSec ?? 0),
       "",
       "Rules:",
       "  - run every check FROM A CLEAN SHELL (`bash -lc '<check>'`, starting from /), never from state",
@@ -305,7 +322,11 @@ const checkpoint = createStep({
     // still — it ended runs still holding most of their budget (a full-benchmark run left `build-pov-ray`
     // with 11170s of 12000s unspent), which measured as the single biggest thing wrong with this workflow.
     const roundCostSec = Math.max(1, (opened?.remainingSec ?? remainingSec) - remainingSec);
-    const mustStop = remainingSec < roundCostSec * 1.2 + ROUND_MARGIN_SEC || round >= ROUND_SAFETY_VALVE;
+    // Admit a round when there is time for a USEFUL CHUNK of one, not a whole one. Demanding a full
+    // round left four of seven measured tasks idle for 36-46% of their budget while their own verifier
+    // was still listing failures. A truncated round is no longer wasted: `implement` is `optional` and
+    // `resumable`, so its work lands on disk and the next execution continues it.
+    const mustStop = remainingSec < roundCostSec * 0.4 + ROUND_MARGIN_SEC || round >= ROUND_SAFETY_VALVE;
     logger.info("round finished", { round, allPass: result?.allPass ?? false, remainingSec: Math.round(remainingSec), roundCostSec: Math.round(roundCostSec), mustStop });
     return {
       allPass: result?.allPass === true,
@@ -344,7 +365,7 @@ export default createWorkflow({
     name: "solve",
     // A runaway guard, not the exit: `checkpoint` ends rounds on the clock, so reaching this means that
     // logic is broken and the run should fail loudly rather than spin.
-    maxIterations: 12,
+    maxIterations: 20,
   })
   .then(report)
   .commit();
