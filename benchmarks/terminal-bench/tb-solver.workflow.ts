@@ -49,19 +49,29 @@ const MODEL = process.env.TB_MODEL ?? "kimchi-dev/kimi-k2.7";
  * round, no settle.
  */
 const BUDGET_SEC = Math.max(60, Number(process.env.TB_AGENT_TIMEOUT_SEC ?? 900));
-const share = (fraction: number, capSec: number) => Math.round(Math.min(BUDGET_SEC * fraction, capSec) * 1000);
 
-/** Fraction of the remaining budget at which the loop stops opening a new round. */
-const RESERVE_FRACTION = 0.2;
-/** Never start another implement→verify round with less than this, whatever the fraction says. */
-const MIN_ROUND_SECONDS = 90;
 /**
- * How many implement→verify rounds to spend before settling for what we have. This is a POLICY, applied
- * by `checkpoint` below, deliberately lower than the loop's own `maxIterations` guard: hitting the guard
- * crashes the run (spec §3.3) and would skip the final sweep, leaving the machine unchecked and littered
- * with scratch files — the guard is there for a runaway, not as the way rounds normally end.
+ * Per-step wall-time caps, as a share of THIS run's budget.
+ *
+ * `implement` and `verify` have no absolute ceiling on purpose. An earlier version capped them at 420s
+ * and 200s, which is sensible at 900s and absurd at 12000s — it handed every task the same seven-minute
+ * implementation window however long it actually had. A full-benchmark run then spent a mean of 50% of
+ * the budget on long tasks (`build-pov-ray`: 7% of 12000s, then stopped). Only `survey` keeps a ceiling:
+ * reconnaissance does not get better for taking twenty minutes.
  */
-const MAX_ROUNDS = 3;
+const SURVEY_CAP_MS = Math.round(Math.min(BUDGET_SEC * 0.15, 300) * 1000);
+const IMPLEMENT_CAP_MS = Math.round(BUDGET_SEC * 0.45 * 1000);
+const VERIFY_CAP_MS = Math.round(BUDGET_SEC * 0.15 * 1000);
+
+/** Slack kept back so the last round settles instead of being cut off mid-write. */
+const ROUND_MARGIN_SEC = 30;
+/**
+ * A safety valve, NOT the policy — the clock decides when rounds end. This exists for the pathological
+ * case the clock cannot catch: rounds so cheap they never consume the budget (every attempt failing in
+ * seconds), which would otherwise spin until the loop's `maxIterations` guard CRASHED the run and
+ * skipped the final report. Set far above any round count a real budget can pay for.
+ */
+const ROUND_SAFETY_VALVE = 10;
 
 // -- Steps ------------------------------------------------------------------------------------------
 
@@ -80,7 +90,7 @@ const survey = createAgentStep({
   // survey blow its budget twice and crash the whole run at the 216s mark with NOTHING attempted and
   // 640s left on the clock. It is `optional` now, and the steps below fall back to working straight
   // from the task statement, which is roughly what a plain agent would have done anyway.
-  maxDurationMs: share(0.15, 180_000),
+  maxDurationMs: SURVEY_CAP_MS,
   optional: true,
   // No repeat. A step that blew its WALL-TIME budget will blow it again — the work was too big for the
   // box, and nothing about that changed — so the repeat just burns the budget twice for no output.
@@ -148,7 +158,7 @@ const implement = createAgentStep({
   // Time-boxed to a share of the run so a round always ends with the clock intact, and `optional` so
   // hitting that box costs the round rather than the run: the work it did land stays on disk, `verify`
   // still gets to say what is actually true, and the loop can spend what remains repairing it.
-  maxDurationMs: share(0.45, 420_000),
+  maxDurationMs: IMPLEMENT_CAP_MS,
   optional: true,
   retry: { maxRetry: 0 },
   // The one step that continues across rounds (spec §2.2). Being time-boxed, it is the step most likely
@@ -232,7 +242,7 @@ const verify = createAgentStep({
   description: "Independently check every criterion by running it",
   output: verifySchema,
   background: true,
-  maxDurationMs: share(0.18, 200_000),
+  maxDurationMs: VERIFY_CAP_MS,
   // A verifier that overran tells us nothing, but it must not be the thing that ends the run either:
   // `checkpoint` below reads a missing verdict as "not passed", which is the safe reading.
   optional: true,
@@ -285,12 +295,18 @@ const checkpoint = createStep({
     // `undefined` when `verify` itself failed or was time-boxed out (it is `optional`): the safe
     // reading is "not passed", so the loop spends another round rather than declaring victory blind.
     const result = ctx.getStepResult<Static<typeof verifySchema>>("verify");
-    const round = ctx.getStepResult<{ round: number }>("budget")?.round ?? 0;
+    const opened = ctx.getStepResult<{ round: number; remainingSec: number }>("budget");
+    const round = opened?.round ?? 0;
     const work = ctx.getStepResult<Static<typeof implementSchema>>("implement"); // settled by now
     const remainingSec = (new Date(task?.deadlineIso ?? Date.now()).getTime() - Date.now()) / 1000;
-    const reserve = Math.max(MIN_ROUND_SECONDS, remainingSec * RESERVE_FRACTION);
-    const mustStop = remainingSec <= reserve || round >= MAX_ROUNDS;
-    logger.info("round finished", { round, allPass: result?.allPass ?? false, remainingSec: Math.round(remainingSec), mustStop });
+    // Stop when another round of THE SIZE THIS ONE TURNED OUT TO BE would not fit. Measuring beats
+    // predicting: the caps are worst-case and a real round usually costs a fraction of them, so deciding
+    // from the caps would refuse rounds there was ample time for. Deciding from a fixed COUNT was worse
+    // still — it ended runs still holding most of their budget (a full-benchmark run left `build-pov-ray`
+    // with 11170s of 12000s unspent), which measured as the single biggest thing wrong with this workflow.
+    const roundCostSec = Math.max(1, (opened?.remainingSec ?? remainingSec) - remainingSec);
+    const mustStop = remainingSec < roundCostSec * 1.2 + ROUND_MARGIN_SEC || round >= ROUND_SAFETY_VALVE;
+    logger.info("round finished", { round, allPass: result?.allPass ?? false, remainingSec: Math.round(remainingSec), roundCostSec: Math.round(roundCostSec), mustStop });
     return {
       allPass: result?.allPass === true,
       mustStop,
@@ -326,9 +342,9 @@ export default createWorkflow({
   // of rounds — `maxIterations` is a guard, not the intended exit (spec §3.3).
   .dountil(solveRound, (_ctx, last) => (last as { allPass: boolean; mustStop: boolean }).allPass || (last as { mustStop: boolean }).mustStop, {
     name: "solve",
-    // One above MAX_ROUNDS: `checkpoint` is what ends the rounds, so this only ever fires if that logic
-    // itself is broken — which should crash loudly rather than spin.
-    maxIterations: MAX_ROUNDS + 1,
+    // A runaway guard, not the exit: `checkpoint` ends rounds on the clock, so reaching this means that
+    // logic is broken and the run should fail loudly rather than spin.
+    maxIterations: 12,
   })
   .then(report)
   .commit();
