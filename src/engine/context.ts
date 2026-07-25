@@ -60,14 +60,6 @@ export interface RunState {
    * deleted from this map by the caller before execution starts, since it is being resolved right now.
    */
   readonly pendingBlocks?: ReadonlyMap<string, PendingBlock>;
-  /**
-   * Static isolation (spec §2.2), computed once from the workflow's definition at the top of `execute`
-   * (see `isolation.ts`) and shared verbatim by every construct at any depth — including nested
-   * workflows, exactly like `concurrencyGate`. Keyed by SHAPE path (`shapePathOf`, node-path.ts): every
-   * index stripped, since isolation is a property of WHERE a step sits in the tree, not of which
-   * iteration/item is live.
-   */
-  readonly isolatedAgentSteps: ReadonlySet<string>;
 }
 
 /** Outcome of running a step under its policies (step-runner). Identity (`path`) is attached by the caller. */

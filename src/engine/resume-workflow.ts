@@ -168,7 +168,7 @@ function buildForeachItemHistory(priorEvents: readonly RunEvent[]): Map<string, 
   for (const event of priorEvents) {
     if (event.type !== "foreach-item-completed") continue;
     const segments = parsePath(event.path);
-    const last = segments[segments.length - 1];
+    const last = segments.at(-1);
     if (!last || last.index === undefined) continue; // defensive: an item's own path segment always carries an index
     const foreachKey = formatPath([...segments.slice(0, -1), { name: last.name }]);
     const perItem = history.get(foreachKey) ?? new Map<number, unknown>();

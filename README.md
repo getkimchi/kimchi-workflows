@@ -96,10 +96,10 @@ Status is derived from the event log — nothing stores a status that can drift 
 pnpm install        # or: npm install
 ```
 
-Register `piWorkflowsExtension` (the default export of `src/host`) with your PI extension host — it calls `pi.registerCommand("workflow", …)`, adding the `/workflow` command family to your PI session:
+Register `piWorkflowsExtension` (a named export of `src/host`) with your PI extension host — it calls `pi.registerCommand("workflow", …)`, adding the `/workflow` command family to your PI session:
 
 ```ts
-import piWorkflowsExtension from "pi-workflows/src/host";
+import { piWorkflowsExtension } from "pi-workflows/src/host";
 // wire it into your PI extension host
 piWorkflowsExtension(pi);
 ```
@@ -171,8 +171,8 @@ Fan-out, bounded by the workflow ceiling:
 
 ```ts
 export default createWorkflow({ name: "audit", maxConcurrency: 4 })
-  .parallel([lint, typecheck, deps])          // independent, run together
-  .foreach(reviewFile, { concurrency: 2 })    // two files at a time
+  .parallel([lint, typecheck, deps]) // independent, run together
+  .foreach(reviewFileBody, (ctx) => ctx.getInitData<string[]>() ?? [], { concurrency: 2 }) // two files at a time
   .then(report)
   .commit();
 ```
@@ -191,13 +191,15 @@ Step names need only be unique within their enclosing workflow — the same sub-
 
 ## Examples
 
-Seven runnable examples live in [`examples/`](examples/), each covering one capability — see [`examples/README.md`](examples/README.md) for the full table and per-example notes.
+Nine runnable examples live in [`examples/`](examples/), each covering one capability — see [`examples/README.md`](examples/README.md) for the full table and per-example notes.
 
 | Example | Kind | Shows |
 | --- | --- | --- |
 | `hello` | function | A single function step with a TypeBox output. |
 | `pipeline` | function | Linear hand-off plus a non-adjacent `.map()` reaching an earlier step. |
-| `batch` | function | `.foreach()` over a list. |
+| `batch` | function | `.foreach()` over a list (sequential, the default). |
+| `fan-out` | function | `.parallel()` over two independent steps sharing the same input; output keyed by arm name. |
+| `foreach-concurrent` | function | `.foreach({ concurrency: 3 })`: several items genuinely in flight at once, output still ordered by item. |
 | `survey` | questionnaire | A form gathers params up front, then a step consumes them. |
 | `summarize` | agent | A single agent step returning schema-valid structured output. |
 | `review-loop` | agent + loop | Propose → check, `.dountil` it passes (with a max-iteration guard). |
@@ -285,4 +287,9 @@ pnpm typecheck            # tsc --noEmit
 
 The offline suite (`test/examples-suite.test.ts`) drives every example end-to-end through the engine with a fake host — including the agent-bearing `planning` example, whose agent is scripted. The integration suite runs the agent examples against a real model.
 
-> **Spec ahead of code.** `spec.md` is the source of truth and currently specifies twelve things the implementation hasn't caught up to: the `blocked`/`in_progress` state vocabulary, derived run status, the project lock, node-path addressing and resume-into-nested-blocks, `.parallel` and `concurrency`, background subagents, schema-checked step overrides, output re-validation on resume, budget-clock pausing while blocked, drain-on-crash, `delete` requiring a run-id, and `/workflow list`. Run logs written by older builds are not readable — pre-1.0, the store format changes without migration.
+> **Spec ahead of code, in two places.** `spec.md` is the source of truth, and almost everything it specifies is now implemented — state vocabulary, derived run status, the project lock, node-path addressing and resume-into-nested-blocks, `.parallel`/`concurrency`, background subagents, schema-checked step overrides, output re-validation on resume, budget-clock pausing while blocked, drain-on-crash. Two things still aren't:
+>
+> - **§12.2's compact rendering** ("a step that can overlap... renders compactly: one progress line, with a summary flushed on completion") has no live consumer. A pure render-mode decision existed briefly and was removed once static isolation made the streaming-vs-not *routing* implicit (an isolated step already runs through the non-streaming subprocess path, `src/host/pi-agent.ts`) — but nothing prints the progress line or summary spec §12.2 describes.
+> - **§8.4's "same agent loop resumes... context intact"** holds only within a single live PI process. The real host's in-session bridge (`src/host/pi-agent.ts`) never reads `AgentRequest.history`, so a resume after the harness *process itself* restarted would start that step's session blank rather than seeded with its stored conversation. Resuming a still-running session — and everything the deterministic engine layer models, exercised by the fake-host test suite — is unaffected.
+>
+> Run logs written by older builds are not readable — pre-1.0, the store format changes without migration.

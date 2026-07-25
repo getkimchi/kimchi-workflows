@@ -88,10 +88,17 @@ describe("drain-then-crash (spec §9.5): a blocked sibling is dropped, not drain
     const resultPromise = runWorkflow(workflow, undefined, host);
 
     await barrier.waitFor(1); // item 1 is genuinely in flight now
-    // Generous, deterministic slack (not a real-timing dependency — still plain microtask resolution,
-    // just many of them): item 2's crash has to propagate through several more internal engine layers
-    // (retry policy, finishStep) than item 1 needed to reach the barrier, so without this the release
-    // below could race ahead of `stopped` actually being set and let item 3 wrongly start.
+    // NOT rendezvous-able on an observable signal (unlike the rest of this suite): a step-level crash
+    // has no event of its own (only the run-level `run-crashed`, emitted much later, after the WHOLE
+    // drain including item 1 completes — too late to gate on here) — there is nothing for item 1's
+    // release to wait ON. The property this margin protects — once a result asks to stop, no further
+    // item starts — is proven WITHOUT any margin at the scheduler seam itself (test/scheduler.test.ts's
+    // "drain-then-crash", which controls every resolution by hand): that test's comment on release
+    // order explains why `stopped` is always observed before the next claim CAN happen, once the flag
+    // is set. What is not (and cannot be, short of adding a step-crash event solely to serve this one
+    // test) fully rendezvous-able is item 2 (the crasher) actually REACHING that point before this
+    // release — its path is several engine layers deeper (retry policy, finishStep) than item 1's path
+    // to the barrier, so a generous, deterministic-but-approximate microtask margin stands in.
     for (let i = 0; i < 50; i++) await Promise.resolve();
     barrier.release(1); // let the in-flight sibling proceed to completion — this is what "draining" means
 

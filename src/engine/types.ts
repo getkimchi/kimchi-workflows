@@ -120,8 +120,9 @@ export interface AgentRequest {
   /**
    * True when this step CAN run concurrently with another agent step — inside a `.parallel` arm, or
    * inside a `.foreach` whose declared concurrency exceeds 1 — decided **statically** from the workflow
-   * definition (spec §2.2 "Overlap implies isolation", `engine/isolation.ts`), never from what happens
-   * to be in flight. Independent of `background`: a step can be `isolated` without being `background`
+   * definition and tagged onto the step at `.commit()` (spec §2.2 "Overlap implies isolation",
+   * `flow/isolation.ts`), never from what happens to be in flight. Independent of `background`: a step
+   * can be `isolated` without being `background`
    * (an ordinary agent step that merely happens to sit in a fan-out), and a host must treat the two as
    * the same instruction — run this isolated, exactly like `background` — even though they arise for
    * different reasons. A session hosts one conversation at a time, so a host MUST route an `isolated`

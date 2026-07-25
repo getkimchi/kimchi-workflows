@@ -15,7 +15,6 @@ function baseState(overrides: Partial<RunState> = {}): RunState {
     stepOutputs: new Map(),
     inFlight: new Set(),
     concurrencyGate: createConcurrencyGate(4),
-    isolatedAgentSteps: new Set(),
     ...overrides,
   };
 }
@@ -121,12 +120,11 @@ describe("in-flight throw, wired end-to-end through .parallel (spec §3.9/§3.5)
       name: "slow",
       output: numberOutput,
       run: async () => {
-        await barrier.enter("slow");
-        // Generous, deterministic slack (NOT a real-timing dependency — still plain microtask
-        // resolution, just many of them): "reader"'s path to its uncaught read is a couple of `await`s
-        // deep; this is dozens, so it cannot possibly finish first regardless of engine-internal hop
-        // counts either side of this file happens to have.
-        for (let i = 0; i < 50; i++) await Promise.resolve();
+        await barrier.enter("slow"); // signal started; suspend until the test releases it
+        // Rendezvous, not a guess: "slow" must not settle (and so leave `inFlight`) until "reader" has
+        // actually performed its read — "reader" releases this gate itself, in a `finally`, right after
+        // that read (see below), so this is an explicit handshake rather than a hop-count margin.
+        await barrier.enter("read-done");
         return { n: 1 };
       },
     });
@@ -135,7 +133,11 @@ describe("in-flight throw, wired end-to-end through .parallel (spec §3.9/§3.5)
       output: numberOutput,
       run: async ({ ctx }) => {
         await barrier.waitFor("slow"); // resolves as soon as "slow" has STARTED, independent of release
-        return ctx.getStepResult("slow") as { n: number }; // uncaught — must crash this attempt
+        try {
+          return ctx.getStepResult("slow") as { n: number }; // uncaught — must crash this attempt
+        } finally {
+          barrier.release("read-done"); // let "slow" proceed now that the read has happened, throw or not
+        }
       },
     });
     const workflow = createWorkflow({ name: "racy-read-uncaught" }).parallel([slow, reader]).commit();
