@@ -124,7 +124,7 @@ describe("Q&A agent step — elicitation (B2, spec §10.1)", () => {
   });
 });
 
-describe("plain agent step (regression: no Q&A, no protocol)", () => {
+describe("plain agent step (regression: no Q&A protocol)", () => {
   it("still returns bare validated output and never blocks", async () => {
     const step = createAgentStep({ name: "plain", output: Type.Object({ ok: Type.Boolean() }), prompt: () => "just do it" });
     const workflow = createWorkflow({ name: "plain" }).then(step).commit();
@@ -133,6 +133,11 @@ describe("plain agent step (regression: no Q&A, no protocol)", () => {
 
     expect(result.status).toBe("completed");
     expect(result.output).toEqual({ ok: true });
-    expect(result.agent("plain").messages[0]).toBe("just do it"); // no asking protocol appended
+    // A plain step gets the OUTPUT protocol (the engine validates against that schema either way), but
+    // never the ASKING protocol — it cannot block, so it must not be invited to emit `{questions}`.
+    const prompt = result.agent("plain").messages[0] as string;
+    expect(prompt).toContain("just do it");
+    expect(prompt).toContain('"ok"');
+    expect(prompt).not.toContain("questions");
   });
 });

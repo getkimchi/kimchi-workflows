@@ -88,6 +88,21 @@ export function questionnaireFromSchema(outputSchema: TSchema): Questionnaire {
 }
 
 /**
+ * The output contract appended to every non-`asks` agent step's fresh prompt (pure). The engine parses
+ * and validates the reply against this schema regardless, so stating it is not decoration — it is the
+ * difference between a model that knows the shape and one that has to guess it. Kept next to
+ * {@link buildAskingProtocol} because the two are the same idea, and an `asks` step's protocol already
+ * embeds the schema as one arm of its union.
+ */
+export function buildOutputProtocol(outputSchema: TSchema): string {
+  return [
+    "Reply with ONLY a JSON value and nothing else — no prose before or after, no code fences. It must",
+    "be an INSTANCE of this JSON Schema (the fields filled in), not the schema itself:",
+    JSON.stringify(outputSchema, null, 2),
+  ].join("\n");
+}
+
+/**
  * The protocol text injected into an agent's prompt (pure). Tells the model to ask by replying with
  * ONLY `{ questions: … }` (batching questions) and to finish with ONLY `{ result: … }`, embedding
  * both the {@link QuestionnaireSchema} and the target output schema (TypeBox schemas *are* JSON Schema).

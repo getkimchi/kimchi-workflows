@@ -36,8 +36,8 @@ describe("agent scripting by step name", () => {
     expect(run.output).toEqual({ b: 2 });
     expect(run.stepOutput("first")).toEqual({ a: 1 });
     // Each step saw only its own prompt — dispatch is by name, not by call order.
-    expect(run.agent("first").messages).toEqual(["do a"]);
-    expect(run.agent("second").messages).toEqual(["do b after 1"]);
+    expect(run.agent("first").messages[0]).toContain("do a");
+    expect(run.agent("second").messages[0]).toContain("do b after 1");
   });
 
   it("consumes one step's queue across sessions: a block and its answer-resume take successive entries", async () => {

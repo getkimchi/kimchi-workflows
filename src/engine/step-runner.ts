@@ -4,7 +4,7 @@
  * suspension (spec §10). Pure w.r.t. the engine boundary: all agent/network coupling is behind
  * `host.startAgent`; all delay (backoff + budget timers) is `host.sleep`.
  */
-import { buildAskingProtocol, formatAnswers, type Questionnaire } from "../flow/questionnaire.ts";
+import { buildAskingProtocol, buildOutputProtocol, formatAnswers, type Questionnaire } from "../flow/questionnaire.ts";
 import type { AgentStep, FunctionStep, RetryPolicy, RunContext, StepLogger } from "../flow/types.ts";
 import { describeSchemaViolations } from "../flow/validation.ts";
 import { buildCorrectionMessage, buildQaSchema, validateAgentOutput, validateQaOutput } from "./agent-output.ts";
@@ -94,10 +94,21 @@ export async function runAgentStep(
     return runAgentSession(step, input, host, ctx, state, sig, path, entry, startingTokens);
   };
 
-  return retryLoop(step, host, state, signal, path, attempt, carryOverMs);
+  // An unsteerable step gets one repeat by default (spec §9.1/§9.2). A steerable step's first invalid
+  // reply is answered with a correction in the same session; an isolated one's is simply fatal, and
+  // "one bad reply ends the step" is a worse default than paying for a second, clean attempt. Live
+  // terminal-bench runs bear this out: retries rescued attempts that would otherwise have crashed the
+  // run outright. An author who declares `retry` still overrides this in either direction.
+  const unsteerable = step.background === true || step.isolated === true;
+  return retryLoop(step, host, state, signal, path, attempt, carryOverMs, unsteerable ? 1 : 0);
 }
 
-/** Shared retry loop (spec §9): wrap each attempt in the time budget, re-attempt `retryable` failures within budget. */
+/**
+ * Shared retry loop (spec §9): wrap each attempt in the time budget, re-attempt `retryable` failures
+ * within budget. `defaultMaxRetry` is what applies when the step declares no policy of its own — 0 for
+ * anything steerable, since an in-session step already gets repair turns (spec §9.2), and 1 for a step
+ * that cannot be steered at all (see {@link runAgentStep}).
+ */
 async function retryLoop(
   step: BudgetedStep,
   host: HostPort,
@@ -106,8 +117,9 @@ async function retryLoop(
   path: string,
   attempt: (signal: AbortSignal) => Promise<AttemptResult>,
   carryOverMs = 0,
+  defaultMaxRetry = 0,
 ): Promise<StepOutcome> {
-  const totalAttempts = Math.max(1, (step.retry?.maxRetry ?? 0) + 1);
+  const totalAttempts = Math.max(1, (step.retry?.maxRetry ?? defaultMaxRetry) + 1);
   const backoffMs = step.retry?.backoffMs ?? 0;
   let lastError = "";
 
@@ -165,7 +177,11 @@ async function withTimeBudget(
   const startedAt = host.now().getTime();
   const timeout = new AbortController();
   const cleanup = new AbortController();
-  const attemptPromise = attempt(anySignal([runSignal, timeout.signal]));
+  // `AbortSignal.any` rather than a hand-rolled listener pair: the composite is held WEAKLY by its
+  // sources, so a step that finishes well inside its budget leaves nothing attached to the run-wide
+  // cancel signal — a workflow with hundreds of budgeted steps would otherwise pile up a listener per
+  // attempt on the one signal that lives for the whole run.
+  const attemptPromise = attempt(AbortSignal.any([runSignal, timeout.signal]));
   const timerPromise = host.sleep(remainingMs, cleanup.signal).then((): "timeout" => "timeout");
 
   const outcome = await Promise.race([attemptPromise, timerPromise]);
@@ -267,7 +283,9 @@ async function runAgentSession(
       if (signal.aborted) return { kind: "cancelled" };
 
       // Token budget (spec §9.3/§9.4): accumulate usage across prompt + steering + answer turns.
-      totalTokens += turn.usage?.totalTokens ?? 0;
+      const turnTokens = turn.usage?.totalTokens ?? 0;
+      totalTokens += turnTokens;
+      if (turn.usage) await host.emit({ type: "agent-usage", runId: state.runId, path, totalTokens: turnTokens, at: iso(host) });
       if (step.maxTokens !== undefined && totalTokens > step.maxTokens) {
         return { kind: "retryable", reason: "budget-exceeded", error: `step "${step.name}" exceeded its ${step.maxTokens}-token budget (used ${totalTokens})` };
       }
@@ -320,24 +338,21 @@ function checkAgentReply(step: AgentStep, text: string): ReplyCheck {
   return check.ok ? { ok: true, kind: "result", value: check.value } : check;
 }
 
-/** The fresh-run first message: the author's task prompt, plus the auto-injected asking protocol when `asks`. */
+/**
+ * The fresh-run first message: the author's task prompt, plus the framework's own output contract.
+ *
+ * The contract is injected rather than left to the author because the engine — not the prompt — is what
+ * enforces it: the reply is parsed and validated against `outputSchema` either way, so a prompt that
+ * omits it just fails validation for a reason the model was never told. `asks` steps get the asking
+ * protocol (which already embeds the schema, as one arm of its `{result}|{questions}` union); every
+ * other agent step gets the plain output protocol.
+ *
+ * This matters most for a step that cannot be steered — `background`/`isolated` ones have no repair
+ * budget at all (spec §9.2) — where a single unstated expectation is the whole attempt.
+ */
 function freshPrompt(step: AgentStep, input: unknown, ctx: RunContext): string {
   const prompt = step.buildPrompt({ input, ctx });
-  return step.asks ? `${prompt}\n\n${buildAskingProtocol(step.outputSchema)}` : prompt;
-}
-
-/** A signal that aborts as soon as any input signal aborts (combine run-cancel with the time-budget timeout). */
-function anySignal(signals: readonly AbortSignal[]): AbortSignal {
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  for (const signal of signals) {
-    if (signal.aborted) {
-      controller.abort();
-      break;
-    }
-    signal.addEventListener("abort", onAbort, { once: true });
-  }
-  return controller.signal;
+  return `${prompt}\n\n${step.asks ? buildAskingProtocol(step.outputSchema) : buildOutputProtocol(step.outputSchema)}`;
 }
 
 async function retryScheduled(

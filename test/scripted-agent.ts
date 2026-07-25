@@ -61,7 +61,9 @@ export function scriptedAgent(sessionScripts: readonly (readonly ScriptedTurn[])
         // green — the offline suite could not see the bug it was supposed to be guarding.
         if (sharesTheSession) {
           if (inSessionTurn) {
-            throw new Error(`scripted agent: step "${request.stepName}" started an in-session turn while "${inSessionTurn}"'s turn was still in flight — it should have been isolated (spec §2.2)`);
+            throw new Error(
+              `scripted agent: step "${request.stepName}" started an in-session turn while "${inSessionTurn}"'s turn was still in flight — it should have been isolated (spec §2.2)`,
+            );
           }
           inSessionTurn = request.stepName;
         }
