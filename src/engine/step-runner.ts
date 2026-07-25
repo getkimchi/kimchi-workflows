@@ -76,6 +76,7 @@ export async function runAgentStep(
   signal: AbortSignal,
   parentPath: NodePath,
   path: string,
+  isolated: boolean,
   entry: AgentEntry,
 ): Promise<StepOutcome> {
   const ctx = createRunContext(state, parentPath);
@@ -91,7 +92,7 @@ export async function runAgentStep(
   const attempt = (sig: AbortSignal): Promise<AttemptResult> => {
     const startingTokens = carry?.tokensUsed ?? 0;
     carry = undefined;
-    return runAgentSession(step, input, host, ctx, state, sig, path, entry, startingTokens);
+    return runAgentSession(step, input, host, ctx, state, sig, path, isolated, entry, startingTokens);
   };
 
   return retryLoop(step, host, state, signal, path, attempt, carryOverMs);
@@ -217,7 +218,10 @@ async function runFunctionAttempt(step: FunctionStep, input: unknown, ctx: RunCo
  * `maxRetry` defaults to 0, so by default the crash still happens on the very next loop turn — only an
  * author who declared `retry` sees a different outcome. A `background` step has no repair budget at all
  * (§9.2: forced to 0 below, since a one-shot subagent cannot be steered) — the same `retryable` outcome
- * covers it uniformly, rather than needing a special case.
+ * covers it uniformly, rather than needing a special case. An `isolated` step (spec §2.2 — one that can
+ * overlap with a sibling, decided statically by execute.ts/isolation.ts) runs through the SAME isolated
+ * subprocess path as `background` (src/host/pi-agent.ts) and is just as unsteerable, so it gets the
+ * same forced-zero repair budget.
  */
 async function runAgentSession(
   step: AgentStep,
@@ -227,17 +231,20 @@ async function runAgentSession(
   state: RunState,
   signal: AbortSignal,
   path: string,
+  isolated: boolean,
   entry: AgentEntry,
   startingTokens = 0,
 ): Promise<AttemptResult> {
   const model = step.model ?? state.defaultModel; // step → workflow default; host applies the session default when undefined (spec §9.5)
-  // A `background` step is a one-shot PI subagent (spec §2.2/§9.2, see src/host/pi-agent.ts): there is
-  // no resumable conversation to steer, so its repair budget is forced to 0 regardless of what the step
-  // itself declares — the loop below then runs exactly one turn before it must succeed or fail outright.
-  const maxRepairs = step.background ? 0 : Math.max(0, step.maxOutputRepairs ?? DEFAULT_MAX_OUTPUT_REPAIRS);
+  // A `background` or (statically) `isolated` step is a one-shot PI subagent (spec §2.2/§9.2, see
+  // src/host/pi-agent.ts): there is no resumable conversation to steer, so its repair budget is forced
+  // to 0 regardless of what the step itself declares — the loop below then runs exactly one turn before
+  // it must succeed or fail outright.
+  const noSteering = step.background === true || isolated;
+  const maxRepairs = noSteering ? 0 : Math.max(0, step.maxOutputRepairs ?? DEFAULT_MAX_OUTPUT_REPAIRS);
   const steerSchema = step.asks ? buildQaSchema(step.outputSchema) : step.outputSchema;
   const history = entry.kind === "answer" ? entry.conversation : undefined;
-  const session = host.startAgent({ model, history, stepName: step.name, background: step.background });
+  const session = host.startAgent({ model, history, stepName: step.name, background: step.background, isolated });
 
   try {
     let message = entry.kind === "answer" ? formatAnswers(entry.answers) : freshPrompt(step, input, ctx);

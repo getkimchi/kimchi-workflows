@@ -6,9 +6,17 @@
  * `@earendil-works/pi-coding-agent` types (`AgentEndEvent = { messages }`).
  *
  * A single `agent_end` listener is registered per bridge (the extension holds one bridge for its
- * lifetime); since the blocking guard (spec §7) runs one step at a time, a single pending resolver
- * is unambiguous. `pi.on` exposes no unsubscribe, so `dispose()` clears the pending resolver rather
- * than removing the listener.
+ * lifetime) — `pi.on` exposes no unsubscribe, so `dispose()` clears the bridge's OWN in-flight turn
+ * rather than removing the listener. That listener backs every IN-SESSION turn (never `background` or
+ * statically `isolated` ones, spec §2.2 — those go through `backgroundSession` below, a real subprocess
+ * per turn, with no shared listener to correlate). There is at most one real PI session, so at most one
+ * in-session turn may ever be awaiting that listener at a time: `inFlight` tracks exactly that one turn
+ * by an identity private to the session that started it, and a second `sendAndAwaitEnd` attempted while
+ * one is already in flight is REJECTED outright — never silently swapped in as the thing the listener
+ * resolves next. Before P3's `.parallel`/`.foreach(concurrency>1)` landed this could never happen (the
+ * engine only ever ran one step at a time); the guard here is what makes that no longer an assumption
+ * this file quietly depends on — see `isolation.ts` for the static decision that is now supposed to
+ * keep it from happening at all, and `AgentRequest.isolated`'s doc (engine/types.ts) for the seam.
  *
  * `getConversation()` returns the last `agent_end` messages so a blocked Q&A step can be resumed
  * (spec §8.4). Cross-process history replay (seeding a fresh PI session from a stored conversation)
@@ -88,23 +96,48 @@ export function resolvePiInvocation(args: readonly string[]): { command: string;
  * process's own argv/execPath.
  */
 export function createPiAgentBridge(pi: ExtensionAPI, invocationResolver: PiInvocationResolver = resolvePiInvocation): (modelRegistry: ModelRegistry) => AgentStarter {
-  let pending: ((turn: AgentTurn) => void) | undefined;
+  // The ONE in-session turn currently awaiting the shared `agent_end` listener, if any (see the header
+  // comment). `token` is an identity private to the session that started the turn — not the step name,
+  // since the SAME step name can legitimately open several sessions across retries/repairs, and dispose()
+  // must only ever clear a turn it itself started, never a sibling's.
+  let inFlight: { readonly token: object; readonly stepName: string; readonly resolve: (turn: AgentTurn) => void } | undefined;
   let lastConversation: AgentMessages = [];
 
   pi.on("agent_end", (event) => {
     lastConversation = event.messages;
-    const resolve = pending;
-    if (!resolve) return;
-    pending = undefined;
-    resolve({ text: lastAssistantText(event.messages), usage: lastAssistantUsage(event.messages) });
+    const turn = inFlight;
+    if (!turn) return; // no in-session turn was awaiting this event (only background/isolated steps ran)
+    inFlight = undefined;
+    turn.resolve({ text: lastAssistantText(event.messages), usage: lastAssistantUsage(event.messages) });
   });
 
   return (modelRegistry) => (request) => {
-    if (request.background) {
+    // Isolation (spec §2.2/§12.2): a `background` step, and now also any step the ENGINE decided is
+    // statically isolated (can overlap with a sibling — `.parallel`/`.foreach(concurrency>1)`, see
+    // `AgentRequest.isolated`'s doc), both run through the same one-shot subprocess path. Neither ever
+    // touches `inFlight` — there is no shared listener to correlate a subprocess's own reply with.
+    if (request.background || request.isolated) {
       return backgroundSession(pi, modelRegistry, request, invocationResolver);
     }
+
+    const token = {}; // this session's own identity — see `inFlight`'s doc above
     return {
       async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
+        // Safety net, not the primary mechanism (spec §2.2): static isolation is what is SUPPOSED to
+        // keep two in-session turns from ever overlapping. If it somehow fails — a bug elsewhere, a step
+        // the static analysis missed — this must fail LOUDLY and SPECIFICALLY rather than silently
+        // overwrite `inFlight` and let the eventual `agent_end` resolve the WRONG caller with the OTHER
+        // step's reply (the live cross-talk this bridge exists to rule out). Failing here also means the
+        // second `sendUserMessage` is never even issued — PI itself never sees two turns racing.
+        if (inFlight) {
+          throw new Error(
+            `pi-agent bridge: step "${request.stepName}" tried to start an in-session agent turn while step ` +
+              `"${inFlight.stepName}"'s turn is still in flight. A PI session hosts one conversation at a time ` +
+              "(spec §2.2) — this step should have been statically isolated (background subprocess); refusing " +
+              `to let the two turns cross-talk rather than resolving one with the other's reply.`,
+          );
+        }
+
         if (request.model) {
           const model = resolveModel(modelRegistry, request.model);
           if (!model) {
@@ -116,7 +149,7 @@ export function createPiAgentBridge(pi: ExtensionAPI, invocationResolver: PiInvo
           }
         }
         return new Promise<AgentTurn>((resolve) => {
-          pending = resolve;
+          inFlight = { token, stepName: request.stepName, resolve };
           pi.sendUserMessage(message);
         });
       },
@@ -124,7 +157,9 @@ export function createPiAgentBridge(pi: ExtensionAPI, invocationResolver: PiInvo
         return lastConversation;
       },
       dispose(): void {
-        pending = undefined;
+        // Only clear OUR OWN pending turn — never one a differently-identified session left in flight
+        // (should not arise given the guard above, but dispose() must stay safe regardless, spec §2.2).
+        if (inFlight?.token === token) inFlight = undefined;
       },
     };
   };

@@ -20,7 +20,8 @@ import { nodeName } from "../flow/types.ts";
 import { describeSchemaViolations } from "../flow/validation.ts";
 import { runForeachNode, runParallelNode } from "./concurrent-nodes.ts";
 import { createRunContext, type ExecOutcome, iso, type NodeWalker, type PendingBlock, type Reentry, type RunState, type StepOutcome } from "./context.ts";
-import { appendLoopIteration, appendSegment, formatPath, type NodePath, staticChildKey, staticKeyOf } from "./node-path.ts";
+import { computeIsolatedAgentSteps } from "./isolation.ts";
+import { appendLoopIteration, appendSegment, formatPath, type NodePath, shapePathOf, staticChildKey, staticKeyOf } from "./node-path.ts";
 import { createConcurrencyGate } from "./scheduler.ts";
 import { runAgentStep, runFunctionStep } from "./step-runner.ts";
 import type { HostPort, RunResult } from "./types.ts";
@@ -70,6 +71,9 @@ export async function execute(workflow: WorkflowDefinition, host: HostPort, curs
     defaultModel: workflow.defaultModel,
     foreachItemHistory: cursor.foreachItemHistory,
     pendingBlocks: cursor.pendingBlocks,
+    // Static isolation (spec §2.2), computed once from the whole tree — including nested workflows,
+    // since `forEachNode`-style recursion here already walks into `.workflow` nodes (isolation.ts).
+    isolatedAgentSteps: computeIsolatedAgentSteps(workflow.nodes),
   };
 
   const outcome = await runNodeSequence(workflow.nodes, host, state, cursor.previousOutput, stepSignal, [], cursor.startIndex, cursor.reentry);
@@ -207,13 +211,16 @@ export async function runStepNode(
   const path = appendSegment(parentPath, step.name);
   const formattedPath = formatPath(path);
   const inFlightKey = staticKeyOf(path);
+  // Static isolation (spec §2.2): decided from the step's SHAPE in the definition — see isolation.ts —
+  // never from `state.inFlight` or anything else runtime-observed.
+  const isolated = state.isolatedAgentSteps.has(shapePathOf(path));
 
   // Reads never race (spec §3.9): mark this step in-flight for the FULL duration of its execution
   // (fresh, answer-continuation, or a questionnaire's immediate block) so a concurrent sibling's
   // `getStepResult` throws rather than observing a torn/undefined value. Cleared on every exit path.
   state.inFlight.add(inFlightKey);
   try {
-    return await runStepNodeBody(step, input, host, state, signal, parentPath, formattedPath, reentry);
+    return await runStepNodeBody(step, input, host, state, signal, parentPath, formattedPath, isolated, reentry);
   } finally {
     state.inFlight.delete(inFlightKey);
   }
@@ -227,6 +234,7 @@ async function runStepNodeBody(
   signal: AbortSignal,
   parentPath: NodePath,
   formattedPath: string,
+  isolated: boolean,
   reentry?: Reentry,
 ): Promise<ExecOutcome> {
   // Answer continuation (spec §8.4/§8.5): resume a blocked step with the user's structured answers — no
@@ -235,7 +243,7 @@ async function runStepNodeBody(
   //  - questionnaire (form) → reassemble the answers into `output` and validate (no `startAgent`).
   if (reentry?.answer) {
     if (step.kind === "agent") {
-      const outcome = await runAgentStep(step, undefined, host, state, signal, parentPath, formattedPath, {
+      const outcome = await runAgentStep(step, undefined, host, state, signal, parentPath, formattedPath, isolated, {
         kind: "answer",
         answers: reentry.answer.answers,
         conversation: reentry.answer.conversation,
@@ -277,7 +285,7 @@ async function runStepNodeBody(
 
   const outcome =
     step.kind === "agent"
-      ? await runAgentStep(step, stepInput, host, state, signal, parentPath, formattedPath, { kind: "fresh" })
+      ? await runAgentStep(step, stepInput, host, state, signal, parentPath, formattedPath, isolated, { kind: "fresh" })
       : await runFunctionStep(step, stepInput, host, state, signal, parentPath, formattedPath);
   return finishStep(formattedPath, host, state, outcome);
 }

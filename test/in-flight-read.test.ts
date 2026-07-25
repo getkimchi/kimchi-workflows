@@ -15,6 +15,7 @@ function baseState(overrides: Partial<RunState> = {}): RunState {
     stepOutputs: new Map(),
     inFlight: new Set(),
     concurrencyGate: createConcurrencyGate(4),
+    isolatedAgentSteps: new Set(),
     ...overrides,
   };
 }

@@ -1,5 +1,6 @@
 import type { TSchema } from "typebox";
 import { createMapStep } from "./create-map-step.ts";
+import { assertNoOverlappingAsks } from "./overlap.ts";
 import type { BranchCondition, ForeachSelector, LoopCondition, MapFn, ParallelNode, StepDefinition, WorkflowDefinition, WorkflowNode } from "./types.ts";
 import { forEachNode, nodeName } from "./types.ts";
 
@@ -209,6 +210,7 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
       assertScopeNames(options.name, nodes);
       assertConcurrencyWithinCeiling(options.name, nodes, maxConcurrency);
       assertNoBackgroundAsks(options.name, nodes);
+      assertNoOverlappingAsks(options.name, nodes);
       return {
         name: options.name,
         description: options.description,
