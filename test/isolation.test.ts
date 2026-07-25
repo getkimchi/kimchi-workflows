@@ -1,16 +1,17 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { computeIsolatedAgentSteps } from "../src/engine/isolation.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import { createAgentStep, createStep, createWorkflow } from "../src/flow/index.ts";
+import type { StepDefinition, WorkflowNode } from "../src/flow/types.ts";
 import { createTestHost } from "./helpers.ts";
 import { scriptedAgent } from "./scripted-agent.ts";
 
 /**
  * Static isolation (spec §2.2, "Overlap implies isolation"): an agent step that CAN run concurrently
- * with another — a `.parallel` arm, or a step inside a `.foreach` whose concurrency exceeds 1 — must be
- * decided from the workflow's SHAPE alone, not from what happens to be in flight. These tests prove the
- * decision both at the pure `computeIsolatedAgentSteps` level and end-to-end through `AgentRequest`
+ * with another — a `.parallel` arm, or a step inside a `.foreach` whose concurrency exceeds 1 — is
+ * decided from the workflow's SHAPE alone, once, at `.commit()` (flow/isolation.ts), which tags the
+ * step itself (`AgentStep.isolated`) rather than the engine re-deriving it at run time. These tests
+ * prove the tagging both directly on the committed tree and end-to-end through `AgentRequest.isolated`
  * (via the scripted host double), matching this test task's own two headline cases:
  *   - a `.parallel` arm is isolated; the same step in a plain `.then` chain is not;
  *   - a `.foreach({concurrency: 3})` step is isolated; at concurrency 1 it is not.
@@ -19,18 +20,53 @@ import { scriptedAgent } from "./scripted-agent.ts";
 const okSchema = Type.Object({ ok: Type.Boolean() });
 const okReply = JSON.stringify({ ok: true });
 
-describe("computeIsolatedAgentSteps (pure, spec §2.2)", () => {
+/** Find the step at a slash-joined SHAPE path (node names only) in a committed tree — test-only mirror of the addressing flow/isolation.ts itself walks. */
+function findStep(nodes: readonly WorkflowNode[], path: string): StepDefinition | undefined {
+  const [head, ...rest] = path.split("/");
+  for (const node of nodes) {
+    const found = findInNode(node, head as string, rest);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** One node's contribution to {@link findStep}: undefined means "not this node, keep looking". */
+function findInNode(node: WorkflowNode, head: string, rest: readonly string[]): StepDefinition | undefined {
+  switch (node.kind) {
+    case "step":
+      return rest.length === 0 && node.step.name === head ? node.step : undefined;
+    case "branch": {
+      const arm = node.arms.find((a) => a.name === head);
+      return arm ? findStep(arm.body.nodes, rest.join("/")) : undefined;
+    }
+    case "loop":
+    case "foreach":
+      return node.name === head ? findStep(node.body.nodes, rest.join("/")) : undefined;
+    case "parallel":
+      return node.name === head ? node.arms.find((s) => s.name === rest[0]) : undefined;
+    case "workflow":
+      return node.name === head ? findStep(node.workflow.nodes, rest.join("/")) : undefined;
+  }
+}
+
+function isIsolated(nodes: readonly WorkflowNode[], path: string): boolean {
+  const step = findStep(nodes, path);
+  return step?.kind === "agent" && step.isolated === true;
+}
+
+describe(".commit() tags isolated agent steps onto the committed tree (spec §2.2)", () => {
   it("a top-level .then() agent step is not isolated", () => {
     const step = createAgentStep({ name: "solo", output: okSchema, prompt: () => "go" });
     const workflow = createWorkflow({ name: "w" }).then(step).commit();
-    expect(computeIsolatedAgentSteps(workflow.nodes)).toEqual(new Set());
+    expect(isIsolated(workflow.nodes, "solo")).toBe(false);
   });
 
   it("every arm of a .parallel is isolated, unconditionally", () => {
     const a = createAgentStep({ name: "a", output: okSchema, prompt: () => "go" });
     const b = createAgentStep({ name: "b", output: okSchema, prompt: () => "go" });
     const workflow = createWorkflow({ name: "w" }).parallel([a, b], { name: "par" }).commit();
-    expect(computeIsolatedAgentSteps(workflow.nodes)).toEqual(new Set(["par/a", "par/b"]));
+    expect(isIsolated(workflow.nodes, "par/a")).toBe(true);
+    expect(isIsolated(workflow.nodes, "par/b")).toBe(true);
   });
 
   it("a .foreach body step is isolated when concurrency exceeds 1", () => {
@@ -39,7 +75,7 @@ describe("computeIsolatedAgentSteps (pure, spec §2.2)", () => {
     const workflow = createWorkflow({ name: "w" })
       .foreach(body, () => [1, 2, 3], { name: "batch", concurrency: 3 })
       .commit();
-    expect(computeIsolatedAgentSteps(workflow.nodes)).toEqual(new Set(["batch/inner"]));
+    expect(isIsolated(workflow.nodes, "batch/inner")).toBe(true);
   });
 
   it("a .foreach body step at concurrency 1 (the default) is NOT isolated", () => {
@@ -48,7 +84,7 @@ describe("computeIsolatedAgentSteps (pure, spec §2.2)", () => {
     const workflow = createWorkflow({ name: "w" })
       .foreach(body, () => [1, 2, 3], { name: "batch" }) // default concurrency: 1
       .commit();
-    expect(computeIsolatedAgentSteps(workflow.nodes)).toEqual(new Set());
+    expect(isIsolated(workflow.nodes, "batch/inner")).toBe(false);
   });
 
   it("isolation propagates through nested branch/loop/workflow constructs inside an isolated foreach", () => {
@@ -64,8 +100,8 @@ describe("computeIsolatedAgentSteps (pure, spec §2.2)", () => {
       .commit();
 
     // `deep` sits under batch/arm-body/deep — a branch arm is a PEER scope of the branch's own name
-    // (spec §8.5), which `computeIsolatedAgentSteps` mirrors exactly like the engine's own addressing.
-    expect(computeIsolatedAgentSteps(workflow.nodes)).toEqual(new Set(["batch/arm-body/deep"]));
+    // (spec §8.5), which the tagging walk mirrors exactly like the engine's own addressing.
+    expect(isIsolated(workflow.nodes, "batch/arm-body/deep")).toBe(true);
   });
 
   it("once isolated, an inner concurrency-1 foreach does not undo the outer overlap", () => {
@@ -78,7 +114,25 @@ describe("computeIsolatedAgentSteps (pure, spec §2.2)", () => {
       .foreach(outerBody, () => [1, 2, 3], { name: "batch", concurrency: 3 })
       .commit();
 
-    expect(computeIsolatedAgentSteps(workflow.nodes)).toEqual(new Set(["batch/solo-item/inner"]));
+    expect(isIsolated(workflow.nodes, "batch/solo-item/inner")).toBe(true);
+  });
+
+  it("tags a CLONE, never the shared step object itself — composing the same step in two places must not cross-contaminate", () => {
+    // One shared step definition, composed into two different workflows: a plain .then() chain (not
+    // isolated) and a .parallel arm (isolated). If .commit() mutated the step in place instead of
+    // cloning, whichever commit ran LAST would win and silently retag the other's copy too.
+    const shared = createAgentStep({ name: "shared", output: okSchema, prompt: () => "go" });
+    expect(shared.isolated).toBeUndefined();
+
+    const fannedOut = createWorkflow({ name: "fanned-out" }).parallel([shared], { name: "par" }).commit();
+    const sequenced = createWorkflow({ name: "sequenced" }).then(shared).commit();
+
+    // The isolated commit produced its OWN tagged copy...
+    expect(isIsolated(fannedOut.nodes, "par/shared")).toBe(true);
+    // ...while the sequential commit's copy (built from the SAME `shared` reference) stays untagged...
+    expect(isIsolated(sequenced.nodes, "shared")).toBe(false);
+    // ...and the original object the author holds was never written through.
+    expect(shared.isolated).toBeUndefined();
   });
 });
 

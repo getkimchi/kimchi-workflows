@@ -1,6 +1,6 @@
 import type { TSchema } from "typebox";
 import { createMapStep } from "./create-map-step.ts";
-import { assertNoOverlappingAsks } from "./overlap.ts";
+import { resolveIsolation } from "./isolation.ts";
 import type { BranchCondition, ForeachSelector, LoopCondition, MapFn, ParallelNode, StepDefinition, WorkflowDefinition, WorkflowNode } from "./types.ts";
 import { forEachNode, nodeName } from "./types.ts";
 
@@ -210,14 +210,15 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
       assertScopeNames(options.name, nodes);
       assertConcurrencyWithinCeiling(options.name, nodes, maxConcurrency);
       assertNoBackgroundAsks(options.name, nodes);
-      assertNoOverlappingAsks(options.name, nodes);
       return {
         name: options.name,
         description: options.description,
         inputSchema: options.input,
         defaultModel: options.defaultModel,
         maxConcurrency,
-        nodes: [...nodes],
+        // Static isolation (spec §2.2) tagged onto the committed tree here, once — see isolation.ts.
+        // Also enforces spec §10.1 (asks may not overlap), the same walk's other half.
+        nodes: resolveIsolation(options.name, nodes),
       };
     },
   };

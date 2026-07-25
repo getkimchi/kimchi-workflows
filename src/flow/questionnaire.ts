@@ -180,17 +180,7 @@ function literalOptions(schema: TSchema): QuestionOption[] | undefined {
   const meta = asMeta(schema);
 
   if (Array.isArray(meta.anyOf)) {
-    const options: QuestionOption[] = [];
-    for (const member of meta.anyOf) {
-      if (member && typeof member === "object" && "const" in member) {
-        const memberMeta = member as Record<string, unknown>;
-        const value = String(memberMeta.const);
-        const option: QuestionOption = { value, label: typeof memberMeta.title === "string" ? memberMeta.title : value };
-        if (typeof memberMeta.description === "string") option.description = memberMeta.description;
-        if (memberMeta.recommended === true) option.recommended = true;
-        options.push(option);
-      }
-    }
+    const options = meta.anyOf.map(optionFromConstMember).filter((option): option is QuestionOption => option !== undefined);
     return options.length > 0 ? options : undefined;
   }
 
@@ -198,6 +188,17 @@ function literalOptions(schema: TSchema): QuestionOption[] | undefined {
     return meta.enum.map((value) => ({ value: String(value), label: String(value) }));
   }
   return undefined;
+}
+
+/** One `anyOf` member as a `QuestionOption`, or undefined if it is not a `const` literal. */
+function optionFromConstMember(member: unknown): QuestionOption | undefined {
+  if (!member || typeof member !== "object" || !("const" in member)) return undefined;
+  const memberMeta = member as Record<string, unknown>;
+  const value = String(memberMeta.const);
+  const option: QuestionOption = { value, label: typeof memberMeta.title === "string" ? memberMeta.title : value };
+  if (typeof memberMeta.description === "string") option.description = memberMeta.description;
+  if (memberMeta.recommended === true) option.recommended = true;
+  return option;
 }
 
 /** Mark the option whose value equals the field's `default` as recommended (preserving existing flags). */

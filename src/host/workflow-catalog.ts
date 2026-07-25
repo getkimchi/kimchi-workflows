@@ -74,36 +74,48 @@ export type WorkflowResolution = { ok: true; workflow: WorkflowDefinition; fileP
 /**
  * Resolve `/workflow run <arg>` to a workflow: a filesystem path first, then a declared name from the
  * catalog. Path wins so an explicit file always beats a coincidental name match; the name path only
- * runs when the argument does not name a loadable file.
+ * runs when the argument does not name a loadable file. Three strategies, tried in order — an explicit
+ * `.ts` path, the `<name>.workflow.ts` convention, then a full catalog scan — each its own helper below.
  */
 export async function resolveWorkflow(projectRoot: string, arg: string): Promise<WorkflowResolution> {
-  const asPath = path.resolve(projectRoot, arg);
   if (arg.endsWith(".ts")) {
-    try {
-      return { ok: true, workflow: await loadWorkflowFile(asPath), filePath: asPath };
-    } catch (err) {
-      return { ok: false, error: `failed to load "${arg}": ${err instanceof Error ? err.message : String(err)}` };
-    }
+    return loadAsResolution(path.resolve(projectRoot, arg), arg);
   }
 
   // Fast path: by convention a workflow lives in `<name>.workflow.ts`. Trying that first means the
   // common case imports exactly one module, instead of executing every workflow in the project just
   // to read their declared names.
-  const byConvention = path.join(workflowsDir(projectRoot), `${arg}${WORKFLOW_SUFFIX}`);
-  if (existsSync(byConvention)) {
-    const workflow = await loadWorkflowFile(byConvention).catch(() => undefined);
-    if (workflow?.name === arg) return { ok: true, workflow, filePath: byConvention };
-  }
+  const byConvention = await resolveByConvention(projectRoot, arg);
+  if (byConvention) return byConvention;
 
+  return resolveByCatalogName(projectRoot, arg);
+}
+
+/** Load `filePath` as a workflow, wrapping a failure with `arg` (the user-facing argument) for context. */
+async function loadAsResolution(filePath: string, arg: string): Promise<WorkflowResolution> {
+  try {
+    return { ok: true, workflow: await loadWorkflowFile(filePath), filePath };
+  } catch (err) {
+    return { ok: false, error: `failed to load "${arg}": ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+/** The `<name>.workflow.ts` convention path, if it exists AND its declared name actually matches `arg`. */
+async function resolveByConvention(projectRoot: string, arg: string): Promise<WorkflowResolution | undefined> {
+  const byConvention = path.join(workflowsDir(projectRoot), `${arg}${WORKFLOW_SUFFIX}`);
+  if (!existsSync(byConvention)) return undefined;
+  const workflow = await loadWorkflowFile(byConvention).catch(() => undefined);
+  return workflow?.name === arg ? { ok: true, workflow, filePath: byConvention } : undefined;
+}
+
+/** Fall back to a full catalog scan, matching `arg` against every discovered workflow's declared name. */
+async function resolveByCatalogName(projectRoot: string, arg: string): Promise<WorkflowResolution> {
   const { entries } = await discoverWorkflows(projectRoot);
   const matches = entries.filter((entry) => entry.name === arg);
+
   if (matches.length === 1) {
     const match = matches[0] as WorkflowEntry;
-    try {
-      return { ok: true, workflow: await loadWorkflowFile(match.filePath), filePath: match.filePath };
-    } catch (err) {
-      return { ok: false, error: `failed to load "${match.filePath}": ${err instanceof Error ? err.message : String(err)}` };
-    }
+    return loadAsResolution(match.filePath, match.filePath);
   }
   if (matches.length > 1) {
     return { ok: false, error: `"${arg}" is ambiguous: ${matches.map((entry) => entry.filePath).join(", ")}` };

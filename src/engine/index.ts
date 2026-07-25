@@ -6,21 +6,8 @@ export type { AnswerResume, ExecutionCursor, Reentry } from "./execute.ts";
 export { execute } from "./execute.ts";
 export type { JsonExtraction } from "./extract-json.ts";
 export { extractJson } from "./extract-json.ts";
-export { computeIsolatedAgentSteps } from "./isolation.ts";
 export type { IndexKind, NodePath, PathSegment } from "./node-path.ts";
-export {
-  appendForeachItem,
-  appendLoopIteration,
-  appendSegment,
-  formatPath,
-  isValidNodeName,
-  leafName,
-  parsePath,
-  shapePathOf,
-  staticChildKey,
-  staticKeyOf,
-  staticPathOf,
-} from "./node-path.ts";
+export { appendForeachItem, appendLoopIteration, appendSegment, formatPath, isValidNodeName, parsePath, staticChildKey, staticKeyOf, staticPathOf } from "./node-path.ts";
 export { pendingQuestionnaires, resumeWithAnswer, resumeWorkflow } from "./resume-workflow.ts";
 export type { RunStatus } from "./run-status.ts";
 export { currentStepName, deriveRunStatus, pendingQuestionCount } from "./run-status.ts";

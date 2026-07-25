@@ -133,6 +133,14 @@ export interface AgentStep extends StepBase {
    * back to the repeat policy (`retry.maxRetry`), same as a thrown transport error would.
    */
   readonly background?: boolean;
+  /**
+   * Static isolation (spec §2.2), framework-set at `.commit()` (`src/flow/isolation.ts`): true when
+   * this step sits somewhere that can run concurrently with a sibling — every `.parallel` arm, or a
+   * step anywhere inside a `.foreach` whose concurrency exceeds 1. The engine reads this flag directly
+   * instead of re-deriving it from the step's position at run time (see `step-runner.ts`'s use next to
+   * `background`: an isolated step is unsteerable and runs through the same subprocess path).
+   */
+  readonly isolated?: boolean;
 }
 
 /**
