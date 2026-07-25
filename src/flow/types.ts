@@ -83,6 +83,19 @@ interface StepBase {
    * fires and the attempt fails with `budget-exceeded` — counted against the retry policy (§9.1).
    */
   readonly maxDurationMs?: number;
+  /**
+   * Let the run CONTINUE when this step fails for good (spec §9.1: retries exhausted, or a wall-time
+   * budget blown). The failure is recorded as a `step-failed` event, the step's output is `undefined`,
+   * and the next node runs anyway.
+   *
+   * Default false, because a silent failure is usually a worse bug than a loud one. It earns its place
+   * where a step's job is to make progress rather than to produce a value that something downstream
+   * depends on — the case that motivated it being a time-boxed worker inside a repair loop, where
+   * losing the whole run to an overrun is strictly worse than checking what did land and having
+   * another go. A step whose OUTPUT is consumed downstream should not be optional: the next step's
+   * input schema would just reject the `undefined` and crash a step later, further from the cause.
+   */
+  readonly optional?: boolean;
 }
 
 /** Function step (spec §2.1): a TypeScript function the engine calls directly. */
@@ -133,6 +146,17 @@ export interface AgentStep extends StepBase {
    * back to the repeat policy (`retry.maxRetry`), same as a thrown transport error would.
    */
   readonly background?: boolean;
+  /**
+   * Keep this step's conversation across executions (spec §2.2). Only meaningful for a step that runs
+   * isolated (`background`, or inside a fan-out), where each execution is otherwise its own one-shot
+   * subprocess with no memory of the last.
+   *
+   * For a step that can be interrupted and continued — a time-boxed worker inside a repair loop — this
+   * is the difference between resuming and restarting. It deliberately overrides the fresh-session
+   * default a retry would otherwise get (spec §9.1): an author asking for continuity means it. Leave it
+   * off for anything whose value comes from a clean look at the world, a verifier above all.
+   */
+  readonly resumable?: boolean;
   /**
    * Static isolation (spec §2.2), framework-set at `.commit()` (`src/flow/isolation.ts`): true when
    * this step sits somewhere that can run concurrently with a sibling — every `.parallel` arm, or a

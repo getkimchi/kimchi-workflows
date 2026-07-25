@@ -37,6 +37,10 @@ export type RunEvent =
   // steered has several — so a consumer sums by `path` for a step, or over the log for a run.
   | { type: "agent-usage"; runId: string; path: string; totalTokens: number; at: string }
   | { type: "step-completed"; runId: string; path: string; output: unknown; at: string }
+  // A step declared `optional` failed for good and the run carried on (spec §9.1). Distinct from
+  // `run-crashed`: nothing about the RUN ended here, so this records what was lost — the step's output
+  // is `undefined` from this point on — without claiming the run stopped.
+  | { type: "step-failed"; runId: string; path: string; error: string; at: string }
   // Control-flow node (branch/loop/foreach/workflow, spec §3.2–§3.4, §11) lifecycle. `node-completed`
   // is a resume checkpoint (spec §8): its output feeds the next node and rebuilds context. Emitted for
   // a branch's own node AND for each taken arm (`path` = the arm's own path, spec §8.5's re-entry).
@@ -137,6 +141,19 @@ export interface AgentRequest {
    * spec §2.2 exists to rule out.
    */
   readonly isolated?: boolean;
+  /**
+   * A stable identity for a conversation this step CONTINUES across separate executions (spec §2.2).
+   *
+   * An isolated step is a one-shot subprocess, so by default every execution of it starts cold — which
+   * is right for a verifier (fresh eyes are the point) and wrong for a worker that was interrupted:
+   * a step time-boxed out of one round and re-run in the next re-derives everything it already knew.
+   * When this is set, a host that runs the step out-of-process is asked to persist the conversation
+   * under this key and resume it next time, so the second execution continues the first.
+   *
+   * Set from `AgentStep.resumable`; absent otherwise, which keeps the default behaviour (and the small,
+   * cheap contexts that make a chain of isolated steps far cheaper than one long session).
+   */
+  readonly resumeKey?: string;
   /**
    * The attempt's abort signal — the run's cancel signal (spec §8.8) combined with the step's wall-time
    * budget (spec §9.4). A host that runs this request as an out-of-process subagent MUST honour it, or

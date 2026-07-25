@@ -25,6 +25,8 @@ export interface CreateAgentStepOptions<TInputSchema extends TSchema | undefined
   maxOutputRepairs?: number;
   /** Per-step wall-time budget in ms (spec §9.3): exceeding it aborts the step → `budget-exceeded`. */
   maxDurationMs?: number;
+  /** Let the run continue when this step fails for good (spec §9.1): records `step-failed`, output is `undefined`. */
+  optional?: boolean;
   /** Per-step token budget (spec §9.3): summed turn usage over this → `budget-exceeded`. */
   maxTokens?: number;
   /**
@@ -32,6 +34,8 @@ export interface CreateAgentStepOptions<TInputSchema extends TSchema | undefined
    * parent session's history. Never combine with `asks: true` — `.commit()` rejects it (spec §10.1).
    */
   background?: boolean;
+  /** Continue this step's conversation across executions instead of starting cold (spec §2.2). */
+  resumable?: boolean;
 }
 
 /** Agent step (spec §2.2). Runs the agent loop via the host and validates its structured output. */
@@ -49,8 +53,10 @@ export function createAgentStep<TInputSchema extends TSchema | undefined = undef
     retry: options.retry,
     maxOutputRepairs: options.maxOutputRepairs,
     maxDurationMs: options.maxDurationMs,
+    optional: options.optional,
     maxTokens: options.maxTokens,
     background: options.background,
+    resumable: options.resumable,
     // Single, narrow type-erasure boundary: the author's `prompt` is precisely typed against the
     // declared input schema; the engine calls it with a runtime-validated `unknown` input.
     buildPrompt: (args) => options.prompt(args as AgentPromptArgs<InferInput<TInputSchema>>),
