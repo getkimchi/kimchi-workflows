@@ -72,9 +72,17 @@ describe("deriveStepStates (spec §5.1, §5.4): one state per case", () => {
     expect(stepState(deriveStepStates(events), "arm-b")).toBe("skipped");
   });
 
-  it("a taken branch arm is not itself recorded skipped", () => {
-    const events: RunEvent[] = [started, { type: "branch-arm", runId, path: "arm-a", taken: true, at }];
-    expect(stepState(deriveStepStates(events), "arm-a")).toBe("todo"); // the arm's own steps report their state, not the arm
+  it("a taken branch arm runs and then completes with its node", () => {
+    const taken: RunEvent = { type: "branch-arm", runId, path: "arm-a", taken: true, at };
+    expect(stepState(deriveStepStates([started, taken]), "arm-a")).toBe("in_progress");
+
+    const done: RunEvent = { type: "node-completed", runId, path: "arm-a", output: undefined, at };
+    expect(stepState(deriveStepStates([started, taken, done]), "arm-a")).toBe("completed");
+  });
+
+  it("only a taken arm is closed by node-completed — an enclosing construct's node is not a step", () => {
+    const events: RunEvent[] = [started, { type: "node-completed", runId, path: "some-loop", output: undefined, at }];
+    expect(stepState(deriveStepStates(events), "some-loop")).toBe("todo");
   });
 
   it("cancelled — a step-attributed run-cancelled (mid-step boundary cancel)", () => {

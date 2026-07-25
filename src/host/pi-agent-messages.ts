@@ -43,3 +43,33 @@ export function lastAssistantUsage(messages: AgentMessages): TokenUsage | undefi
   }
   return undefined;
 }
+
+/**
+ * Parse a `pi --mode json` subprocess's NDJSON stdout into the same assistant/user message list an
+ * interactive `agent_end` event carries (spec §2.2, background subagents — see pi-agent.ts), so
+ * `lastAssistantText`/`lastAssistantUsage` above serve both paths unchanged instead of duplicating their
+ * logic. Pure: no process/host access, so it is unit-testable offline against captured fixture lines —
+ * PI's own `examples/extensions/subagent` reads the identical `{ type: "message_end", message }` shape
+ * off a spawned `pi` process's stdout. Malformed JSON or an unrecognized event type is skipped rather
+ * than failing the whole parse: a real transcript interleaves other event types (`tool_call`,
+ * `turn_start`, …) this reader has no need of.
+ */
+export function parseNdjsonMessages(ndjson: string): AgentMessages {
+  const messages: AgentMessages = [];
+  for (const line of ndjson.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (isMessageEndEvent(event)) messages.push(event.message as AgentMessages[number]);
+  }
+  return messages;
+}
+
+function isMessageEndEvent(value: unknown): value is { type: "message_end"; message: unknown } {
+  return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "message_end" && "message" in value;
+}

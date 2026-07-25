@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import { resumeWithAnswer } from "../src/engine/resume-workflow.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunEvent } from "../src/engine/types.ts";
 import { createAgentStep, createWorkflow } from "../src/flow/index.ts";
@@ -65,6 +66,30 @@ describe("token budget (Phase 7a, spec §9.3)", () => {
     expect(result.error).toMatch(/used 120/);
     const steers = (await store.loadEvents(result.runId)).filter((e) => e.type === "agent-steer");
     expect(steers).toHaveLength(1); // one steer happened before the budget tripped
+  });
+
+  it("carries accumulated tokens across a block/answer continuation of the SAME attempt (spec §9.4)", async () => {
+    const step = createAgentStep({ name: "asker", output: outputSchema, asks: true, maxTokens: 100, prompt: () => "go" });
+    const workflow = createWorkflow({ name: "token-continuation" }).then(step).commit();
+    // Session 1 (fresh): asks, using 60 tokens — well within the 100 budget on its own.
+    // Session 2 (answer continuation, same attempt): replies using 60 MORE tokens — 60 alone is fine,
+    // but the CUMULATIVE total (120) must trip the budget, proving the count did not reset at the block.
+    const questionnaire = { questions: [{ key: "x", header: "X", question: "X?", kind: "text" as const }] };
+    const agent = scriptedAgent([[{ text: JSON.stringify({ questions: questionnaire }), totalTokens: 60 }], [{ text: JSON.stringify({ result: { ok: true } }), totalTokens: 60 }]]);
+    const { host, store } = createTestHost({ startAgent: agent.startAgent });
+
+    const blocked = await runWorkflow(workflow, undefined, host);
+    expect(blocked.status).toBe("blocked");
+
+    const events = await store.loadEvents(blocked.runId);
+    const asked = events.find((event): event is Extract<RunEvent, { type: "questionnaire-asked" }> => event.type === "questionnaire-asked");
+    expect(asked?.tokensUsed).toBe(60); // recorded at the moment of blocking
+
+    const result = await resumeWithAnswer(workflow, events, { x: "hi" }, host);
+
+    expect(result.status).toBe("crashed");
+    expect(result.error).toMatch(/token budget/);
+    expect(result.error).toMatch(/used 120/); // 60 (before the block) + 60 (after) = 120, not a fresh 60
   });
 
   it("ignores usage entirely when no maxTokens is set", async () => {
