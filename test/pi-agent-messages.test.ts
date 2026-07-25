@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type AgentMessages, lastAssistantText, lastAssistantUsage, type ModelRegistry, resolveModel } from "../src/host/pi-agent-messages.ts";
+import { type AgentMessages, lastAssistantText, lastAssistantUsage, type ModelRegistry, parseNdjsonMessages, resolveModel } from "../src/host/pi-agent-messages.ts";
 
 // The real PI `AgentMessage` / `Model` types carry many fields these pure readers never touch. We feed
 // them minimal fixtures via one localized assertion each (no `any`); the readers only read the fields
@@ -85,5 +85,48 @@ describe("lastAssistantUsage", () => {
   it("returns undefined when there is no assistant message", () => {
     expect(lastAssistantUsage(asMessages([]))).toBeUndefined();
     expect(lastAssistantUsage(asMessages([{ role: "user", content: [{ type: "text", text: "hi" }] }]))).toBeUndefined();
+  });
+});
+
+// -- parseNdjsonMessages (background subagent stdout, spec §2.2) -----------------------------------
+//
+// Fixture lines shaped exactly like PI's own `--mode json` output (the same `message_end` envelope
+// PI's bundled examples/extensions/subagent/index.ts parses off a spawned `pi` process's stdout).
+
+const messageEndLine = (message: object) => JSON.stringify({ type: "message_end", message });
+const assistantLine = (text: string, totalTokens: number) => messageEndLine({ role: "assistant", content: [{ type: "text", text }], usage: { totalTokens } });
+
+describe("parseNdjsonMessages", () => {
+  it("extracts the message from each message_end line, in order", () => {
+    const ndjson = [assistantLine("first", 3), assistantLine("second", 7)].join("\n");
+
+    const messages = parseNdjsonMessages(ndjson);
+
+    expect(lastAssistantText(messages)).toBe("second");
+    expect(lastAssistantUsage(messages)).toEqual({ totalTokens: 7 });
+  });
+
+  it("ignores non-message_end event types interleaved in the stream", () => {
+    const ndjson = [JSON.stringify({ type: "turn_start" }), JSON.stringify({ type: "tool_call", id: "1" }), assistantLine("done", 4), JSON.stringify({ type: "turn_end" })].join(
+      "\n",
+    );
+
+    expect(lastAssistantText(parseNdjsonMessages(ndjson))).toBe("done");
+  });
+
+  it("skips blank lines and lines that are not valid JSON, rather than failing the whole parse", () => {
+    const ndjson = ["", "   ", "not json at all {", assistantLine("ok", 1), ""].join("\n");
+
+    expect(lastAssistantText(parseNdjsonMessages(ndjson))).toBe("ok");
+  });
+
+  it("skips a JSON line with no message_end shape (missing type, missing message, or a different type)", () => {
+    const ndjson = [JSON.stringify({ hello: "world" }), JSON.stringify({ type: "message_end" }), JSON.stringify(null), assistantLine("survives", 2)].join("\n");
+
+    expect(lastAssistantText(parseNdjsonMessages(ndjson))).toBe("survives");
+  });
+
+  it("returns an empty message list for empty stdout", () => {
+    expect(parseNdjsonMessages("")).toEqual([]);
   });
 });

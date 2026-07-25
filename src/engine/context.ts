@@ -68,8 +68,11 @@ export type StepOutcome =
   | { kind: "crashed"; error: string }
   | { kind: "cancelled" }
   // A step asked a `questions` batch (spec §10): the run blocks. `conversation` resumes the same loop.
-  // `violation` is set only when a questionnaire step re-blocks because the delivered answers were invalid.
-  | { kind: "blocked"; questionnaire: Questionnaire; conversation: readonly unknown[]; violation?: string };
+  // `violation` is set only when a questionnaire step re-blocks because the delivered answers were
+  // invalid. `elapsedMs`/`tokensUsed` (agent Q&A steps only, spec §9.4) are this attempt's running
+  // budget totals at the moment of blocking — recorded onto the `questionnaire-asked` event so a later
+  // answer-continuation can carry them forward instead of resetting (see types.ts's event comment).
+  | { kind: "blocked"; questionnaire: Questionnaire; conversation: readonly unknown[]; violation?: string; elapsedMs?: number; tokensUsed?: number };
 
 /** Outcome of executing a node or a node sequence. `ok` carries the value handed to the next node. */
 export type ExecOutcome =
@@ -87,6 +90,14 @@ export type ExecOutcome =
 export interface AnswerResume {
   readonly answers: Record<string, unknown>;
   readonly conversation: readonly unknown[];
+  /**
+   * Budget carry across the block (spec §9.4): wall time spent `in_progress` and tokens used so far
+   * THIS attempt, read back from the `questionnaire-asked` event that recorded them. The continuation
+   * picks its budgets up from here instead of starting fresh — only a genuinely new retry attempt
+   * resets them (spec §9.1). Absent for a questionnaire step, which has no budget policy at all.
+   */
+  readonly elapsedMs?: number;
+  readonly tokensUsed?: number;
 }
 
 /**

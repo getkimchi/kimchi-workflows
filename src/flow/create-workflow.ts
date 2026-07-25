@@ -111,12 +111,25 @@ export interface WorkflowBuilder {
    * Foreach (spec §3.4): run `body` once per item selected by `selector` (pure), with the item as the
    * body's input. `options.concurrency` (default 1) bounds how many items run at once. Output is the
    * array of per-item outputs, in item order — independent of completion order.
+   *
+   * **Author contract (spec §8.3, "non-overlapping side effects"):** at `concurrency > 1`, items run
+   * genuinely concurrently — the engine does not, and cannot, know what a step or its subagent will
+   * touch, so it enforces nothing here. Give each item's body its own files/branches/external
+   * resources; anything shared across items (two agents editing the same file, say) must be sequenced
+   * — either keep `concurrency` at 1, or restructure so the shared resource is touched outside the
+   * fan-out.
    */
   foreach(body: WorkflowDefinition, selector: ForeachSelector, options?: ForeachOptions): WorkflowBuilder;
   /**
    * Parallel (spec §3.5): structural fan-out over independent STEPS — every arm runs concurrently
    * against the same input, bounded only by the workflow ceiling (spec §3.6). Output is an object
    * keyed by each arm's own step name, independent of completion order.
+   *
+   * **Author contract (spec §8.3, "non-overlapping side effects"):** every arm runs genuinely
+   * concurrently — the same rule as `.foreach`'s doc above applies per arm here: no two arms may touch
+   * the same file, branch, or external resource, since the engine has no way to detect or prevent two
+   * concurrent agents rewriting the same working-tree state. Sequence anything that shares state with
+   * `.then()` instead of putting it in the same `.parallel([...])`.
    */
   parallel(arms: readonly StepDefinition[], options?: ParallelOptions): WorkflowBuilder;
   /**

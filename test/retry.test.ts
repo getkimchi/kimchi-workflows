@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import { resumeWorkflow } from "../src/engine/resume-workflow.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunEvent } from "../src/engine/types.ts";
 import { createStep, createWorkflow } from "../src/flow/index.ts";
@@ -100,5 +101,35 @@ describe("retry policy (spec §9)", () => {
     expect(consumerRuns).toBe(0); // body never ran
     const inRetries = (await inStore.loadEvents(inResult.runId)).filter((event) => event.type === "step-retry");
     expect(inRetries).toHaveLength(0); // input violation is not retried
+  });
+
+  it("resets the retry counter on /workflow resume, so a crashed run does not instantly re-crash with an exhausted budget (spec §9.1)", async () => {
+    let attempts = 0;
+    const flaky = createStep({
+      name: "flaky",
+      output: Type.Object({ ok: Type.Boolean() }),
+      retry: { maxRetry: 1 }, // 1 retry after the first = 2 total attempts, PER attempt-sequence
+      run: () => {
+        attempts += 1;
+        if (attempts <= 2) throw new Error(`fail ${attempts}`); // exhausts the FIRST run's whole budget
+        return { ok: true }; // only succeeds on a FRESH attempt-sequence
+      },
+    });
+    const workflow = createWorkflow({ name: "retry-resume" }).then(flaky).commit();
+    const { host, store } = createTestHost();
+
+    const crashed = await runWorkflow(workflow, undefined, host);
+    expect(crashed.status).toBe("crashed");
+    expect(attempts).toBe(2); // maxRetry: 1 -> 2 total attempts, both failed
+
+    // If the counter did NOT reset, resume's first attempt would be counted as "attempt 3 of 2" and
+    // crash without even calling `run()` again. Instead it gets a fresh budget and succeeds.
+    const resumed = await resumeWorkflow(workflow, await store.loadEvents(crashed.runId), host);
+    expect(resumed.status).toBe("completed");
+    expect(attempts).toBe(3);
+
+    const resumedEvents = await store.loadEvents(crashed.runId);
+    const retriesAfterResume = resumedEvents.filter((event) => event.type === "step-retry");
+    expect(retriesAfterResume).toHaveLength(1); // only the FIRST run's retry — resume needed none of its own
   });
 });

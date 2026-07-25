@@ -42,6 +42,7 @@ function keyOf(path: string): StepStateKey {
 export function deriveStepStates(events: readonly RunEvent[]): Map<StepStateKey, StepState> {
   const states = new Map<StepStateKey, StepState>();
   const open = new Set<StepStateKey>(); // keys currently in_progress or blocked
+  const takenArms = new Set<StepStateKey>(); // branch arms that ran, closed by their own node-completed
 
   const set = (path: string, state: StepState): void => {
     const key = keyOf(path);
@@ -73,7 +74,18 @@ export function deriveStepStates(events: readonly RunEvent[]): Map<StepStateKey,
         set(event.path, "blocked");
         break;
       case "branch-arm":
-        if (!event.taken) set(event.path, "skipped");
+        // A skipped arm is terminal immediately. A taken arm opens like any other unit of work and is
+        // closed by its own `node-completed` below — without that pairing a taken arm would read `todo`
+        // for the life of the run, so a completed run would list unfinished-looking work (spec §5.1).
+        if (event.taken) {
+          takenArms.add(keyOf(event.path));
+          set(event.path, "in_progress");
+        } else {
+          set(event.path, "skipped");
+        }
+        break;
+      case "node-completed":
+        if (takenArms.has(keyOf(event.path))) set(event.path, "completed");
         break;
       case "step-cancelled":
         // A blocked sibling abandoned by a drain (spec §9.5): cancelled directly, distinct from the

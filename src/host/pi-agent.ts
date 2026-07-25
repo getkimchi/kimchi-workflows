@@ -14,34 +14,34 @@
  * (spec §8.4). Cross-process history replay (seeding a fresh PI session from a stored conversation)
  * is a real-harness concern deferred to 6b — the deterministic proof of the mechanism is offline.
  *
- * `background` requests (spec §2.2/§9.2, P4 step-0 finding): `ExtensionAPI` — this file's entire PI
- * surface — exposes no subagent-run primitive. There is no `runAgent`/`spawnAgent`/anything that opens
- * an isolated agent conversation and hands back a session; the full method list is `on`, tool/command/
- * shortcut/flag registration, `sendMessage`/`sendUserMessage` (both act on the ONE shared interactive
- * session), `exec` (a generic "run a shell command to completion" helper), and provider/model
- * management. The one REAL mechanism PI gives an extension for isolation is shelling out to a SECOND
- * `pi` CLI process — exactly what PI's own bundled `examples/extensions/subagent/index.ts` does, via
- * `pi --mode json -p --no-session [--model ...] "<prompt>"`, parsing the NDJSON `message_end` events
- * for the final assistant message (see also its `docs/extensions.md` catalog entry: "Spawn sub-agents
- * | registerTool, exec"). That subprocess exits after one reply, so it is inherently one-shot, not
- * resumable — which is exactly why step-runner.ts never steers a `background` step and instead lets
- * invalid output fall back to the repeat policy (spec §9.2).
+ * `background` requests (spec §2.2/§9.2): `ExtensionAPI` exposes no subagent-run primitive of its
+ * own — there is no `runAgent`/`spawnAgent`/anything that opens an isolated agent conversation and
+ * hands back a session. The one REAL mechanism PI gives an extension for isolation is shelling out to
+ * a SECOND `pi` CLI process — exactly what PI's own bundled `examples/extensions/subagent/index.ts`
+ * does, via `pi --mode json -p --no-session [--model ...] "<prompt>"`, parsing the NDJSON
+ * `message_end` events for the final assistant message. That subprocess exits after one reply, so it
+ * is inherently one-shot, not resumable — which is exactly why step-runner.ts never steers a
+ * `background` step and instead lets invalid output fall back to the repeat policy (spec §9.2); it is
+ * also why `getConversation()` below returns `[]` rather than any prior turns — there is nothing to
+ * seed a resume with, and `.commit()` already rejects `background` + `asks` so one is never needed.
  *
- * That subprocess wiring is NOT implemented below: it would duplicate ~200 lines of untested,
- * unverifiable-offline process-spawn/NDJSON-parsing logic (no model/API access in this environment to
- * exercise it against a real `pi` binary), which is a worse failure mode than saying so plainly. This
- * throws loudly instead — naming exactly what is missing — rather than either (a) silently running the
- * step inside the shared interactive session (which would violate the isolation `background` promises:
- * shared history, shared tool config, shared transcript) or (b) returning a session object that quietly
- * pretends to work. Wiring it for real is future work: spawn `pi --mode json -p --no-session` (or
- * shell it via `pi.exec`) per background request, reusing `lastAssistantText`/`lastAssistantUsage`
- * below to parse the child's final `message_end` the same way the interactive path already does.
+ * The spawn itself goes through `pi.exec` — the "run a shell command to completion" helper every
+ * extension already has — rather than PI's own raw `child_process.spawn` (which streams `message_end`
+ * events as they arrive, for a subagent tool's live progress UI). A background workflow step has no
+ * such UI: it only ever needs the FINAL structured output, so awaiting the whole process and parsing
+ * its complete stdout in one pass (`parseNdjsonMessages`, pi-agent-messages.ts) is simpler and just as
+ * correct. `PI_BINARY` is the one seam a live run against a real `pi` install points at; the parsing
+ * itself is pure and covered offline by captured fixture lines (test/pi-agent-messages.test.ts) — the
+ * process spawn is the one part that genuinely cannot be exercised without a real binary.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentRequest, AgentSession, AgentTurn, ConversationMessage } from "../engine/types.ts";
-import { type AgentMessages, lastAssistantText, lastAssistantUsage, type ModelRegistry, resolveModel } from "./pi-agent-messages.ts";
+import { type AgentMessages, lastAssistantText, lastAssistantUsage, type ModelRegistry, parseNdjsonMessages, resolveModel } from "./pi-agent-messages.ts";
 
 export type AgentStarter = (request: AgentRequest) => AgentSession;
+
+/** The `pi` binary a background subagent is spawned from — overridable for pointing at a specific install (e.g. in the live E2E phase). */
+const PI_BINARY = "pi";
 
 /**
  * Create the PI agent bridge. Call once per extension instance (registers one `agent_end` listener),
@@ -61,11 +61,7 @@ export function createPiAgentBridge(pi: ExtensionAPI): (modelRegistry: ModelRegi
 
   return (modelRegistry) => (request) => {
     if (request.background) {
-      throw new Error(
-        `agent step "${request.stepName}" declares background: true, but this PI host has no subagent execution wired ` +
-          "(PI's ExtensionAPI exposes no subagent-run primitive — only a real subprocess-spawn implementation, following " +
-          "PI's own examples/extensions/subagent pattern, would satisfy it; see the comment atop src/host/pi-agent.ts)",
-      );
+      return backgroundSession(pi, modelRegistry, request);
     }
     return {
       async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
@@ -91,5 +87,42 @@ export function createPiAgentBridge(pi: ExtensionAPI): (modelRegistry: ModelRegi
         pending = undefined;
       },
     };
+  };
+}
+
+/**
+ * A background subagent's session (spec §2.2): one `pi --mode json -p --no-session` subprocess per
+ * `sendAndAwaitEnd` call (step-runner.ts calls it exactly once — a background step's repair budget is
+ * forced to 0, spec §9.2 — but nothing here assumes that; a second call just spawns a second process).
+ * Isolated by construction: a fresh CLI invocation gets its own context window and tool loop, with no
+ * access to the parent session's history — `request.history` is always undefined for a background
+ * request (see AgentRequest's doc, engine/types.ts) so there is nothing to seed it with anyway.
+ */
+function backgroundSession(pi: ExtensionAPI, modelRegistry: ModelRegistry, request: AgentRequest): AgentSession {
+  return {
+    async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
+      const args = ["--mode", "json", "-p", "--no-session"];
+      if (request.model) {
+        // Resolved (and rejected) up front, same as the interactive path: a typo'd model should fail
+        // clearly here rather than surface as an opaque nonzero exit from the child process.
+        if (!resolveModel(modelRegistry, request.model)) {
+          throw new Error(`unknown model "${request.model}" (expected provider/modelId)`);
+        }
+        args.push("--model", request.model);
+      }
+      args.push(message);
+
+      const result = await pi.exec(PI_BINARY, args);
+      if (result.code !== 0) {
+        throw new Error(`background subagent step "${request.stepName}" exited with code ${result.code}: ${result.stderr.trim() || "(no stderr)"}`);
+      }
+
+      const messages = parseNdjsonMessages(result.stdout);
+      return { text: lastAssistantText(messages), usage: lastAssistantUsage(messages) };
+    },
+    getConversation(): readonly ConversationMessage[] {
+      return []; // one-shot: never resumed with seeded history (spec §2.2/§10.1 — background can't ask)
+    },
+    dispose(): void {},
   };
 }

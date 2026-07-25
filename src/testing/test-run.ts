@@ -12,8 +12,9 @@
  */
 
 import { parsePath, staticKeyOf } from "../engine/node-path.ts";
-import { resumeWithAnswer, resumeWorkflow } from "../engine/resume-workflow.ts";
+import { pendingQuestionnaires, resumeWithAnswer, resumeWorkflow } from "../engine/resume-workflow.ts";
 import { runWorkflow } from "../engine/run-workflow.ts";
+import { deriveStepStates, type StepState, stepState as stepStateAt } from "../engine/step-state.ts";
 import type { HostPort, RunEvent, RunResult } from "../engine/types.ts";
 import type { Questionnaire } from "../flow/questionnaire.ts";
 import type { WorkflowDefinition } from "../flow/types.ts";
@@ -21,12 +22,20 @@ import { createHostPort } from "../host/host-port.ts";
 import { createMemoryStore } from "../host/memory-store.ts";
 import type { RunStore } from "../host/types.ts";
 import { type AgentDouble, type AgentRecord, type AgentScripts, createAgentDouble } from "./agent-double.ts";
+import { applyStepOverrides, type StepOverrides } from "./step-override.ts";
 
 export interface TestRunOptions {
   /** The workflow's initial input (spec §3.6), validated against its declared input schema. */
   input?: unknown;
   /** What each agent step says, keyed by step name (see `ask`/`reply`/`raw`/`throws`). */
   agents?: AgentScripts;
+  /**
+   * Replace any step, by name, with a stub (spec §13.2/§13.3) — schema-checked against the REAL step's
+   * declared output schema, and rejected at construction if the name does not match a step in the
+   * workflow. A stub that throws drives that step's own retry/crash/resume policy, making an otherwise
+   * unreachable failure path directly testable. See {@link StepOverrides}.
+   */
+  steps?: StepOverrides;
   /** Fixed run id, so event-log assertions are stable. Default: `"test-run"`. */
   runId?: string;
   /** Fixed clock. Default: a frozen epoch, so timestamps never vary between runs. */
@@ -50,6 +59,15 @@ export interface TestRunOptions {
 /** A frozen default clock: deterministic timestamps without the caller having to supply one. */
 const FIXED_NOW = new Date("2026-01-01T00:00:00.000Z");
 
+/** One step CURRENTLY blocked (spec §8.6): what `TestRun.pendingQuestions` exposes, in FIFO ask order. */
+export interface PendingQuestion {
+  /** The step's full node path (spec §8.5) — pass to a future path-addressed `answer()` to disambiguate. */
+  readonly path: string;
+  readonly questionnaire: Questionnaire;
+  /** Set only on a RE-block: why the previously-delivered answers were rejected (spec §2.4). */
+  readonly violation: string | undefined;
+}
+
 /**
  * One observed state of a run, plus the transitions out of it. Wraps the engine's `RunResult` and
  * holds the host/store, so a resume needs no event-log plumbing from the test.
@@ -69,6 +87,12 @@ export interface TestRun {
   readonly events: readonly RunEvent[];
   /** Every `sleep(ms)` the engine requested (retry backoff, time budgets), in order. */
   readonly sleepCalls: readonly number[];
+  /**
+   * Every step currently `blocked` (spec §8.6/§13.4), FIFO by original ask order — what `answer()`
+   * targets by default when more than one is pending. Empty outside concurrency, where at most one
+   * step is ever blocked at a time and `questionnaire`/`path`/`violation` above already cover it.
+   */
+  readonly pendingQuestions: readonly PendingQuestion[];
 
   /** The keys of the pending questionnaire — the questions currently being asked. */
   questionKeys(): string[];
@@ -76,6 +100,12 @@ export interface TestRun {
   eventsOf<T extends RunEvent["type"]>(type: T): Extract<RunEvent, { type: T }>[];
   /** A completed step's (or node's) recorded output, addressed by bare name (top-level) or static node path. */
   stepOutput(name: string): unknown;
+  /**
+   * A step's (or node's) current lifecycle state (spec §5.1/§13.4) — `todo` if never reached — addressed
+   * the same way as {@link stepOutput}: a bare name (top-level) or an explicit static node path
+   * (`until-valid/design`, spec §5.4/§8.5).
+   */
+  stepState(path: string): StepState;
   /** What an agent step's double recorded: messages sent to it, models, sessions opened. */
   agent(stepName: string): AgentRecord;
 
@@ -113,7 +143,13 @@ export async function createTestRun(workflow: WorkflowDefinition, options: TestR
       sleepCalls.push(ms);
     });
 
-  const double = createAgentDouble(workflow.nodes, options.agents ?? {});
+  // Overrides (spec §13.3) are spliced in BEFORE the agent double is built and BEFORE anything runs, so
+  // an overridden agent step is no longer scriptable as one (a stub replaces it entirely) and a bad
+  // override name fails immediately rather than mid-run. Every later transition (`answer`/`resume`)
+  // reuses this SAME rewritten definition, via `context.workflow` below.
+  const overridden = applyStepOverrides(workflow, options.steps);
+
+  const double = createAgentDouble(overridden.nodes, options.agents ?? {});
   const store = createMemoryStore();
   const base = createHostPort(store, { generateRunId: () => runId, now, sleep, startAgent: double.startAgent });
   const canceller = createCanceller(options.cancelAt);
@@ -130,9 +166,9 @@ export async function createTestRun(workflow: WorkflowDefinition, options: TestR
       }
     : base;
 
-  const context: RunContextForTest = { workflow, host, store, double, sleepCalls, canceller };
+  const context: RunContextForTest = { workflow: overridden, host, store, double, sleepCalls, canceller };
 
-  return toTestRun(context, await runWorkflow(workflow, options.input, host, { signal: canceller?.arm() }));
+  return toTestRun(context, await runWorkflow(overridden, options.input, host, { signal: canceller?.arm() }));
 }
 
 /**
@@ -178,6 +214,12 @@ interface RunContextForTest {
 
 async function toTestRun(context: RunContextForTest, result: RunResult): Promise<TestRun> {
   const events = await context.store.loadEvents(result.runId);
+  const states = deriveStepStates(events);
+  const pendingQuestions: PendingQuestion[] = pendingQuestionnaires(events).map((event) => ({
+    path: event.path,
+    questionnaire: event.questionnaire,
+    violation: event.violation,
+  }));
 
   return {
     runId: result.runId,
@@ -189,6 +231,7 @@ async function toTestRun(context: RunContextForTest, result: RunResult): Promise
     violation: result.violation,
     events,
     sleepCalls: context.sleepCalls,
+    pendingQuestions,
 
     questionKeys() {
       return (result.questionnaire?.questions ?? []).map((question) => question.key);
@@ -207,6 +250,10 @@ async function toTestRun(context: RunContextForTest, result: RunResult): Promise
         if ((event.type === "step-completed" || event.type === "node-completed") && staticKeyOf(parsePath(event.path)) === name) output = event.output;
       }
       return output;
+    },
+
+    stepState(path: string): StepState {
+      return stepStateAt(states, path);
     },
 
     agent(stepName: string): AgentRecord {

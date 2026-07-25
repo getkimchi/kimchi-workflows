@@ -25,26 +25,27 @@ interface BudgetedStep {
 /**
  * How an agent step's conversation begins: a `fresh` run builds the prompt from input+context; an
  * `answer` resume (spec §8.4) seeds the session with the blocked conversation and replays the user's
- * structured answers as the next turn.
+ * structured answers as the next turn. `elapsedMs`/`tokensUsed` (spec §9.4) are this attempt's budget
+ * totals as of the block being answered — see `runAgentStep`'s carry-forward.
  */
-export type AgentEntry = { kind: "fresh" } | { kind: "answer"; answers: Record<string, unknown>; conversation: readonly unknown[] };
+export type AgentEntry = { kind: "fresh" } | { kind: "answer"; answers: Record<string, unknown>; conversation: readonly unknown[]; elapsedMs?: number; tokensUsed?: number };
 
 /**
  * Outcome of a single attempt:
  *  - `ok`        — produced schema-valid output;
- *  - `retryable` — a failure the retry policy may re-attempt (thrown error / invalid function output /
- *                  agent transport error / budget exceeded, spec §9.3; also a `background` step's
- *                  invalid output, which has no steering budget to exhaust first, spec §9.2);
- *  - `fatal`     — a non-retryable failure (a non-background agent whose output stays invalid after
- *                  steering);
- *  - `blocked`    — a Q&A step emitted a `{questions}` batch (spec §10);
+ *  - `retryable` — a failure the retry policy may re-attempt: thrown error / invalid function output /
+ *                  agent transport error / budget exceeded (spec §9.3), OR an agent's output that is
+ *                  STILL invalid once its in-session repair budget is exhausted (spec §9.2 — "only when
+ *                  repairs are exhausted does the attempt fail and the repeat policy apply", so this is
+ *                  never treated as a dead end in its own right, background step or not);
+ *  - `blocked`    — a Q&A step emitted a `{questions}` batch (spec §10); `elapsedMs`/`tokensUsed`
+ *                  (agent steps only) are the running budget totals at the moment of blocking (§9.4);
  *  - `cancelled` — the abort signal fired.
  */
 type AttemptResult =
   | { kind: "ok"; output: unknown }
   | { kind: "retryable"; reason: RetryReason; error: string }
-  | { kind: "fatal"; error: string }
-  | { kind: "blocked"; questionnaire: Questionnaire; conversation: readonly unknown[] }
+  | { kind: "blocked"; questionnaire: Questionnaire; conversation: readonly unknown[]; elapsedMs?: number; tokensUsed?: number }
   | { kind: "cancelled" };
 
 /** Run a function step under its retry + time budget (spec §9). Emits `step-retry`; the caller emits step lifecycle. */
@@ -78,7 +79,22 @@ export async function runAgentStep(
   entry: AgentEntry,
 ): Promise<StepOutcome> {
   const ctx = createRunContext(state, parentPath);
-  return retryLoop(step, host, state, signal, path, (sig) => runAgentSession(step, input, host, ctx, state, sig, path, entry));
+
+  // Budget carry across a block/answer boundary (spec §9.4): an answer-continuation is the SAME attempt
+  // resuming, not a fresh one, so the wall time and tokens spent before the block carry into THIS
+  // call's first attempt only. If that attempt itself then needs an outer retry (a thrown error), that
+  // IS a genuinely fresh attempt and both budgets restart at zero (spec §9.1) — hence the one-shot
+  // `carry` consumed by the closure below rather than threaded permanently through every retry.
+  let carry = entry.kind === "answer" ? { elapsedMs: entry.elapsedMs ?? 0, tokensUsed: entry.tokensUsed ?? 0 } : undefined;
+  const carryOverMs = carry?.elapsedMs ?? 0;
+
+  const attempt = (sig: AbortSignal): Promise<AttemptResult> => {
+    const startingTokens = carry?.tokensUsed ?? 0;
+    carry = undefined;
+    return runAgentSession(step, input, host, ctx, state, sig, path, entry, startingTokens);
+  };
+
+  return retryLoop(step, host, state, signal, path, attempt, carryOverMs);
 }
 
 /** Shared retry loop (spec §9): wrap each attempt in the time budget, re-attempt `retryable` failures within budget. */
@@ -89,6 +105,7 @@ async function retryLoop(
   runSignal: AbortSignal,
   path: string,
   attempt: (signal: AbortSignal) => Promise<AttemptResult>,
+  carryOverMs = 0,
 ): Promise<StepOutcome> {
   const totalAttempts = Math.max(1, (step.retry?.maxRetry ?? 0) + 1);
   const backoffMs = step.retry?.backoffMs ?? 0;
@@ -97,11 +114,14 @@ async function retryLoop(
   for (let n = 1; n <= totalAttempts; n++) {
     if (runSignal.aborted) return { kind: "cancelled" };
 
-    const result = await withTimeBudget(step, host, runSignal, attempt);
+    // The budget carry (spec §9.4) applies only to this loop's FIRST attempt — the one continuing an
+    // interrupted block. A subsequent retry (n > 1) is a fresh attempt and gets a clean budget.
+    const result = await withTimeBudget(step, host, runSignal, attempt, n === 1 ? carryOverMs : 0);
     if (result.kind === "cancelled") return { kind: "cancelled" };
     if (result.kind === "ok") return { kind: "ok", output: result.output };
-    if (result.kind === "blocked") return { kind: "blocked", questionnaire: result.questionnaire, conversation: result.conversation };
-    if (result.kind === "fatal") return { kind: "crashed", error: result.error };
+    if (result.kind === "blocked") {
+      return { kind: "blocked", questionnaire: result.questionnaire, conversation: result.conversation, elapsedMs: result.elapsedMs, tokensUsed: result.tokensUsed };
+    }
 
     // Retryable failure (thrown / invalid output / budget exceeded): re-attempt if budget remains.
     lastError = result.error;
@@ -113,19 +133,40 @@ async function retryLoop(
 }
 
 /**
- * Enforce a step's wall-time budget (spec §9.3): race the attempt against a `host.sleep` timer whose
- * signal is combined with the run's cancel signal. On timeout, abort the step (cooperatively) and
+ * Enforce a step's wall-time budget (spec §9.3/§9.4): race the attempt against a `host.sleep` timer
+ * whose signal is combined with the run's cancel signal. On timeout, abort the step (cooperatively) and
  * fail with a retryable `budget-exceeded`. Without a budget, the step just gets the run signal.
+ *
+ * `consumedMs` is wall time already spent `in_progress` earlier THIS attempt (spec §9.4: carried across
+ * a block/answer boundary — zero for a fresh attempt). The timer is shortened by it, and if it has
+ * already exhausted the budget the attempt fails immediately without ever starting — a Q&A step that
+ * blocked right at its limit does not get a bonus fresh window just because a human answered it. On a
+ * successful `blocked` outcome (the attempt suspended again rather than timing out), the wall time this
+ * call actually spent is folded into the running total and returned, so the NEXT continuation knows how
+ * much budget remains; time spent blocked in between is excluded by construction — nothing samples the
+ * clock while there is no code running.
  */
-async function withTimeBudget(step: BudgetedStep, host: HostPort, runSignal: AbortSignal, attempt: (signal: AbortSignal) => Promise<AttemptResult>): Promise<AttemptResult> {
+async function withTimeBudget(
+  step: BudgetedStep,
+  host: HostPort,
+  runSignal: AbortSignal,
+  attempt: (signal: AbortSignal) => Promise<AttemptResult>,
+  consumedMs = 0,
+): Promise<AttemptResult> {
   if (step.maxDurationMs === undefined) {
     return attempt(runSignal);
   }
 
+  const remainingMs = step.maxDurationMs - consumedMs;
+  if (remainingMs <= 0) {
+    return { kind: "retryable", reason: "budget-exceeded", error: `step "${step.name}" exceeded its ${step.maxDurationMs}ms time budget` };
+  }
+
+  const startedAt = host.now().getTime();
   const timeout = new AbortController();
   const cleanup = new AbortController();
   const attemptPromise = attempt(anySignal([runSignal, timeout.signal]));
-  const timerPromise = host.sleep(step.maxDurationMs, cleanup.signal).then((): "timeout" => "timeout");
+  const timerPromise = host.sleep(remainingMs, cleanup.signal).then((): "timeout" => "timeout");
 
   const outcome = await Promise.race([attemptPromise, timerPromise]);
   if (outcome === "timeout") {
@@ -134,6 +175,10 @@ async function withTimeBudget(step: BudgetedStep, host: HostPort, runSignal: Abo
     return { kind: "retryable", reason: "budget-exceeded", error: `step "${step.name}" exceeded its ${step.maxDurationMs}ms time budget` };
   }
   cleanup.abort(); // the step finished first — cancel the timer so it does not linger
+
+  if (outcome.kind === "blocked") {
+    return { ...outcome, elapsedMs: consumedMs + (host.now().getTime() - startedAt) };
+  }
   return outcome;
 }
 
@@ -159,14 +204,20 @@ async function runFunctionAttempt(step: FunctionStep, input: unknown, ctx: RunCo
 /**
  * One agent attempt: open a session (seeded with `entry` history), send the first message (prompt or
  * answer), and steer within the same session on invalid output up to `maxOutputRepairs` (spec §9.2).
- * Token usage is summed across turns; exceeding `maxTokens` → retryable `budget-exceeded` (§9.3). A
- * Q&A `{questions}` → `blocked` (§10); steering exhausted → `fatal`; transport error → `retryable`.
+ * Token usage is summed across turns, starting from `startingTokens` (spec §9.4: carried forward across
+ * an answer-continuation of the same attempt — zero for a fresh one); exceeding `maxTokens` → retryable
+ * `budget-exceeded` (§9.3). A Q&A `{questions}` → `blocked` (§10); transport error → `retryable`.
  *
  * When `asks`, the framework owns the questionnaire schema: the reply union is `{result}|{questions}`
  * and the asking protocol is auto-injected into the fresh prompt (so the author's prompt is task-only).
  *
- * When `background`, there is no steering budget at all (§9.2): invalid output → `retryable`, not
- * `fatal` — falling back to the repeat policy is the only recourse a one-shot subagent has.
+ * **Exhausted repairs are `retryable`, not fatal (spec §9.2/§9.3).** "Only when repairs are exhausted
+ * does the attempt FAIL and the repeat policy apply" — a fresh session (a genuine retry, §9.1) can
+ * succeed where a poisoned context could not, so this never short-circuits the outer retry policy.
+ * `maxRetry` defaults to 0, so by default the crash still happens on the very next loop turn — only an
+ * author who declared `retry` sees a different outcome. A `background` step has no repair budget at all
+ * (§9.2: forced to 0 below, since a one-shot subagent cannot be steered) — the same `retryable` outcome
+ * covers it uniformly, rather than needing a special case.
  */
 async function runAgentSession(
   step: AgentStep,
@@ -177,6 +228,7 @@ async function runAgentSession(
   signal: AbortSignal,
   path: string,
   entry: AgentEntry,
+  startingTokens = 0,
 ): Promise<AttemptResult> {
   const model = step.model ?? state.defaultModel; // step → workflow default; host applies the session default when undefined (spec §9.5)
   // A `background` step is a one-shot PI subagent (spec §2.2/§9.2, see src/host/pi-agent.ts): there is
@@ -190,7 +242,7 @@ async function runAgentSession(
   try {
     let message = entry.kind === "answer" ? formatAnswers(entry.answers) : freshPrompt(step, input, ctx);
     let lastViolation = "";
-    let totalTokens = 0;
+    let totalTokens = startingTokens;
 
     for (let repair = 0; repair <= maxRepairs; repair++) {
       if (signal.aborted) return { kind: "cancelled" };
@@ -205,7 +257,7 @@ async function runAgentSession(
 
       if (signal.aborted) return { kind: "cancelled" };
 
-      // Token budget (spec §9.3): accumulate usage across prompt + steering + answer turns.
+      // Token budget (spec §9.3/§9.4): accumulate usage across prompt + steering + answer turns.
       totalTokens += turn.usage?.totalTokens ?? 0;
       if (step.maxTokens !== undefined && totalTokens > step.maxTokens) {
         return { kind: "retryable", reason: "budget-exceeded", error: `step "${step.name}" exceeded its ${step.maxTokens}-token budget (used ${totalTokens})` };
@@ -214,7 +266,7 @@ async function runAgentSession(
       const check = checkAgentReply(step, turn.text);
       if (check.ok) {
         if (check.kind === "questions") {
-          return { kind: "blocked", questionnaire: check.questions, conversation: session.getConversation() };
+          return { kind: "blocked", questionnaire: check.questions, conversation: session.getConversation(), tokensUsed: totalTokens };
         }
         return { kind: "ok", output: check.value };
       }
@@ -226,16 +278,12 @@ async function runAgentSession(
         continue;
       }
 
-      const error = `step "${step.name}" output: ${lastViolation}`;
-      // Non-background (unchanged, spec §9.2): repairs were attempted and exhausted (or the author set
-      // maxOutputRepairs: 0) — a non-retryable failure; the step crashes without an outer retry.
-      // Background: there was never a repair to exhaust — an isolated one-shot subagent cannot be
-      // steered at all — so invalid output is NOT fatal here; it falls back to the repeat policy
-      // (spec §9.2), the same as a thrown transport error would.
-      return step.background ? { kind: "retryable", reason: "invalid-output", error } : { kind: "fatal", error };
+      // Repairs exhausted (or the author set maxOutputRepairs: 0): the attempt fails and falls back to
+      // the repeat policy (spec §9.2/§9.3) — never a dead end in its own right.
+      return { kind: "retryable", reason: "invalid-output", error: `step "${step.name}" output: ${lastViolation}` };
     }
 
-    return { kind: "fatal", error: `step "${step.name}" output: ${lastViolation}` };
+    return { kind: "retryable", reason: "invalid-output", error: `step "${step.name}" output: ${lastViolation}` };
   } finally {
     session.dispose();
   }

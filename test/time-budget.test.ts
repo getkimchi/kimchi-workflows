@@ -1,8 +1,9 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import { resumeWithAnswer } from "../src/engine/resume-workflow.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
-import type { RunEvent } from "../src/engine/types.ts";
-import { createStep, createWorkflow } from "../src/flow/index.ts";
+import type { AgentSession, RunEvent } from "../src/engine/types.ts";
+import { createAgentStep, createStep, createWorkflow } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 import { createManualClock } from "./manual-clock.ts";
 
@@ -71,6 +72,81 @@ describe("time budget (Phase 7a, spec §9.3)", () => {
 
     expect(result.status).toBe("completed");
     expect(result.output).toEqual({ ok: true });
+  });
+
+  it("excludes blocked time from the budget (spec §9.4): a human taking a long time to answer cannot crash the run", async () => {
+    const clock = createManualClock();
+    const questionnaire = { questions: [{ key: "x", header: "X", question: "X?", kind: "text" as const }] };
+    const step = createAgentStep({ name: "asker", output: okSchema, asks: true, maxDurationMs: 1000, prompt: () => "go" });
+    const workflow = createWorkflow({ name: "time-continuation-slow-human" }).then(step).commit();
+
+    let call = 0;
+    const startAgent = (): AgentSession => {
+      const index = call++;
+      return {
+        async sendAndAwaitEnd() {
+          if (index === 0) return { text: JSON.stringify({ questions: questionnaire }) };
+          return { text: JSON.stringify({ result: { ok: true } }) };
+        },
+        getConversation: () => [],
+        dispose: () => {},
+      };
+    };
+    // A single fixed instant while the run is actively executing — it is the multi-day GAP between
+    // blocking and resuming (below), never sampled by anything, that stands in for the slow human.
+    let now = new Date("2026-01-01T00:00:00.000Z");
+    const { host, store } = createTestHost({ startAgent, sleep: clock.sleep, now: () => now });
+
+    const blocked = await runWorkflow(workflow, undefined, host);
+    expect(blocked.status).toBe("blocked");
+
+    // A week passes while blocked — nothing samples the clock in that gap, so no time is ever charged
+    // to the budget for it (spec §9.4).
+    now = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const events = await store.loadEvents(blocked.runId);
+    const result = await resumeWithAnswer(workflow, events, { x: "hi" }, host);
+
+    expect(result.status).toBe("completed"); // the week spent blocked never counted against the 1000ms budget
+  });
+
+  it("carries wall-clock time spent in_progress across a block/answer continuation cumulatively (spec §9.4)", async () => {
+    const clock = createManualClock();
+    const questionnaire = { questions: [{ key: "x", header: "X", question: "X?", kind: "text" as const }] };
+    const step = createAgentStep({ name: "asker", output: okSchema, asks: true, maxDurationMs: 1000, prompt: () => "go" });
+    const workflow = createWorkflow({ name: "time-continuation-cumulative" }).then(step).commit();
+
+    let ms = 0;
+    let secondSessionCalls = 0;
+    let call = 0;
+    const startAgent = (): AgentSession => {
+      const index = call++;
+      return {
+        async sendAndAwaitEnd() {
+          if (index === 0) {
+            ms += 1000; // the WHOLE budget spent in_progress before it ever asks
+            return { text: JSON.stringify({ questions: questionnaire }) };
+          }
+          secondSessionCalls += 1;
+          return { text: JSON.stringify({ result: { ok: true } }) };
+        },
+        getConversation: () => [],
+        dispose: () => {},
+      };
+    };
+    const { host, store } = createTestHost({ startAgent, sleep: clock.sleep, now: () => new Date(ms) });
+
+    const blocked = await runWorkflow(workflow, undefined, host);
+    expect(blocked.status).toBe("blocked");
+
+    const events = await store.loadEvents(blocked.runId);
+    const asked = events.find((event): event is Extract<RunEvent, { type: "questionnaire-asked" }> => event.type === "questionnaire-asked");
+    expect(asked?.elapsedMs).toBe(1000); // the whole budget already recorded as spent, at the moment of blocking
+
+    const result = await resumeWithAnswer(workflow, events, { x: "hi" }, host);
+
+    expect(result.status).toBe("crashed");
+    expect(result.error).toMatch(/1000ms time budget/);
+    expect(secondSessionCalls).toBe(0); // rejected before even starting a new attempt — no bonus fresh window
   });
 
   it("a run-level cancel aborts a budgeted step before its timer fires (cancel, not budget-exceeded)", async () => {

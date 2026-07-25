@@ -88,6 +88,43 @@ describe("output steering (Phase 4b, spec §9.2)", () => {
     expect(steers[0]?.violation).toMatch(/not valid JSON/);
   });
 
+  it("falls back to the repeat policy once repairs are exhausted, when the step declares retry (spec §9.2/§9.3)", async () => {
+    // Session 1: prompt + 1 repair, BOTH invalid -> repairs exhausted -> retryable -> outer retry starts
+    // a FRESH session. Session 2 (a poisoned context could not fix itself, but a clean one can): valid
+    // immediately. Carried-over item: today this crashed straight from "fatal" without ever consulting
+    // maxRetry; the spec is explicit that only exhausted repairs make the attempt fail, and THEN the
+    // repeat policy applies (§9.2's "Only when repairs are exhausted does the attempt fail and the
+    // repeat policy apply").
+    const step = agentStepWith({ maxOutputRepairs: 1, retry: { maxRetry: 1 } }); // 1 retry after the first = 2 total attempts
+    const workflow = createWorkflow({ name: "steer-then-retry" }).then(step).commit();
+    const agent = scriptedAgent([['{"summary":"x"}', '{"summary":"y"}'], [valid]]);
+    const { host, store } = createTestHost({ startAgent: agent.startAgent });
+
+    const result = await runWorkflow(workflow, undefined, host);
+
+    expect(result.status).toBe("completed");
+    expect(result.output).toEqual({ summary: "ok", keywords: ["k"] });
+    expect(agent.opened).toBe(2); // exhausted repairs -> a fresh session (outer retry), not an immediate crash
+
+    const events = await store.loadEvents(result.runId);
+    expect(steerEvents(events)).toHaveLength(1); // one repair attempted in session 1, then exhausted
+    const retries = events.filter((event): event is Extract<RunEvent, { type: "step-retry" }> => event.type === "step-retry");
+    expect(retries).toMatchObject([{ path: "summarize", attempt: 1, reason: "invalid-output" }]);
+  });
+
+  it("with the default maxRetry: 0, exhausted repairs still crash on the very next turn (behaviour unchanged for authors who set nothing)", async () => {
+    const workflow = createWorkflow({ name: "steer-exhaust-default" })
+      .then(agentStepWith({ maxOutputRepairs: 1 })) // no retry declared -> maxRetry defaults to 0
+      .commit();
+    const agent = scriptedAgent([['{"summary":"x"}', '{"summary":"y"}']]);
+    const { host } = createTestHost({ startAgent: agent.startAgent });
+
+    const result = await runWorkflow(workflow, undefined, host);
+
+    expect(result.status).toBe("crashed");
+    expect(agent.opened).toBe(1); // no outer retry: default maxRetry 0 means totalAttempts is 1
+  });
+
   it("keeps steering (in-session) and transport-retry (fresh session) as independent budgets", async () => {
     // Session 1: throws (transport) -> outer retry. Session 2: invalid then valid -> one steer.
     const step = agentStepWith({ maxOutputRepairs: 2, retry: { maxRetry: 1 } }); // 1 retry after the first = 2 total attempts

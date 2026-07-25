@@ -124,7 +124,12 @@ export async function resumeWithAnswer(
 
   await host.emit({ type: "answers-provided", runId, path: pending.path, answers, at: iso(host) });
 
-  const reentry: Reentry = { path: parsePath(pending.path), answer: { answers, conversation: pending.conversation } };
+  // Budget carry (spec §9.4): the totals recorded on the block being answered, so the continuation's
+  // wall-time/token budgets pick up where the interrupted attempt left off (execute.ts/step-runner.ts).
+  const reentry: Reentry = {
+    path: parsePath(pending.path),
+    answer: { answers, conversation: pending.conversation, elapsedMs: pending.elapsedMs, tokensUsed: pending.tokensUsed },
+  };
 
   return execute(workflow, host, { runId, initialInput, stepOutputs, previousOutput: initialInput, startIndex: 0, foreachItemHistory, reentry, pendingBlocks }, options.signal);
 }
@@ -188,10 +193,11 @@ async function checkDrift(
   runId: string,
   host: HostPort,
 ): Promise<RunResult | undefined> {
-  const states = deriveStepStates(priorEvents);
-  for (const [staticKey, state] of states) {
-    if (state !== "completed") continue;
-
+  // Driven by `step-completed` events, NOT by derived step states: the state map is keyed by node path
+  // and legitimately holds entries for things that are not steps (a taken branch arm, spec §5.1), which
+  // would resolve to no step here and be misreported as drift. A `step-completed` event, by contrast,
+  // names a step by construction — and carries the very output this check re-validates.
+  for (const staticKey of completedStepKeys(priorEvents)) {
     const step = resolveStepAtStaticPath(
       workflow.nodes,
       parsePath(staticKey).map((segment) => segment.name),
@@ -212,6 +218,26 @@ async function checkDrift(
     }
   }
   return undefined;
+}
+
+/**
+ * Static keys of steps that completed and were not subsequently re-opened (a later iteration re-running
+ * the same step, a retry, an answer continuation). Order follows first completion, so a drift refusal
+ * names the earliest offending step rather than an arbitrary one.
+ */
+function completedStepKeys(priorEvents: readonly RunEvent[]): string[] {
+  const completed = new Set<string>();
+  const ordered: string[] = [];
+  for (const event of priorEvents) {
+    if (event.type === "step-completed") {
+      const key = staticKeyOf(parsePath(event.path));
+      if (!completed.has(key)) ordered.push(key);
+      completed.add(key);
+    } else if (event.type === "step-started" || event.type === "questionnaire-asked") {
+      completed.delete(staticKeyOf(parsePath(event.path)));
+    }
+  }
+  return ordered.filter((key) => completed.has(key));
 }
 
 /** Resolve the step definition at a STATIC path (bare names only — indices already stripped by the caller) in the current tree, or undefined. */

@@ -103,6 +103,14 @@ export async function runForeachNode(
   const ctx = createRunContext(state, parentPath);
   const items = node.selector(ctx); // pure, deterministic — a resume re-runs it to the same array (spec §3.4)
 
+  // A non-array selector result is a deterministic wiring failure (spec §3.4), exactly like an
+  // input-schema violation (§3.8): crash immediately, before any lifecycle event, rather than treating
+  // it as zero items — `.length` on a non-array is `undefined`, which a naive bound would silently
+  // treat as an empty foreach instead of the wiring bug it actually is.
+  if (!Array.isArray(items)) {
+    return { kind: "crashed", error: `foreach "${node.name}" selector did not return an array (spec §3.4)`, path: formatPath(foreachPath) };
+  }
+
   if (!reentry) {
     await host.emit({ type: "foreach-started", runId: state.runId, path: formatPath(foreachPath), count: items.length, at: iso(host) });
   }

@@ -100,6 +100,27 @@ describe("foreach node (spec §3.4, sequential)", () => {
     expect(order).toEqual(["start-1", "end-1", "start-2", "end-2", "start-3", "end-3"]);
   });
 
+  it("crashes when the selector returns a non-array value, rather than silently treating it as empty (spec §3.4)", async () => {
+    const appendLog: number[] = [];
+    const body = createWorkflow({ name: "item-body" })
+      .then(createStep({ name: "process", output: Type.Object({ ok: Type.Boolean() }), run: () => ({ ok: true }) }))
+      .commit();
+    // A wiring bug: the selector returns an object instead of an array. `.length` on it is `undefined`,
+    // which a naive `for (i = 0; i < items.length; ...)` bound would silently treat as zero items.
+    const badSelector = () => ({ not: "an array" }) as unknown as readonly unknown[];
+    const workflow = createWorkflow({ name: "foreach-non-array" }).foreach(body, badSelector, { name: "bad-each" }).commit();
+    const { host, store } = createTestHost();
+
+    const result = await runWorkflow(workflow, undefined, host);
+
+    expect(result.status).toBe("crashed");
+    expect(result.error).toMatch(/bad-each/);
+    expect(result.error).toMatch(/array/);
+    expect(appendLog).toEqual([]); // the body never ran
+    const events = await store.loadEvents(result.runId);
+    expect(events.some((e) => e.type === "foreach-started")).toBe(false); // never validly started
+  });
+
   it("runs the batch example end-to-end", async () => {
     const { host } = createTestHost();
     const result = await runWorkflow(batchWorkflow, undefined, host);

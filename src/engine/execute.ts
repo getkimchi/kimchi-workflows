@@ -239,6 +239,8 @@ async function runStepNodeBody(
         kind: "answer",
         answers: reentry.answer.answers,
         conversation: reentry.answer.conversation,
+        elapsedMs: reentry.answer.elapsedMs,
+        tokensUsed: reentry.answer.tokensUsed,
       });
       return finishStep(formattedPath, host, state, outcome);
     }
@@ -315,6 +317,8 @@ async function finishStep(path: string, host: HostPort, state: RunState, outcome
         questionnaire: outcome.questionnaire,
         conversation: outcome.conversation,
         violation: outcome.violation,
+        elapsedMs: outcome.elapsedMs,
+        tokensUsed: outcome.tokensUsed,
         at: iso(host),
       });
       return { kind: "blocked", path, questionnaire: outcome.questionnaire, conversation: outcome.conversation, violation: outcome.violation };

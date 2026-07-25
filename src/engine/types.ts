@@ -68,8 +68,24 @@ export type RunEvent =
   // nested workflow, spec §8.5), not just top-level. `conversation` is the opaque agent history needed
   // to resume the SAME loop (empty for a questionnaire step). `violation` is set only on a RE-block of
   // a questionnaire step: why the delivered answers were rejected (absent on a first ask, and on an
-  // agent's ask — which is an intentional question, not a rejection).
-  | { type: "questionnaire-asked"; runId: string; path: string; questionnaire: Questionnaire; conversation: readonly ConversationMessage[]; violation?: string; at: string }
+  // agent's ask — which is an intentional question, not a rejection). `elapsedMs`/`tokensUsed` are the
+  // per-step budget clock's running totals AT THE MOMENT OF BLOCKING (spec §9.4, agent Q&A steps only):
+  // wall time actually spent `in_progress` so far this attempt (blocked spans excluded by construction —
+  // nothing samples the clock while there is no code running) and tokens summed across this attempt's
+  // turns. An answer-continuation reads these back to carry the budgets forward instead of resetting
+  // them, since only a genuinely fresh retry attempt resets a step's budgets (spec §9.1). Absent for a
+  // questionnaire step, which has no retry/budget policy at all.
+  | {
+      type: "questionnaire-asked";
+      runId: string;
+      path: string;
+      questionnaire: Questionnaire;
+      conversation: readonly ConversationMessage[];
+      violation?: string;
+      elapsedMs?: number;
+      tokensUsed?: number;
+      at: string;
+    }
   // The user's structured answers (question `key` → value); resume delivers them back (spec §8.4).
   | { type: "answers-provided"; runId: string; path: string; answers: Record<string, unknown>; at: string }
   // Drain-then-crash (spec §9.5): a SIBLING step crashed elsewhere in the same concurrent construct
