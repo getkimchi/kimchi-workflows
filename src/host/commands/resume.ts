@@ -14,7 +14,7 @@ import { resumeAction } from "../resume-router.ts";
 import type { RunLock } from "../run-lock.ts";
 import { summarizeRun } from "../summarize-run.ts";
 import type { RunStore } from "../types.ts";
-import { handleAttendedQuestionnaire, pendingQuestionnaire } from "./attended.ts";
+import { askOf, handleAttendedQuestionnaire, pendingAsk } from "./attended.ts";
 import { type CommandCtx, describe, notifier, notifyResult, rejectIfBusy, runGuarded, type StartAgent } from "./context.ts";
 
 export async function handleResume(ctx: CommandCtx, store: RunStore, guard: RunLock, startAgent: StartAgent, runId: string): Promise<void> {
@@ -38,7 +38,7 @@ export async function handleResume(ctx: CommandCtx, store: RunStore, guard: RunL
   if (action.kind === "error") return void ctx.ui.notify(`workflow: cannot resume run ${runId}: ${action.reason}.`, "warning");
 
   if (action.kind === "answer") {
-    await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, meta.workflowFilePath, startAgent, runId, pendingQuestionnaire(events));
+    await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, meta.workflowFilePath, startAgent, runId, pendingAsk(events));
     return;
   }
 
@@ -50,7 +50,7 @@ export async function handleResume(ctx: CommandCtx, store: RunStore, guard: RunL
   if (!result) return; // guard was busy (race) — already notified
 
   if (result.status === "blocked") {
-    await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, meta.workflowFilePath, startAgent, runId, result.questionnaire);
+    await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, meta.workflowFilePath, startAgent, runId, askOf(result));
   } else {
     notifyResult(ctx, workflow.name, result);
   }
