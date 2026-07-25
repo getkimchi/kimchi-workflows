@@ -11,7 +11,7 @@
  */
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { Question, Questionnaire } from "../flow/questionnaire.ts";
-import { assembleAnswers, collectSingle, collectText, optionLabel, orderedOptions, type Picker, questionTitle, type RawSelection } from "./answer-assembly.ts";
+import { collectQuestionnaire, optionLabel, orderedOptions, type Picker, questionTitle, type RawSelection } from "./answer-assembly.ts";
 
 /** The subset of `ctx.ui` the fallback needs — narrowed so tests can supply a scripted stand-in. */
 export type DialogUI = Pick<ExtensionUIContext, "select" | "confirm" | "input">;
@@ -29,30 +29,11 @@ function dialogPicker(ui: DialogUI): Picker {
  * `question.key`. Returns `undefined` if the user dismisses any dialog: dismiss ≠ cancel, so the
  * caller keeps the run blocked (spec §10.2).
  */
-export async function collectViaDialogs(ui: DialogUI, questionnaire: Questionnaire): Promise<Record<string, unknown> | undefined> {
-  const picker = dialogPicker(ui);
-  const raw: Record<string, RawSelection> = {};
-  for (const question of questionnaire.questions) {
-    const selection = await collectQuestion(ui, picker, question);
-    if (selection === undefined) return undefined; // dismissed → leave the run blocked
-    raw[question.key] = selection;
-  }
-  return assembleAnswers(questionnaire, raw);
+export function collectViaDialogs(ui: DialogUI, questionnaire: Questionnaire): Promise<Record<string, unknown> | undefined> {
+  return collectQuestionnaire(questionnaire, dialogPicker(ui), (question) => collectMulti(ui, question));
 }
 
-function collectQuestion(ui: DialogUI, picker: Picker, question: Question): Promise<RawSelection | undefined> {
-  switch (question.kind) {
-    case "single":
-      return collectSingle(picker, question);
-    case "multi":
-      return collectMulti(ui, question);
-    case "text":
-    case "chat":
-      return collectText(picker, question);
-  }
-}
-
-/** Multi-choice is genuinely different from single/text: one yes/no confirm per option. */
+/** Multi-choice is the one question kind the shared driver cannot serve over `Picker`: one yes/no confirm per option. */
 async function collectMulti(ui: DialogUI, question: Question): Promise<RawSelection> {
   const chosen: string[] = [];
   for (const option of orderedOptions(question)) {
