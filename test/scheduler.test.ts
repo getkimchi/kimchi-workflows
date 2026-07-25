@@ -41,10 +41,9 @@ describe("createConcurrencyGate (spec §3.6): a run-wide semaphore", () => {
   });
 });
 
-describe("runConcurrent (spec §3.4/§3.5): bounded pool over the shared gate", () => {
+describe("runConcurrent (spec §3.4/§3.5): a construct's own bounded lane pool", () => {
   it("never runs more than `localLimit` items at once, and results land at each item's own index regardless of completion order", async () => {
     const barrier = createStepBarrier<number>();
-    const gate = createConcurrencyGate(10); // ceiling wide open — localLimit is the binding constraint here
     let current = 0;
     let maxConcurrent = 0;
 
@@ -57,7 +56,6 @@ describe("runConcurrent (spec §3.4/§3.5): bounded pool over the shared gate", 
         current -= 1;
         return item * 10;
       },
-      gate,
       2, // local cap: at most 2 in flight
       () => false,
     );
@@ -83,43 +81,8 @@ describe("runConcurrent (spec §3.4/§3.5): bounded pool over the shared gate", 
     expect(maxConcurrent).toBe(2);
   });
 
-  it("respects the shared run-wide gate even when localLimit alone would allow more", async () => {
-    const barrier = createStepBarrier<number>();
-    const gate = createConcurrencyGate(1); // ceiling is the binding constraint here, not localLimit
-    let current = 0;
-    let maxConcurrent = 0;
-
-    const promise = runConcurrent(
-      [0, 1, 2],
-      async (item) => {
-        current += 1;
-        maxConcurrent = Math.max(maxConcurrent, current);
-        await barrier.enter(item);
-        current -= 1;
-        return item;
-      },
-      gate,
-      3, // local cap allows all 3 — the gate (capacity 1) is what actually throttles
-      () => false,
-    );
-
-    await barrier.waitFor(0);
-    expect(barrier.entered).toEqual(new Set([0]));
-    barrier.release(0);
-    await barrier.waitFor(1);
-    expect(barrier.entered).toEqual(new Set([1]));
-    barrier.release(1);
-    await barrier.waitFor(2);
-    expect(barrier.entered).toEqual(new Set([2]));
-    barrier.release(2);
-
-    await promise;
-    expect(maxConcurrent).toBe(1);
-  });
-
   it("drain-then-crash (spec §9.5): once a result asks to stop, no further items start, but already-running ones finish", async () => {
     const barrier = createStepBarrier<number>();
-    const gate = createConcurrencyGate(10);
     const started: number[] = [];
 
     const promise = runConcurrent(
@@ -129,8 +92,7 @@ describe("runConcurrent (spec §3.4/§3.5): bounded pool over the shared gate", 
         await barrier.enter(item);
         return item === 1 ? { crashed: true, item } : { crashed: false, item };
       },
-      gate,
-      2, // items 0,1 start; 2,3 wait for a slot
+      2, // items 0,1 start; 2,3 wait for a free lane
       (result) => result.crashed,
     );
 
@@ -153,12 +115,10 @@ describe("runConcurrent (spec §3.4/§3.5): bounded pool over the shared gate", 
     expect(results[3]).toBeUndefined();
   });
 
-  it("returns an empty array for zero items without touching the gate", async () => {
-    const gate = createConcurrencyGate(4);
+  it("returns an empty array for zero items without opening a lane", async () => {
     const results = await runConcurrent(
       [],
       async () => "unreachable",
-      gate,
       4,
       () => false,
     );

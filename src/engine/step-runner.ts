@@ -76,7 +76,6 @@ export async function runAgentStep(
   signal: AbortSignal,
   parentPath: NodePath,
   path: string,
-  isolated: boolean,
   entry: AgentEntry,
 ): Promise<StepOutcome> {
   const ctx = createRunContext(state, parentPath);
@@ -92,7 +91,7 @@ export async function runAgentStep(
   const attempt = (sig: AbortSignal): Promise<AttemptResult> => {
     const startingTokens = carry?.tokensUsed ?? 0;
     carry = undefined;
-    return runAgentSession(step, input, host, ctx, state, sig, path, isolated, entry, startingTokens);
+    return runAgentSession(step, input, host, ctx, state, sig, path, entry, startingTokens);
   };
 
   return retryLoop(step, host, state, signal, path, attempt, carryOverMs);
@@ -231,11 +230,14 @@ async function runAgentSession(
   state: RunState,
   signal: AbortSignal,
   path: string,
-  isolated: boolean,
   entry: AgentEntry,
   startingTokens = 0,
 ): Promise<AttemptResult> {
   const model = step.model ?? state.defaultModel; // step → workflow default; host applies the session default when undefined (spec §9.5)
+  // Static isolation (spec §2.2): decided from the workflow's SHAPE at `.commit()` (flow/isolation.ts)
+  // and tagged onto the step itself — read straight off it here, never re-derived from what happens to
+  // be in flight.
+  const isolated = step.isolated === true;
   // A `background` or (statically) `isolated` step is a one-shot PI subagent (spec §2.2/§9.2, see
   // src/host/pi-agent.ts): there is no resumable conversation to steer, so its repair budget is forced
   // to 0 regardless of what the step itself declares — the loop below then runs exactly one turn before

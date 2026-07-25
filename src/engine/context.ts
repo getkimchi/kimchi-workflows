@@ -149,6 +149,17 @@ export function iso(host: HostPort): string {
 }
 
 /**
+ * Emit a construct's `node-completed` checkpoint (spec §8): the event every branch arm, branch, loop,
+ * foreach, parallel, and nested workflow closes with, and the one a resume reads back to recover that
+ * construct's output without re-running it (`rebuildStepOutputs`, resume-workflow.ts). One helper, so
+ * the nine places that close a construct — spread across execute.ts and concurrent-nodes.ts — cannot
+ * drift in shape.
+ */
+export async function emitNodeCompleted(host: HostPort, state: RunState, path: NodePath, output: unknown): Promise<void> {
+  await host.emit({ type: "node-completed", runId: state.runId, path: formatPath(path), output, at: iso(host) });
+}
+
+/**
  * Build the run context a step body / condition / selector sees (spec §2.5/§3.9). `callerParentPath`
  * is the CALLING node's own enclosing scope (its ancestors, itself excluded) — indices are dropped
  * internally, since `stepOutputs` is static-keyed throughout (see {@link RunState.stepOutputs}).

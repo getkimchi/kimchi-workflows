@@ -19,7 +19,7 @@ import type { BranchNode, LoopNode, NestedWorkflowNode, QuestionnaireStep, StepD
 import { nodeName } from "../flow/types.ts";
 import { describeSchemaViolations } from "../flow/validation.ts";
 import { runForeachNode, runParallelNode } from "./concurrent-nodes.ts";
-import { createRunContext, type ExecOutcome, iso, type NodeWalker, type PendingBlock, type Reentry, type RunState, type StepOutcome } from "./context.ts";
+import { createRunContext, type ExecOutcome, emitNodeCompleted, iso, type NodeWalker, type PendingBlock, type Reentry, type RunState, type StepOutcome } from "./context.ts";
 import { appendLoopIteration, appendSegment, formatPath, type NodePath, staticChildKey, staticKeyOf } from "./node-path.ts";
 import { createConcurrencyGate } from "./scheduler.ts";
 import { runAgentStep, runFunctionStep } from "./step-runner.ts";
@@ -194,7 +194,17 @@ function runNode(node: WorkflowNode, input: unknown, host: HostPort, state: RunS
   }
 }
 
-/** Run one step to a settled outcome, tracking it in-flight for the full duration (spec §3.9). Exported for concurrent-nodes.ts (parallel arms). */
+/**
+ * Run one step to a settled outcome, holding a run-wide concurrency slot and tracking it in-flight for
+ * the full duration (spec §3.6/§3.9). Exported for concurrent-nodes.ts (parallel arms).
+ *
+ * The gate is held HERE, by the step, rather than by the enclosing construct: spec §3.6 bounds "steps
+ * executing at once", and a step is a leaf — it never waits on another step — so a slot can never be
+ * held by something waiting for a slot. A construct holding the slot instead would deadlock as soon as
+ * constructs nest (a `.foreach` at the ceiling occupying every slot while its items wait for slots of
+ * their own). A blocked step (spec §8.6) settles and releases like any other: nothing holds a slot
+ * while waiting on a human.
+ */
 export async function runStepNode(
   step: StepDefinition,
   input: unknown,
@@ -207,19 +217,17 @@ export async function runStepNode(
   const path = appendSegment(parentPath, step.name);
   const formattedPath = formatPath(path);
   const inFlightKey = staticKeyOf(path);
-  // Static isolation (spec §2.2): tagged onto the step itself at `.commit()` (flow/isolation.ts) from
-  // its SHAPE in the definition — read straight off the step here, never re-derived from
-  // `state.inFlight` or anything else runtime-observed.
-  const isolated = step.kind === "agent" && step.isolated === true;
 
+  await state.concurrencyGate.acquire();
   // Reads never race (spec §3.9): mark this step in-flight for the FULL duration of its execution
   // (fresh, answer-continuation, or a questionnaire's immediate block) so a concurrent sibling's
   // `getStepResult` throws rather than observing a torn/undefined value. Cleared on every exit path.
   state.inFlight.add(inFlightKey);
   try {
-    return await runStepNodeBody(step, input, host, state, signal, parentPath, formattedPath, isolated, reentry);
+    return await runStepNodeBody(step, input, host, state, signal, parentPath, formattedPath, reentry);
   } finally {
     state.inFlight.delete(inFlightKey);
+    state.concurrencyGate.release();
   }
 }
 
@@ -231,7 +239,6 @@ async function runStepNodeBody(
   signal: AbortSignal,
   parentPath: NodePath,
   formattedPath: string,
-  isolated: boolean,
   reentry?: Reentry,
 ): Promise<ExecOutcome> {
   // Answer continuation (spec §8.4/§8.5): resume a blocked step with the user's structured answers — no
@@ -240,7 +247,7 @@ async function runStepNodeBody(
   //  - questionnaire (form) → reassemble the answers into `output` and validate (no `startAgent`).
   if (reentry?.answer) {
     if (step.kind === "agent") {
-      const outcome = await runAgentStep(step, undefined, host, state, signal, parentPath, formattedPath, isolated, {
+      const outcome = await runAgentStep(step, undefined, host, state, signal, parentPath, formattedPath, {
         kind: "answer",
         answers: reentry.answer.answers,
         conversation: reentry.answer.conversation,
@@ -282,7 +289,7 @@ async function runStepNodeBody(
 
   const outcome =
     step.kind === "agent"
-      ? await runAgentStep(step, stepInput, host, state, signal, parentPath, formattedPath, isolated, { kind: "fresh" })
+      ? await runAgentStep(step, stepInput, host, state, signal, parentPath, formattedPath, { kind: "fresh" })
       : await runFunctionStep(step, stepInput, host, state, signal, parentPath, formattedPath);
   return finishStep(formattedPath, host, state, outcome);
 }
@@ -385,11 +392,11 @@ async function runBranchNode(
     if (outcome.kind !== "ok") return outcome;
 
     result[arm.name] = outcome.output;
-    await host.emit({ type: "node-completed", runId: state.runId, path: formatPath(armPath), output: outcome.output, at: iso(host) });
+    await emitNodeCompleted(host, state, armPath, outcome.output);
     if (isTarget) activeReentry = undefined;
   }
 
-  await host.emit({ type: "node-completed", runId: state.runId, path: formatPath(branchPath), output: result, at: iso(host) });
+  await emitNodeCompleted(host, state, branchPath, result);
   return { kind: "ok", output: result };
 }
 
@@ -438,7 +445,7 @@ async function runLoopNode(node: LoopNode, input: unknown, host: HostPort, state
     const conditionMet = node.condition(ctx, lastOutput);
     const stop = node.mode === "dowhile" ? !conditionMet : conditionMet;
     if (stop) {
-      await host.emit({ type: "node-completed", runId: state.runId, path: formatPath(loopPath), output: lastOutput, at: iso(host) });
+      await emitNodeCompleted(host, state, loopPath, lastOutput);
       return { kind: "ok", output: lastOutput };
     }
     iterationInput = lastOutput;
@@ -472,6 +479,6 @@ async function runNestedWorkflowNode(
   const outcome = await runNodeSequence(node.workflow.nodes, host, state, input, signal, nestedPath, 0, innerReentry);
   if (outcome.kind !== "ok") return outcome;
 
-  await host.emit({ type: "node-completed", runId: state.runId, path: formatPath(nestedPath), output: outcome.output, at: iso(host) });
+  await emitNodeCompleted(host, state, nestedPath, outcome.output);
   return { kind: "ok", output: outcome.output };
 }
