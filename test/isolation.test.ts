@@ -184,14 +184,15 @@ describe("static isolation end-to-end (spec §2.2): AgentRequest.isolated thread
     const workflow = createWorkflow({ name: "w" }).parallel([a, b], { name: "par" }).commit();
 
     // Both arms reply with schema-invalid output; a steerable step would send a correction and get a
-    // second turn from the SAME session — an isolated one must fail the attempt outright instead.
-    const agent = scriptedAgent([['{"ok":"nope"}'], ['{"ok":"nope"}']]);
+    // second turn from the SAME session — an isolated one must fail the attempt outright instead, and
+    // then take its one default repeat as a wholly fresh session (four sessions, two per arm).
+    const agent = scriptedAgent([['{"ok":"nope"}'], ['{"ok":"nope"}'], ['{"ok":"nope"}'], ['{"ok":"nope"}']]);
     const { host, store } = createTestHost({ startAgent: agent.startAgent });
 
     const result = await runWorkflow(workflow, undefined, host);
 
     expect(result.status).toBe("crashed");
-    expect(agent.messages).toHaveLength(2); // one turn per arm, no correction sent to either
+    expect(agent.messages).toHaveLength(4); // one turn per attempt, no correction sent inside any of them
     const events = await store.loadEvents(result.runId);
     expect(events.some((e) => e.type === "agent-steer")).toBe(false);
   });

@@ -76,15 +76,33 @@ describe("background agent step (spec §2.2/§9.2, faked subagent seam offline)"
   it("never steers invalid output in-session — no agent-steer events even though the reply is bad", async () => {
     const step = createAgentStep({ name: "bg", output: outputSchema, background: true, maxOutputRepairs: 2, prompt: () => "go" });
     const workflow = createWorkflow({ name: "bg-invalid" }).then(step).commit();
-    const agent = scriptedAgent([['{"summary":123}']]); // schema violation
+    // Two invalid subagent runs: the first attempt and the one free repeat an unsteerable step gets.
+    const agent = scriptedAgent([['{"summary":123}'], ['{"summary":123}']]); // schema violation
     const { host, store } = createTestHost({ startAgent: agent.startAgent });
 
     const result = await runWorkflow(workflow, undefined, host);
 
     expect(result.status).toBe("crashed");
-    expect(agent.messages).toHaveLength(1); // one turn only, no correction sent
+    expect(agent.opened).toBe(2); // a fresh SESSION per attempt…
+    expect(agent.messages).toHaveLength(2); // …one turn each, never a correction inside one
     const events = await store.loadEvents(result.runId);
     expect(steerEvents(events)).toHaveLength(0); // maxOutputRepairs is ignored for background — no steering budget at all
+  });
+
+  it("repeats once by default, since a step that cannot be steered would otherwise die on one bad reply", async () => {
+    // No `retry` declared: the default for an unsteerable step is one repeat (spec §9.1/§9.2), which is
+    // the counterpart of the two in-session repairs a steerable step gets for free.
+    const step = createAgentStep({ name: "bg", output: outputSchema, background: true, prompt: () => "go" });
+    const workflow = createWorkflow({ name: "bg-default-retry" }).then(step).commit();
+    const agent = scriptedAgent([['{"summary":123}'], [valid]]); // invalid, then good
+    const { host, store } = createTestHost({ startAgent: agent.startAgent });
+
+    const result = await runWorkflow(workflow, undefined, host);
+
+    expect(result.status).toBe("completed");
+    expect(agent.opened).toBe(2);
+    const events = await store.loadEvents(result.runId);
+    expect(events.filter((e) => e.type === "step-retry")).toHaveLength(1);
   });
 
   it("falls back to the repeat policy on invalid output: retries with a fresh subagent session and succeeds", async () => {

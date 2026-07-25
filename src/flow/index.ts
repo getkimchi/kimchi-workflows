@@ -20,6 +20,7 @@ export type { AnswersCheck, Question, QuestionKind, Questionnaire, QuestionOptio
 export {
   answersToOutput,
   buildAskingProtocol,
+  buildOutputProtocol,
   formatAnswers,
   QuestionKindSchema,
   QuestionnaireSchema,

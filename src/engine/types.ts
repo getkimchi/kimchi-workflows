@@ -30,6 +30,12 @@ export type RunEvent =
   // An in-session output-steering correction (spec §9.2): the agent's reply was invalid and a
   // correction was sent within the same session. `attempt` is the 1-based repair number.
   | { type: "agent-steer"; runId: string; path: string; attempt: number; violation: string; at: string }
+  // One completed agent turn's token usage (spec §9.3), recorded as it happens rather than only summed
+  // into a budget check. Without it a run's cost is invisible: the totals a host can see from OUTSIDE
+  // (a session file, a provider bill) miss every isolated step entirely, since those run as their own
+  // one-shot subprocesses with no session of their own. Emitted per turn — a step that retried or was
+  // steered has several — so a consumer sums by `path` for a step, or over the log for a run.
+  | { type: "agent-usage"; runId: string; path: string; totalTokens: number; at: string }
   | { type: "step-completed"; runId: string; path: string; output: unknown; at: string }
   // Control-flow node (branch/loop/foreach/workflow, spec §3.2–§3.4, §11) lifecycle. `node-completed`
   // is a resume checkpoint (spec §8): its output feeds the next node and rebuilds context. Emitted for

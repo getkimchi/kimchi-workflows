@@ -181,6 +181,6 @@ describe("step overrides combined with agent scripting on OTHER steps", () => {
 
     expect(run.status).toBe("completed");
     expect(run.output).toEqual({ n: 30 });
-    expect(run.agent("scripted").messages).toEqual(["n=3"]); // saw the OVERRIDE's output, not the real step's
+    expect(run.agent("scripted").messages[0]).toContain("n=3"); // saw the OVERRIDE's output, not the real step's
   });
 });
