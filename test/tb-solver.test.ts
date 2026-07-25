@@ -57,22 +57,27 @@ describe("tb-solver: the round loop", () => {
     expect(prompts[1]).toContain("stray paren");
   });
 
-  it("settles after the round budget instead of looping forever on a check that never passes", async () => {
+  it("keeps opening rounds while the clock allows, rather than stopping at a fixed count", async () => {
     const failing = reply({ allPass: false, failures: [{ id: "c1", actual: "exit 1", diagnosis: "still broken" }] });
+    // A generous deadline and instant (test-double) rounds: the round count is now governed by time, so
+    // more than the old fixed maximum of three must be possible. A fixed count ended real runs while
+    // they still held most of their budget.
     const run = await createTestRun(tbSolver, {
       input: roomyInput(),
       agents: {
         survey: [reply(plan)],
-        implement: [reply(work), reply(work), reply(work)],
-        verify: [failing, failing, failing],
+        implement: Array.from({ length: 12 }, () => reply(work)),
+        verify: Array.from({ length: 12 }, () => failing),
       },
     });
 
-    // Rounds are a policy, not a crash: the run ENDS cleanly and reports the honest `allPass: false` —
-    // the container is graded either way, so a runaway loop must not be how the run ends.
+    // Scripted rounds cost no time at all, so the clock can never end them — the safety valve does,
+    // CLEANLY. That distinction matters: the loop's own guard would crash the run and skip the report.
     expect(run.status).toBe("completed");
-    expect(run.output).toMatchObject({ allPass: false, rounds: 3 });
-    expect(run.agent("implement").sessions).toBe(3);
+    expect(run.output).toMatchObject({ allPass: false });
+    const rounds = (run.output as { rounds: number }).rounds;
+    expect(rounds).toBeGreaterThan(3); // more than the fixed maximum this replaced
+    expect(rounds).toBeLessThanOrEqual(10);
   });
 
   it("stops opening rounds when the clock runs out", async () => {
@@ -153,6 +158,10 @@ describe("tb-solver: what the steps are told", () => {
     // One survey plus a full round has to fit, with room left to settle.
     const round = (steps.get("survey")?.maxDurationMs ?? 0) + (steps.get("implement")?.maxDurationMs ?? 0) + (steps.get("verify")?.maxDurationMs ?? 0);
     expect(round).toBeLessThan(budgetMs * 0.8);
+    // No absolute ceilings on the workers: they must scale with the budget, or a long task gets the
+    // same seven-minute window as a short one (measured: 7% of a 12000s budget spent, then stopped).
+    expect(steps.get("implement")?.maxDurationMs).toBe(Math.round(900 * 0.45 * 1000));
+    expect(steps.get("verify")?.maxDurationMs).toBe(Math.round(900 * 0.15 * 1000));
 
     // The workers may be cut short; that must cost the round, not the run.
     expect(steps.get("implement")?.optional).toBe(true);
