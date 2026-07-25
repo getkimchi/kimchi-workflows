@@ -3,7 +3,7 @@
  * every step is given. Split from the workflow itself so that file stays about STRUCTURE — which step
  * runs when, and what it may cost — while the wording lives here.
  */
-import { type Static, Type } from "typebox";
+import { Type } from "typebox";
 
 export const taskInputSchema = Type.Object({
   /** The verbatim terminal-bench instruction. */

@@ -2,7 +2,7 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { AgentRequest } from "../src/engine/types.ts";
-import { createAgentStep, createStep, createWorkflow } from "../src/flow/index.ts";
+import { createAgentStep, createWorkflow } from "../src/flow/index.ts";
 import { createTestHost } from "./helpers.ts";
 import { scriptedAgent } from "./scripted-agent.ts";
 
