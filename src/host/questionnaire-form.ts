@@ -18,7 +18,7 @@ import type { Question, Questionnaire } from "../flow/questionnaire.ts";
 /** The slice of the command context the rich form needs: the `ctx.ui.custom` overlay seam. */
 type FormContext = Pick<ExtensionCommandContext, "ui">;
 
-import { assembleAnswers, collectSingle, collectText, DONE_LABEL, optionLabel, orderedOptions, type Picker, questionTitle, type RawSelection } from "./answer-assembly.ts";
+import { collectQuestionnaire, DONE_LABEL, optionLabel, orderedOptions, type Picker, questionTitle, type RawSelection } from "./answer-assembly.ts";
 
 /** A {@link Picker} over `ctx.ui.custom` TUI overlays — the primitives single/text collection is shared on. */
 function tuiPicker(ctx: FormContext): Picker {
@@ -33,30 +33,11 @@ function tuiPicker(ctx: FormContext): Picker {
  * `question.key`. Returns `undefined` if the user cancels any widget (dismiss ≠ cancel — the caller
  * keeps the run blocked).
  */
-export async function renderRichForm(ctx: FormContext, questionnaire: Questionnaire): Promise<Record<string, unknown> | undefined> {
-  const picker = tuiPicker(ctx);
-  const raw: Record<string, RawSelection> = {};
-  for (const question of questionnaire.questions) {
-    const selection = await renderQuestion(ctx, picker, question);
-    if (selection === undefined) return undefined; // cancelled
-    raw[question.key] = selection;
-  }
-  return assembleAnswers(questionnaire, raw);
+export function renderRichForm(ctx: FormContext, questionnaire: Questionnaire): Promise<Record<string, unknown> | undefined> {
+  return collectQuestionnaire(questionnaire, tuiPicker(ctx), (question) => renderMulti(ctx, question));
 }
 
-function renderQuestion(ctx: FormContext, picker: Picker, question: Question): Promise<RawSelection | undefined> {
-  switch (question.kind) {
-    case "single":
-      return collectSingle(picker, question);
-    case "multi":
-      return renderMulti(ctx, question);
-    case "text":
-    case "chat":
-      return collectText(picker, question);
-  }
-}
-
-/** Multi-choice is genuinely different from single/text: a check/uncheck loop over one selector. */
+/** Multi-choice is the one question kind the shared driver cannot serve over `Picker`: a check/uncheck loop over one selector. */
 async function renderMulti(ctx: FormContext, question: Question): Promise<RawSelection | undefined> {
   const options = orderedOptions(question);
   const selected = new Set<string>();

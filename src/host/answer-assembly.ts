@@ -132,3 +132,39 @@ export async function collectText(picker: Picker, question: Question): Promise<R
   if (text === undefined) return undefined;
   return { text };
 }
+
+/**
+ * Drive a whole questionnaire over the {@link Picker} seam and assemble the structured answers keyed by
+ * `question.key` — the one collection loop BOTH render paths run (native dialogs and the rich TUI form),
+ * so "ask every question in order, stop on dismissal, assemble once" is defined exactly once rather than
+ * re-implemented per widget set. Returns `undefined` as soon as the user dismisses any question: dismiss
+ * ≠ cancel, so the caller keeps the run blocked (spec §10.2).
+ *
+ * Multi-choice is the one genuinely widget-shaped question kind (a confirm per option vs a check/uncheck
+ * selector loop), so it stays with the render path and arrives here as `collectMulti`.
+ */
+export async function collectQuestionnaire(
+  questionnaire: Questionnaire,
+  picker: Picker,
+  collectMulti: (question: Question) => Promise<RawSelection | undefined>,
+): Promise<Record<string, unknown> | undefined> {
+  const raw: Record<string, RawSelection> = {};
+  for (const question of questionnaire.questions) {
+    const selection = await collectOne(question, picker, collectMulti);
+    if (selection === undefined) return undefined;
+    raw[question.key] = selection;
+  }
+  return assembleAnswers(questionnaire, raw);
+}
+
+function collectOne(question: Question, picker: Picker, collectMulti: (question: Question) => Promise<RawSelection | undefined>): Promise<RawSelection | undefined> {
+  switch (question.kind) {
+    case "single":
+      return collectSingle(picker, question);
+    case "multi":
+      return collectMulti(question);
+    case "text":
+    case "chat":
+      return collectText(picker, question);
+  }
+}
