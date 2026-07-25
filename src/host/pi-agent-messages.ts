@@ -4,7 +4,7 @@
  * this module pulls no PI/host/network code.
  */
 import type { AgentEndEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { TokenUsage } from "../engine/types.ts";
+import type { ConversationMessage, TokenUsage } from "../engine/types.ts";
 
 /** The PI model registry (from the extension context) — referenced structurally for `find`. */
 export type ModelRegistry = ExtensionContext["modelRegistry"];
@@ -72,4 +72,26 @@ export function parseNdjsonMessages(ndjson: string): AgentMessages {
 
 function isMessageEndEvent(value: unknown): value is { type: "message_end"; message: unknown } {
   return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "message_end" && "message" in value;
+}
+
+/**
+ * Prepend a resumed session's stored prior conversation onto the messages PI is about to send the
+ * model (spec §8.4) — the pure core of pi-agent.ts's `context`-event history seed.
+ *
+ * PI's `context` extension event is the one documented mechanism for injecting messages into an
+ * outgoing LLM call (`docs/extensions.md`: "Fired before each LLM call... Injecting context from
+ * external sources"; wired straight into `AgentLoopConfig.transformContext` in `core/sdk.ts`, which the
+ * low-level agent loop applies just before `convertToLlm`). That is exactly what a resume needs after
+ * the harness process itself restarted: the fresh process's PI session has none of the pre-restart
+ * turns, so without this the model would see only the bare answer text with no memory of what it asked
+ * or why (spec §8.4's "same agent loop resumes... context intact" would silently not hold).
+ *
+ * Returns `undefined` — a no-op — when there is nothing to seed, so the impure caller can skip
+ * overriding PI's own messages entirely on the far more common fresh/no-history turn, and so a
+ * present-but-empty `history` (never actually produced today, but not ruled out by the type) behaves
+ * identically to an absent one rather than degenerating into "seed with an empty prefix".
+ */
+export function seedHistory(history: readonly ConversationMessage[] | undefined, messages: AgentMessages): AgentMessages | undefined {
+  if (!history || history.length === 0) return undefined;
+  return [...(history as AgentMessages), ...messages];
 }

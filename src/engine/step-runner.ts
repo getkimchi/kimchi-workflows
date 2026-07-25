@@ -219,9 +219,9 @@ async function runFunctionAttempt(step: FunctionStep, input: unknown, ctx: RunCo
  * author who declared `retry` sees a different outcome. A `background` step has no repair budget at all
  * (§9.2: forced to 0 below, since a one-shot subagent cannot be steered) — the same `retryable` outcome
  * covers it uniformly, rather than needing a special case. An `isolated` step (spec §2.2 — one that can
- * overlap with a sibling, decided statically by execute.ts/isolation.ts) runs through the SAME isolated
- * subprocess path as `background` (src/host/pi-agent.ts) and is just as unsteerable, so it gets the
- * same forced-zero repair budget.
+ * overlap with a sibling, tagged onto the step at `.commit()` by flow/isolation.ts) runs through the SAME
+ * isolated subprocess path as `background` (src/host/pi-agent.ts) and is just as unsteerable, so it gets
+ * the same forced-zero repair budget.
  */
 async function runAgentSession(
   step: AgentStep,
@@ -273,7 +273,15 @@ async function runAgentSession(
       const check = checkAgentReply(step, turn.text);
       if (check.ok) {
         if (check.kind === "questions") {
-          return { kind: "blocked", questionnaire: check.questions, conversation: session.getConversation(), tokensUsed: totalTokens };
+          // Chain onto whatever conversation SEEDED this attempt (spec §8.4): an answer-resume's session
+          // only ever accumulates ITS OWN local turns in `session.getConversation()` — a host that seeds
+          // `entry.conversation` into outgoing calls (e.g. src/host/pi-agent.ts, across a harness restart)
+          // does so without folding it back into the session's own state. Without this, a re-block of an
+          // already-resumed step would record only the post-resume exchange, and a LATER resume of THAT
+          // block would lose everything before the first restart — the same "forgets what it asked" gap
+          // one hop further out.
+          const conversation = entry.kind === "answer" ? [...entry.conversation, ...session.getConversation()] : session.getConversation();
+          return { kind: "blocked", questionnaire: check.questions, conversation, tokensUsed: totalTokens };
         }
         return { kind: "ok", output: check.value };
       }
