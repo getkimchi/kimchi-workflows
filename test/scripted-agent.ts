@@ -13,6 +13,8 @@ export interface ScriptedAgent {
   readonly histories: (readonly unknown[] | undefined)[];
   /** The `background` flag seen by each opened session, in order. */
   readonly backgrounds: (boolean | undefined)[];
+  /** The `isolated` flag (spec §2.2, static isolation) seen by each opened session, in order. */
+  readonly isolateds: (boolean | undefined)[];
   /** Number of sessions opened (one per `startAgent`, i.e. per outer attempt / resume). */
   readonly opened: number;
   /** Number of `dispose()` calls. */
@@ -34,6 +36,7 @@ export function scriptedAgent(sessionScripts: readonly (readonly ScriptedTurn[])
   const models: (string | undefined)[] = [];
   const histories: (readonly unknown[] | undefined)[] = [];
   const backgrounds: (boolean | undefined)[] = [];
+  const isolateds: (boolean | undefined)[] = [];
   let opened = 0;
   let disposed = 0;
   let sessionIndex = 0;
@@ -43,6 +46,7 @@ export function scriptedAgent(sessionScripts: readonly (readonly ScriptedTurn[])
     models.push(request.model);
     histories.push(request.history);
     backgrounds.push(request.background);
+    isolateds.push(request.isolated);
     const script = sessionScripts[sessionIndex++] ?? [];
     const conversation: unknown[] = [...(request.history ?? [])];
     let turn = 0;
@@ -72,6 +76,7 @@ export function scriptedAgent(sessionScripts: readonly (readonly ScriptedTurn[])
     models,
     histories,
     backgrounds,
+    isolateds,
     get opened() {
       return opened;
     },

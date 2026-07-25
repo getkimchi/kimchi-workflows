@@ -461,7 +461,8 @@ rather than restarting the node and re-asking. *(decision — replaces the earli
 top-level-only restriction)*
 
 8.6. **Several steps may be blocked at once** when a fan-out construct blocks in more
-than one arm or item. Blocking suspends only its own step: siblings keep running, and
+than one arm or item — questionnaire steps, since a Q&A *agent* step may not overlap at
+all (§10.1). Blocking suspends only its own step: siblings keep running, and
 the run reads `in_progress` while any of them does (§5.3). Pending questionnaires form
 a **FIFO queue** addressed by node path; the session renders one at a time, and an
 answer is matched to the path it was asked from. *(decision)*
@@ -587,6 +588,15 @@ workflow definition, not a run-level mode. *(orig. R19/R20; decision)*
     subagent runs isolated and unwatched, so interrupting the parent session for an
     answer whose reasoning the user never saw is rejected at `.commit()`.
   - **Questionnaire step** (§2.4) — inherently Q&A; only asks, does no other work.
+
+  **Q&A-capable agent steps may not overlap.** `asks` inside a `.parallel` arm, or
+  inside a `.foreach` whose concurrency exceeds 1, is rejected at `.commit()` — the same
+  rejection as `background` + `asks` (§2.2), and for the same underlying reason: an
+  overlapping step is isolated, and an isolated step has no conversation to resume an
+  answer into. A **questionnaire** step is unaffected and may block anywhere, fan-out
+  included: its questions come from a schema, not from a conversation, so there is
+  nothing to preserve across the block. That asymmetry is what keeps §8.6's several-steps-
+  blocked-at-once case real rather than theoretical. *(decision)*
 
 10.2. **Rendering & dismissing a blocked question.** When the harness session is
 active, it recognizes a pending question and renders it inline; answering resumes

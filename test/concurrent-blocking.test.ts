@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { resumeWithAnswer } from "../src/engine/resume-workflow.ts";
+import { pendingQuestionnaires, resumeWithAnswer } from "../src/engine/resume-workflow.ts";
 import { deriveRunStatus } from "../src/engine/run-status.ts";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import { deriveStepStates, stepState } from "../src/engine/step-state.ts";
@@ -140,5 +140,58 @@ describe(".foreach(concurrency>1): several blocked items at once, answered FIFO 
     expect(afterSecond.status).toBe("completed");
     // Item order preserved regardless of which item (0 or 1) was answered first.
     expect((afterSecond.output as unknown[]).map((o) => (o as { n: number }).n)).toEqual([1, 2]);
+  });
+});
+
+/**
+ * spec §10.1's new "Q&A-capable agent steps may not overlap" paragraph carves out an explicit
+ * asymmetry: a Q&A *agent* step cannot sit inside an overlapping construct (rejected at `.commit()`,
+ * test/no-overlapping-asks.test.ts), but a **questionnaire** step is unaffected — its questions come
+ * from a schema, not a conversation, so it may block anywhere, fan-out included. This is what keeps
+ * spec §8.6's "several steps may be blocked at once" real rather than theoretical: prove it with THREE
+ * questionnaire steps genuinely blocking in the same round (not just two), answered strictly FIFO by
+ * original ask order — which, since items run concurrently (spec §3.4), is not assumed to be item order.
+ */
+describe(".foreach({concurrency: 3}) of questionnaire steps: several blocked at once, answered FIFO (spec §8.6/§10.1)", () => {
+  it("all three items block in the same round; resuming with no explicit path resolves them in original ask order", async () => {
+    const body = createWorkflow({ name: "ask-body" })
+      .then(createQuestionnaireStep({ name: "ask", output: nameSchema }))
+      .commit();
+    const workflow = createWorkflow({ name: "foreach-three-blocks" })
+      .foreach(body, () => [1, 2, 3], { name: "each", concurrency: 3 })
+      .commit();
+
+    const { host, store } = createTestHost();
+    const blocked = await runWorkflow(workflow, undefined, host);
+    expect(blocked.status).toBe("blocked");
+
+    const events = await store.loadEvents(blocked.runId);
+    expect(events.filter((e) => e.type === "questionnaire-asked")).toHaveLength(3); // all three blocked in the SAME round
+    const states = deriveStepStates(events);
+    expect(stepState(states, "each@0/ask")).toBe("blocked");
+    expect(stepState(states, "each@1/ask")).toBe("blocked");
+    expect(stepState(states, "each@2/ask")).toBe("blocked");
+
+    // FIFO (spec §8.6) means original ask order as recorded in the log — NOT assumed to be item order,
+    // since the three items ran genuinely concurrently.
+    const fifoOrder = pendingQuestionnaires(events).map((p) => p.path);
+    expect(new Set(fifoOrder)).toEqual(new Set(["each@0/ask", "each@1/ask", "each@2/ask"]));
+
+    const answerByPath = new Map(fifoOrder.map((path, i) => [path, `answer-${i}`]));
+
+    let currentEvents = events;
+    for (let i = 0; i < fifoOrder.length; i++) {
+      const path = fifoOrder[i] as string;
+      const result = await resumeWithAnswer(workflow, currentEvents, { name: answerByPath.get(path) }, host); // no explicit `path`: must pick FIFO-first
+      currentEvents = await store.loadEvents(blocked.runId);
+      if (i < fifoOrder.length - 1) {
+        expect(result.status).toBe("blocked");
+        expect(result.path).toBe(fifoOrder[i + 1]); // next in FIFO order, whatever item it belongs to
+      } else {
+        expect(result.status).toBe("completed");
+        // Final output is in ITEM order (spec §3.4), independent of the FIFO answer order above.
+        expect(result.output).toEqual([{ name: answerByPath.get("each@0/ask") }, { name: answerByPath.get("each@1/ask") }, { name: answerByPath.get("each@2/ask") }]);
+      }
+    }
   });
 });

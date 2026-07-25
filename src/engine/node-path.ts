@@ -129,6 +129,17 @@ export function staticChildKey(parent: NodePath, ...names: readonly string[]): s
   return formatPath(path);
 }
 
+/**
+ * The SHAPE a path occupies in the workflow's definition: every segment's bare name, joined, with
+ * BOTH loop iteration and foreach item indices stripped (unlike {@link staticPathOf}, which keeps
+ * foreach indices). This is what static isolation (spec §2.2, engine/isolation.ts) keys by — whether a
+ * step can overlap with a sibling is a property of WHERE it sits in the definition, never of which
+ * iteration/item happens to be live, so a lookup must ignore indices entirely, not just loop ones.
+ */
+export function shapePathOf(path: NodePath): string {
+  return path.map((segment) => segment.name).join(SEGMENT_SEPARATOR);
+}
+
 /** The leaf (final) segment's bare name — for display. */
 export function leafName(path: NodePath): string {
   const last = path[path.length - 1];
