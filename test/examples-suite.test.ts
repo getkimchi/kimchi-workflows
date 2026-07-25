@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import batchWorkflow from "../examples/batch.workflow.ts";
+import fanOutWorkflow from "../examples/fan-out.workflow.ts";
+import foreachConcurrentWorkflow from "../examples/foreach-concurrent.workflow.ts";
 import helloWorkflow from "../examples/hello.workflow.ts";
 import pipelineWorkflow from "../examples/pipeline.workflow.ts";
 import planningWorkflow from "../examples/planning.workflow.ts";
@@ -28,6 +30,18 @@ describe("example suite (offline)", () => {
     const run = await createTestRun(batchWorkflow);
     expect(run.status).toBe("completed");
     expect(run.output).toEqual([{ doubled: 2 }, { doubled: 4 }, { doubled: 6 }, { doubled: 8 }]);
+  });
+
+  it("fan-out: .parallel runs two independent steps over the same input, keyed by arm name", async () => {
+    const run = await createTestRun(fanOutWorkflow);
+    expect(run.status).toBe("completed");
+    expect(run.output).toEqual({ "count-words": { words: 4 }, "count-chars": { chars: 31 } });
+  });
+
+  it("foreach-concurrent: .foreach with concurrency > 1 preserves item order in the output", async () => {
+    const run = await createTestRun(foreachConcurrentWorkflow);
+    expect(run.status).toBe("completed");
+    expect(run.output).toEqual([{ squared: 1 }, { squared: 4 }, { squared: 9 }, { squared: 16 }, { squared: 25 }]);
   });
 
   it("survey: an input form gathers structured input, then a later step consumes it", async () => {

@@ -73,6 +73,16 @@ name** it belongs to, so a host can attribute cost and telemetry per step — an
 test double can script replies per step rather than per session. *(orig. R12;
 step tagging: decision)*
 
+  **Overlap implies isolation.** An agent step that *can* run concurrently with another
+  — one inside `.parallel`, or inside a `.foreach` whose concurrency exceeds 1 — is
+  executed isolated, exactly as `background` is, and this is decided statically from the
+  definition rather than from what happens to be in flight. The reason is not a
+  limitation to be engineered around: a session hosts one conversation, and two agents
+  cannot both be mid-turn in it. Sharing one would mean either serialising the fan-out
+  (making `.parallel` a lie) or interleaving two agents' turns in one history (making
+  both incoherent). A host whose session rejects a second concurrent turn must therefore
+  fail loudly rather than let two steps race for one reply. *(decision)*
+
   An agent step may declare `background: true`, which runs it as a **PI subagent**:
   its own context window and tool loop, no access to the parent session's history,
   returning only its schema-valid output (§12.2). Background is for agent steps
@@ -615,12 +625,13 @@ path when ambiguous (§3.9). *(decision)*
 (§8.1) as they occur, so a user watching the session sees live progress. Each event
 carries its node path, so concurrent steps remain attributable (§8.1). *(decision)*
 
-12.2. **Streaming vs compact rendering.** An agent step streams its output inline
-like a normal PI agent turn **when it is the only step executing**. As soon as
-steps overlap (§3.4/§3.5), concurrent agent steps switch to compact rendering — one
-progress line each, with a summary flushed on completion — because four interleaved
-token streams are unreadable. A `background` step (§2.2) always renders compactly,
-whether or not anything else is running. A blocked step renders its `{questions}`
+12.2. **Streaming vs compact rendering follows from isolation** (§2.2), rather than
+being decided separately. A step that runs in the session streams inline like a normal
+PI agent turn; an isolated step — `background`, or one that can overlap — has no
+session turn to stream and renders compactly instead: one progress line, with a summary
+flushed on completion. That the two questions have one answer is the point: a step
+streams inline exactly when it is the session's single conversation, which is also
+exactly when it is safe for it to be. A blocked step renders its `{questions}`
 inline (§10.2). *(decision)*
 
 12.3. `/workflow run list` (§6.3) reflects each run's derived status (§5.3) and
