@@ -15,12 +15,27 @@
  * one is already in flight is REJECTED outright — never silently swapped in as the thing the listener
  * resolves next. Before P3's `.parallel`/`.foreach(concurrency>1)` landed this could never happen (the
  * engine only ever ran one step at a time); the guard here is what makes that no longer an assumption
- * this file quietly depends on — see `isolation.ts` for the static decision that is now supposed to
- * keep it from happening at all, and `AgentRequest.isolated`'s doc (engine/types.ts) for the seam.
+ * this file quietly depends on — see `flow/isolation.ts` for the static decision (tagged onto each step
+ * at `.commit()`) that is now supposed to keep it from happening at all, and `AgentRequest.isolated`'s
+ * doc (engine/types.ts) for the seam.
  *
  * `getConversation()` returns the last `agent_end` messages so a blocked Q&A step can be resumed
- * (spec §8.4). Cross-process history replay (seeding a fresh PI session from a stored conversation)
- * is a real-harness concern deferred to 6b — the deterministic proof of the mechanism is offline.
+ * (spec §8.4). Within one live PI process that alone is enough — PI's own session already has the
+ * context. Across a harness restart it is not: the fresh process's PI session starts with none of the
+ * pre-restart turns, so `AgentRequest.history` (the stored conversation) must be seeded back in, or the
+ * agent would answer a follow-up having forgotten what it asked and why. PI exposes exactly one
+ * documented mechanism for that: the `context` extension event, fired before every outgoing LLM call
+ * and wired straight into `AgentLoopConfig.transformContext` (`core/sdk.ts`) — "Injecting context from
+ * external sources" per `docs/extensions.md`. There is no session-seeding constructor (no
+ * `newSession({ messages })`, no way to pre-load `agent.state.messages` from an extension) — this is
+ * the closest real capability to it, so the bridge below registers ONE shared `context` handler
+ * (mirroring the `agent_end` listener's one-per-bridge-lifetime shape) that prepends whichever session's
+ * `history` is currently active. It stays active for the WHOLE session, not just its first turn: PI's
+ * own accumulated state does not fold the injected prefix back in (`transformContext` is a pre-call
+ * view, not a state mutation), so a mid-attempt steering repair would otherwise see the seed vanish
+ * after turn one. The pure prepend itself (`seedHistory`) lives in pi-agent-messages.ts, unit-tested
+ * offline; only the PI wiring — registering the listener and tracking which session owns the active
+ * seed — lives here.
  *
  * `background` requests (spec §2.2/§9.2): `ExtensionAPI` exposes no subagent-run primitive of its
  * own — there is no `runAgent`/`spawnAgent`/anything that opens an isolated agent conversation and
@@ -54,9 +69,9 @@
  */
 import { existsSync } from "node:fs";
 import path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ContextEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentRequest, AgentSession, AgentTurn, ConversationMessage } from "../engine/types.ts";
-import { type AgentMessages, lastAssistantText, lastAssistantUsage, type ModelRegistry, parseNdjsonMessages, resolveModel } from "./pi-agent-messages.ts";
+import { type AgentMessages, lastAssistantText, lastAssistantUsage, type ModelRegistry, parseNdjsonMessages, resolveModel, seedHistory } from "./pi-agent-messages.ts";
 
 export type AgentStarter = (request: AgentRequest) => AgentSession;
 
@@ -102,6 +117,10 @@ export function createPiAgentBridge(pi: ExtensionAPI, invocationResolver: PiInvo
   // must only ever clear a turn it itself started, never a sibling's.
   let inFlight: { readonly token: object; readonly stepName: string; readonly resolve: (turn: AgentTurn) => void } | undefined;
   let lastConversation: AgentMessages = [];
+  // The one answer-resumed session (spec §8.4) currently entitled to have its stored `history` seeded
+  // into every outgoing LLM call — see the header comment. Token-guarded exactly like `inFlight`, so a
+  // session can only ever clear the seed IT set (never a sibling's), and cleared in `dispose()`.
+  let activeHistory: { readonly token: object; readonly history: AgentMessages } | undefined;
 
   pi.on("agent_end", (event) => {
     lastConversation = event.messages;
@@ -109,6 +128,12 @@ export function createPiAgentBridge(pi: ExtensionAPI, invocationResolver: PiInvo
     if (!turn) return; // no in-session turn was awaiting this event (only background/isolated steps ran)
     inFlight = undefined;
     turn.resolve({ text: lastAssistantText(event.messages), usage: lastAssistantUsage(event.messages) });
+  });
+
+  pi.on("context", (event: ContextEvent) => {
+    if (!activeHistory) return; // the common case: no resumed session is currently in flight
+    const seeded = seedHistory(activeHistory.history, event.messages as AgentMessages);
+    return seeded ? { messages: seeded } : undefined;
   });
 
   return (modelRegistry) => (request) => {
@@ -121,6 +146,13 @@ export function createPiAgentBridge(pi: ExtensionAPI, invocationResolver: PiInvo
     }
 
     const token = {}; // this session's own identity — see `inFlight`'s doc above
+    // An answer-resume (spec §8.4) arrives with its blocked step's stored conversation — seed it into
+    // this session's outgoing LLM calls via the shared `context` handler above, for the session's whole
+    // lifetime (cleared in `dispose()`). A fresh run's `request.history` is always undefined, so the
+    // overwhelmingly common case never touches `activeHistory` at all.
+    if (request.history) {
+      activeHistory = { token, history: request.history as AgentMessages };
+    }
     return {
       async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
         // Safety net, not the primary mechanism (spec §2.2): static isolation is what is SUPPOSED to
@@ -160,6 +192,7 @@ export function createPiAgentBridge(pi: ExtensionAPI, invocationResolver: PiInvo
         // Only clear OUR OWN pending turn — never one a differently-identified session left in flight
         // (should not arise given the guard above, but dispose() must stay safe regardless, spec §2.2).
         if (inFlight?.token === token) inFlight = undefined;
+        if (activeHistory?.token === token) activeHistory = undefined;
       },
     };
   };

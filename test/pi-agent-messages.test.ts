@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type AgentMessages, lastAssistantText, lastAssistantUsage, type ModelRegistry, parseNdjsonMessages, resolveModel } from "../src/host/pi-agent-messages.ts";
+import { type AgentMessages, lastAssistantText, lastAssistantUsage, type ModelRegistry, parseNdjsonMessages, resolveModel, seedHistory } from "../src/host/pi-agent-messages.ts";
 
 // The real PI `AgentMessage` / `Model` types carry many fields these pure readers never touch. We feed
 // them minimal fixtures via one localized assertion each (no `any`); the readers only read the fields
@@ -128,5 +128,38 @@ describe("parseNdjsonMessages", () => {
 
   it("returns an empty message list for empty stdout", () => {
     expect(parseNdjsonMessages("")).toEqual([]);
+  });
+});
+
+// -- seedHistory (cross-restart context injection, spec §8.4) --------------------------------------
+//
+// The pure core of pi-agent.ts's `context`-event history seed: given a blocked step's stored prior
+// conversation and the messages a fresh session is about to send (in practice, just the user's answer
+// turn — a fresh process's own session has nothing before that), prepend the stored conversation so the
+// model sees the whole exchange, not a bare answer with no idea what it is answering.
+
+describe("seedHistory", () => {
+  const priorConversation = asMessages([
+    { role: "user", content: [{ type: "text", text: "Plan the task. Ask first if anything is unclear." }] },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: '{"questions":[{"key":"backend","header":"Backend","question":"Which cache backend?","kind":"text"}]}' }],
+      usage: { totalTokens: 12 },
+    },
+  ]);
+  const answerTurn = asMessages([{ role: "user", content: [{ type: "text", text: 'The user answered your questionnaire:\n- backend: "Redis"' }] }]);
+
+  it("prepends the stored conversation onto the current turn's messages, given a conversation and an answer", () => {
+    const seeded = seedHistory(priorConversation, answerTurn);
+
+    expect(seeded).toEqual([...priorConversation, ...answerTurn]);
+  });
+
+  it("returns undefined (no-op) when there is no history — a fresh, never-blocked resume is unchanged", () => {
+    expect(seedHistory(undefined, answerTurn)).toBeUndefined();
+  });
+
+  it("returns undefined (no-op) for an empty stored conversation, same as undefined", () => {
+    expect(seedHistory([], answerTurn)).toBeUndefined();
   });
 });

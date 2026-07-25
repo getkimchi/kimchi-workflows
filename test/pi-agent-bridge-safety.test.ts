@@ -15,12 +15,22 @@ import type { ModelRegistry } from "../src/host/pi-agent-messages.ts";
  * second attempt is rejected before it can touch anything shared, and the first is completely unaffected.
  */
 
-function fakePi(): { pi: ExtensionAPI; fireAgentEnd: (text: string) => void; sentMessages: string[] } {
-  let handler: ((event: AgentEndEvent) => void) | undefined;
+/** The shape of a fired `context` event's result — same as `ContextEventResult` (`{ messages?: AgentMessage[] }`). */
+type ContextResult = { messages?: unknown[] } | undefined;
+
+function fakePi(): {
+  pi: ExtensionAPI;
+  fireAgentEnd: (text: string) => void;
+  fireContext: (messages: unknown[]) => ContextResult;
+  sentMessages: string[];
+} {
+  let endHandler: ((event: AgentEndEvent) => void) | undefined;
+  let contextHandler: ((event: { type: "context"; messages: unknown[] }) => ContextResult) | undefined;
   const sentMessages: string[] = [];
   const pi = {
-    on: (event: string, h: (event: AgentEndEvent) => void) => {
-      if (event === "agent_end") handler = h;
+    on: (event: string, h: (event: AgentEndEvent | { type: "context"; messages: unknown[] }) => unknown) => {
+      if (event === "agent_end") endHandler = h as (event: AgentEndEvent) => void;
+      if (event === "context") contextHandler = h as (event: { type: "context"; messages: unknown[] }) => ContextResult;
     },
     sendUserMessage: (message: string) => {
       sentMessages.push(message);
@@ -31,11 +41,15 @@ function fakePi(): { pi: ExtensionAPI; fireAgentEnd: (text: string) => void; sen
   return {
     pi,
     fireAgentEnd: (text: string) => {
-      if (!handler) throw new Error("test bug: no agent_end handler was registered");
-      handler({
+      if (!endHandler) throw new Error("test bug: no agent_end handler was registered");
+      endHandler({
         type: "agent_end",
         messages: [{ role: "assistant", content: [{ type: "text", text }], usage: { totalTokens: 1 } }],
       } as unknown as AgentEndEvent);
+    },
+    fireContext: (messages: unknown[]) => {
+      if (!contextHandler) throw new Error("test bug: no context handler was registered");
+      return contextHandler({ type: "context", messages });
     },
     sentMessages,
   };
@@ -134,5 +148,87 @@ describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent tur
 
     expect(calls).toHaveLength(2); // both routed to the subprocess path
     expect(sentMessages).toEqual([]); // neither ever called `pi.sendUserMessage`
+  });
+});
+
+/**
+ * Cross-restart history seeding (spec §8.4), driven the same way: no engine, no real PI — just the
+ * bridge and a scriptable `context`/`agent_end`. `pi-agent-messages.test.ts` covers `seedHistory`
+ * itself (the pure array-prepend) offline; these prove the bridge actually WIRES that pure function
+ * into PI's `context` event for the right session, and only for the right session.
+ */
+describe("createPiAgentBridge history seeding (spec §8.4): an answer-resume's stored conversation reaches the model", () => {
+  const history = [
+    { role: "user", content: [{ type: "text", text: "original prompt" }] },
+    { role: "assistant", content: [{ type: "text", text: "what backend?" }] },
+  ];
+
+  it("prepends the resumed session's history onto every outgoing `context` call, across repeated turns in that session", async () => {
+    const { pi, fireContext, fireAgentEnd } = fakePi();
+    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry());
+
+    const resumed = startAgent({ stepName: "plan", history });
+
+    const turnA = resumed.sendAndAwaitEnd("answered: Redis");
+    expect(fireContext([{ role: "user", content: "answered: Redis" }])).toEqual({
+      messages: [...history, { role: "user", content: "answered: Redis" }],
+    });
+    fireAgentEnd("planning with Redis");
+    await turnA;
+
+    // A second turn in the SAME session (e.g. a steering repair) still gets the seed — PI's own
+    // accumulated session state does not fold the injected prefix back in, so it must be re-applied.
+    const turnB = resumed.sendAndAwaitEnd("please reply as JSON");
+    expect(fireContext([{ role: "user", content: "please reply as JSON" }])).toEqual({
+      messages: [...history, { role: "user", content: "please reply as JSON" }],
+    });
+    fireAgentEnd('{"steps":["a"]}');
+    await turnB;
+  });
+
+  it("leaves a fresh (no-history) session's `context` calls untouched — no regression to the common in-process path", async () => {
+    const { pi, fireContext, fireAgentEnd } = fakePi();
+    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry());
+
+    const fresh = startAgent({ stepName: "plan" }); // no `history` — the ordinary fresh-run request
+    const turn = fresh.sendAndAwaitEnd("fresh prompt");
+
+    expect(fireContext([{ role: "user", content: "fresh prompt" }])).toBeUndefined();
+
+    fireAgentEnd("reply");
+    await turn;
+  });
+
+  it("stops seeding once the session disposes, so a later fresh session is never contaminated by a stale seed", async () => {
+    const { pi, fireContext, fireAgentEnd } = fakePi();
+    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry());
+
+    const resumed = startAgent({ stepName: "plan", history });
+    const turnA = resumed.sendAndAwaitEnd("answered: Redis");
+    fireAgentEnd("planning with Redis");
+    await turnA;
+    resumed.dispose();
+
+    const next = startAgent({ stepName: "plan" }); // a later, unrelated fresh session
+    const turnB = next.sendAndAwaitEnd("next prompt");
+    expect(fireContext([{ role: "user", content: "next prompt" }])).toBeUndefined(); // no leftover seed
+    fireAgentEnd("reply");
+    await turnB;
+  });
+
+  it("dispose() only clears a session's OWN history seed, never a sibling's (mirrors the in-flight guard)", async () => {
+    const { pi, fireContext, fireAgentEnd } = fakePi();
+    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry());
+
+    const resumed = startAgent({ stepName: "plan", history });
+    const other = startAgent({ stepName: "other" }); // never starts a turn, has no history of its own
+    other.dispose(); // must be a no-op w.r.t. `resumed`'s active seed
+
+    const turn = resumed.sendAndAwaitEnd("answered: Redis");
+    expect(fireContext([{ role: "user", content: "answered: Redis" }])).toEqual({
+      messages: [...history, { role: "user", content: "answered: Redis" }],
+    });
+    fireAgentEnd("planning with Redis");
+    await turn;
   });
 });
