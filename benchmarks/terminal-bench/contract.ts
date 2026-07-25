@@ -73,8 +73,22 @@ export const READ_ONLY = [
   "installs). A later step does the work; doing it here would leave it unverified.",
 ].join("\n");
 
-export function timeLine(remainingSec: number): string {
-  return `TIME: about ${Math.max(0, Math.round(remainingSec))}s remain before this machine is taken away and graded. A correct, verified partial result beats an elaborate unfinished one — do not start work you cannot land in the time left.`;
+/**
+ * What a step is told about the clock. It gets TWO numbers, and the first one matters most: its own box.
+ *
+ * Measured: with only the run's remaining time in the prompt, four in ten `survey` steps explored as
+ * though they owned the whole budget and were killed mid-thought at their cap — leaving the run with no
+ * acceptance criteria at all, which everything downstream is built on. A step that knows it has 180
+ * seconds paces itself to produce something in 180 seconds; a step told it has 855 does not.
+ */
+export function timeLine(stepSec: number, remainingSec: number): string {
+  return [
+    `TIME: you have about ${Math.max(0, Math.round(stepSec))}s for THIS step. It is a hard limit — if you`,
+    "overrun it you are stopped where you stand and whatever you have not written down is lost. Aim to",
+    "finish comfortably inside it, and if you are running short, produce your best answer NOW rather than",
+    "a better one you will never get to deliver.",
+    `(The whole run has about ${Math.max(0, Math.round(remainingSec))}s left before this machine is graded.)`,
+  ].join("\n");
 }
 
 export function criteriaBlock(criteria: readonly { id: string; statement: string; check: string; expect: string }[]): string {
