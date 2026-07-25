@@ -131,6 +131,16 @@ export interface AgentRequest {
    * spec §2.2 exists to rule out.
    */
   readonly isolated?: boolean;
+  /**
+   * The attempt's abort signal — the run's cancel signal (spec §8.8) combined with the step's wall-time
+   * budget (spec §9.4). A host that runs this request as an out-of-process subagent MUST honour it, or
+   * the two mechanisms become lies: `/workflow cancel` would report a stopped run while its subagent
+   * kept spending tokens and writing files, and a budget would fail the attempt while orphaning the
+   * process it was meant to bound. Worse, with no budget declared — the default — an unresponsive
+   * subagent would hang the run with nothing able to interrupt it. The in-session path needs nothing
+   * here: the engine already stops at turn boundaries, and that session belongs to PI, not to us.
+   */
+  readonly signal?: AbortSignal;
 }
 
 /** Token usage reported by a single agent turn (spec §9.3). */

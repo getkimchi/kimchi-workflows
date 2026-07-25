@@ -19,14 +19,17 @@ const fixedResolver = (args: readonly string[]) => ({ command: "pi", args });
 interface FakeExecCall {
   readonly command: string;
   readonly args: readonly string[];
+  readonly signal?: AbortSignal;
 }
 
 function fakePi(execImpl: (call: FakeExecCall) => ExecResult): { pi: ExtensionAPI; calls: FakeExecCall[] } {
   const calls: FakeExecCall[] = [];
   const pi = {
     on: () => {},
-    exec: async (command: string, args: string[]) => {
-      const call = { command, args };
+    // Records the options too: a double that silently drops them is how the missing cancel/timeout
+    // signal went unnoticed while every offline test stayed green.
+    exec: async (command: string, args: string[], options?: { signal?: AbortSignal }) => {
+      const call = { command, args, signal: options?.signal };
       calls.push(call);
       return execImpl(call);
     },
@@ -96,6 +99,30 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
     const startAgent = createPiAgentBridge(pi, fixedResolver)(fakeModelRegistry());
 
     expect(() => startAgent({ stepName: "fg" })).not.toThrow();
+  });
+
+  // Spec §8.8/§9.4: the child must be killable. Without this the engine's cancel and wall-time budget
+  // both become claims about a process they cannot reach — and with no budget declared (the default) an
+  // unresponsive subagent would hang the run outright.
+  it("hands the attempt's abort signal to the spawned process", async () => {
+    const controller = new AbortController();
+    const { pi, calls } = fakePi(() => ok(JSON.stringify({ type: "message_end", messages: [{ role: "assistant", content: "hi" }] })));
+    const startAgent = createPiAgentBridge(pi, fixedResolver)(fakeModelRegistry());
+
+    await startAgent({ stepName: "bg", background: true, signal: controller.signal }).sendAndAwaitEnd("go");
+
+    expect(calls[0]?.signal).toBe(controller.signal);
+  });
+
+  it("fails the attempt when the signal aborted, rather than reporting the killed process as success", async () => {
+    const controller = new AbortController();
+    const { pi } = fakePi(() => {
+      controller.abort(); // the child is killed mid-flight; exec resolves with whatever it had
+      return ok("");
+    });
+    const startAgent = createPiAgentBridge(pi, fixedResolver)(fakeModelRegistry());
+
+    await expect(startAgent({ stepName: "bg", background: true, signal: controller.signal }).sendAndAwaitEnd("go")).rejects.toThrow(/aborted/);
   });
 });
 

@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -106,6 +106,34 @@ describe("filesystem run store (spec §8.7)", () => {
       .map((line) => (JSON.parse(line) as { message: string }).message);
 
     expect(messages).toEqual(Array.from({ length: count }, (_, i) => `m${i}`));
+  });
+
+  // A process killed mid-append (spec §7.3's stale-lock case) leaves a half-written last line. That
+  // append never completed, so the run must still load — and `run list`, which reads every log, must
+  // not be taken down by one of them.
+  it("loads a log whose last line was truncated by a killed process", async () => {
+    const store = createFsStore(projectRoot);
+    const result = await runWorkflow(helloWorkflow, undefined, createHostPort(store));
+    const logPath = path.join(projectRoot, ".pi", "workflows", `${result.runId}.jsonl`);
+
+    const intact = await readFile(logPath, "utf8");
+    await writeFile(logPath, `${intact}{"type":"step-star`, "utf8");
+
+    const events = await store.loadEvents(result.runId);
+    expect(events.map((event) => event.type)).toEqual(["run-started", "step-started", "step-completed", "run-completed"]);
+    expect(await store.list()).toHaveLength(1);
+  });
+
+  it("refuses a log corrupted in the middle rather than silently dropping the event", async () => {
+    const store = createFsStore(projectRoot);
+    const result = await runWorkflow(helloWorkflow, undefined, createHostPort(store));
+    const logPath = path.join(projectRoot, ".pi", "workflows", `${result.runId}.jsonl`);
+
+    const lines = (await readFile(logPath, "utf8")).trim().split("\n");
+    lines.splice(1, 0, "{ truncated mid-file");
+    await writeFile(logPath, `${lines.join("\n")}\n`, "utf8");
+
+    await expect(store.loadEvents(result.runId)).rejects.toThrow(/corrupt run log .* at line 2/);
   });
 });
 
