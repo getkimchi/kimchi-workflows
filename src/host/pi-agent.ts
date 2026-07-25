@@ -30,24 +30,64 @@
  * events as they arrive, for a subagent tool's live progress UI). A background workflow step has no
  * such UI: it only ever needs the FINAL structured output, so awaiting the whole process and parsing
  * its complete stdout in one pass (`parseNdjsonMessages`, pi-agent-messages.ts) is simpler and just as
- * correct. `PI_BINARY` is the one seam a live run against a real `pi` install points at; the parsing
- * itself is pure and covered offline by captured fixture lines (test/pi-agent-messages.test.ts) — the
- * process spawn is the one part that genuinely cannot be exercised without a real binary.
+ * correct. The parsing itself is pure and covered offline by captured fixture lines
+ * (test/pi-agent-messages.test.ts) — the process spawn is the one part that genuinely cannot be
+ * exercised without a real binary.
+ *
+ * `resolvePiInvocation` (below) picks WHICH binary that spawn targets — deliberately not a hardcoded
+ * literal `"pi"`, since this module stays host-agnostic (no product-specific coupling beyond the
+ * `ExtensionAPI` surface): a background step must respawn whatever harness is ACTUALLY running it
+ * right now (kimchi, plain `pi`, or any other embedder), not a guess. It mirrors upstream's own
+ * `examples/extensions/subagent/index.ts` (`getPiInvocation`) — the file this header already cites as
+ * the isolation mechanism's model — confirmed live in the P7 harness pass: the plain global `pi`
+ * binary has no knowledge of a host-specific provider (e.g. kimchi's own `kimchi-dev` gateway), so a
+ * literal `"pi"` silently spawns the wrong binary whenever the embedding harness is anything other
+ * than vanilla `pi` itself.
  */
+import { existsSync } from "node:fs";
+import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentRequest, AgentSession, AgentTurn, ConversationMessage } from "../engine/types.ts";
 import { type AgentMessages, lastAssistantText, lastAssistantUsage, type ModelRegistry, parseNdjsonMessages, resolveModel } from "./pi-agent-messages.ts";
 
 export type AgentStarter = (request: AgentRequest) => AgentSession;
 
-/** The `pi` binary a background subagent is spawned from — overridable for pointing at a specific install (e.g. in the live E2E phase). */
-const PI_BINARY = "pi";
+/** What to spawn (`pi.exec`'s first two arguments) for a background subagent, given the CLI args after the binary name. */
+export type PiInvocationResolver = (args: readonly string[]) => { command: string; args: readonly string[] };
+
+/**
+ * Respawn the CURRENTLY RUNNING harness process itself, so a background subagent always lands in the
+ * same host it was launched from (same provider registry, same auth) — never a different product.
+ * Three cases, in order, matching upstream's `getPiInvocation`:
+ *   1. Dev/interpreter invocation (`node`/`bun script.ts ...`): `process.argv[1]` is a real file on
+ *      disk → respawn `[process.execPath, thatScript, ...args]`.
+ *   2. A compiled single-file executable (e.g. kimchi's built binary, or `pi`'s): `process.execPath`'s
+ *      basename is not a generic runtime name → respawn `process.execPath` directly.
+ *   3. Last resort — matches the previous hardcoded behaviour: literal `"pi"` on `PATH`.
+ */
+export function resolvePiInvocation(args: readonly string[]): { command: string; args: readonly string[] } {
+  const currentScript = process.argv[1];
+  const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
+  if (currentScript && !isBunVirtualScript && existsSync(currentScript)) {
+    return { command: process.execPath, args: [currentScript, ...args] };
+  }
+
+  const execName = path.basename(process.execPath).toLowerCase();
+  const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
+  if (!isGenericRuntime) {
+    return { command: process.execPath, args };
+  }
+
+  return { command: "pi", args };
+}
 
 /**
  * Create the PI agent bridge. Call once per extension instance (registers one `agent_end` listener),
- * then obtain a per-run `AgentStarter` bound to the command's model registry.
+ * then obtain a per-run `AgentStarter` bound to the command's model registry. `invocationResolver`
+ * defaults to {@link resolvePiInvocation}; tests inject a fixed stub instead of depending on the live
+ * process's own argv/execPath.
  */
-export function createPiAgentBridge(pi: ExtensionAPI): (modelRegistry: ModelRegistry) => AgentStarter {
+export function createPiAgentBridge(pi: ExtensionAPI, invocationResolver: PiInvocationResolver = resolvePiInvocation): (modelRegistry: ModelRegistry) => AgentStarter {
   let pending: ((turn: AgentTurn) => void) | undefined;
   let lastConversation: AgentMessages = [];
 
@@ -61,7 +101,7 @@ export function createPiAgentBridge(pi: ExtensionAPI): (modelRegistry: ModelRegi
 
   return (modelRegistry) => (request) => {
     if (request.background) {
-      return backgroundSession(pi, modelRegistry, request);
+      return backgroundSession(pi, modelRegistry, request, invocationResolver);
     }
     return {
       async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
@@ -98,7 +138,7 @@ export function createPiAgentBridge(pi: ExtensionAPI): (modelRegistry: ModelRegi
  * access to the parent session's history — `request.history` is always undefined for a background
  * request (see AgentRequest's doc, engine/types.ts) so there is nothing to seed it with anyway.
  */
-function backgroundSession(pi: ExtensionAPI, modelRegistry: ModelRegistry, request: AgentRequest): AgentSession {
+function backgroundSession(pi: ExtensionAPI, modelRegistry: ModelRegistry, request: AgentRequest, invocationResolver: PiInvocationResolver): AgentSession {
   return {
     async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
       const args = ["--mode", "json", "-p", "--no-session"];
@@ -112,7 +152,8 @@ function backgroundSession(pi: ExtensionAPI, modelRegistry: ModelRegistry, reque
       }
       args.push(message);
 
-      const result = await pi.exec(PI_BINARY, args);
+      const invocation = invocationResolver(args);
+      const result = await pi.exec(invocation.command, [...invocation.args]);
       if (result.code !== 0) {
         throw new Error(`background subagent step "${request.stepName}" exited with code ${result.code}: ${result.stderr.trim() || "(no stderr)"}`);
       }
