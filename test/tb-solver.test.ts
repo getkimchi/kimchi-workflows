@@ -116,6 +116,52 @@ describe("tb-solver: what the steps are told", () => {
     expect(verifyPrompt).toContain("DO NOT FIX ANYTHING");
   });
 
+  it("carries the previous round's own work forward, so a time-boxed implementer resumes instead of restarting", async () => {
+    const run = await createTestRun(tbSolver, {
+      input: roomyInput(),
+      agents: {
+        survey: [reply(plan)],
+        implement: [reply({ changes: "wrote half of /app/ext.pyx", ranChecks: "none yet", incomplete: "the setup.py build still fails" }), reply(work)],
+        verify: [reply({ allPass: false, failures: [{ id: "c1", actual: "exit 1", diagnosis: "not built" }] }), reply({ allPass: true, failures: [] })],
+      },
+    });
+
+    expect(run.status).toBe("completed");
+    const second = run.agent("implement").messages[1] as string;
+    expect(second).toContain("wrote half of /app/ext.pyx"); // what it did…
+    expect(second).toContain("the setup.py build still fails"); // …and what it knew was left
+    expect(second).toContain("continuing it, not starting over");
+  });
+
+  it("time-boxes every agent step to a share of the run, and lets the workers fail without ending it", () => {
+    // A cap in absolute ms is meaningless against a clock it does not know: an implement step capped at
+    // 900s inside an 855s run can never fire, which is how v2 lost tasks the baseline solved.
+    const steps = new Map<string, { maxDurationMs?: number; optional?: boolean }>();
+    const walk = (nodes: readonly unknown[]): void => {
+      for (const node of nodes as { kind: string; step?: { kind: string; name: string; maxDurationMs?: number; optional?: boolean }; body?: { nodes: unknown[] } }[]) {
+        if (node.kind === "step" && node.step?.kind === "agent") steps.set(node.step.name, node.step);
+        if (node.body) walk(node.body.nodes);
+      }
+    };
+    walk(tbSolver.nodes);
+
+    const budgetMs = 900_000; // the default the workflow is built against
+    for (const [name, step] of steps) {
+      expect(step.maxDurationMs, name).toBeGreaterThan(0);
+      expect(step.maxDurationMs ?? 0, name).toBeLessThan(budgetMs / 2);
+    }
+    // One survey plus a full round has to fit, with room left to settle.
+    const round = (steps.get("survey")?.maxDurationMs ?? 0) + (steps.get("implement")?.maxDurationMs ?? 0) + (steps.get("verify")?.maxDurationMs ?? 0);
+    expect(round).toBeLessThan(budgetMs * 0.8);
+
+    // The workers may be cut short; that must cost the round, not the run.
+    expect(steps.get("implement")?.optional).toBe(true);
+    expect(steps.get("verify")?.optional).toBe(true);
+    // Survey is optional too: a slow recon that blew its cap used to crash the run with nothing
+    // attempted, so the workers fall back to the task statement instead.
+    expect(steps.get("survey")?.optional).toBe(true);
+  });
+
   it("runs every step as an isolated subagent, so no two share a conversation", () => {
     const names = ["survey", "implement", "verify"];
     const agents = new Map<string, { background?: boolean }>();
