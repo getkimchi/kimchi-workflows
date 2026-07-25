@@ -262,7 +262,17 @@ async function runAgentSession(
   const maxRepairs = noSteering ? 0 : Math.max(0, step.maxOutputRepairs ?? DEFAULT_MAX_OUTPUT_REPAIRS);
   const steerSchema = step.asks ? buildQaSchema(step.outputSchema) : step.outputSchema;
   const history = entry.kind === "answer" ? entry.conversation : undefined;
-  const session = host.startAgent({ model, history, stepName: step.name, background: step.background, isolated, signal });
+  // `resumeKey` is the step's own name: every execution of THIS step continues the same conversation,
+  // which is what makes a round-two worker pick up where round one was cut off (spec §2.2).
+  const session = host.startAgent({
+    model,
+    history,
+    stepName: step.name,
+    background: step.background,
+    isolated,
+    resumeKey: step.resumable === true ? step.name : undefined,
+    signal,
+  });
 
   try {
     let message = entry.kind === "answer" ? formatAnswers(entry.answers) : freshPrompt(step, input, ctx);
