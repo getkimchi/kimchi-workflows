@@ -48,7 +48,12 @@ export async function resumeWorkflow(workflow: WorkflowDefinition, priorEvents: 
   const prefixNames = new Set(workflow.nodes.slice(0, startIndex).map((node) => nodeName(node)));
   const stepOutputs = new Map<string, unknown>();
   for (const [key, value] of fullStepOutputs) {
-    if (prefixNames.has(key.split("/")[0] ?? key)) stepOutputs.set(key, value);
+    // Match on the root segment's NAME, not the raw text before the first "/": a foreach keeps its item
+    // index in the static key (spec §5.4), so a completed prefix foreach's inner outputs are keyed
+    // `each@0/inner` — comparing the raw `each@0` against the node name `each` would drop every one of
+    // them, and a step in the restarted node reading one would see `undefined` where a fresh run sees a
+    // value.
+    if (prefixNames.has(rootName(key))) stepOutputs.set(key, value);
   }
 
   let previousOutput: unknown = initialInput;
@@ -336,6 +341,11 @@ export function pendingQuestionnaires(priorEvents: readonly RunEvent[]): Questio
   }
   pending.sort((a, b) => a.index - b.index);
   return pending.map((entry) => entry.event);
+}
+
+/** The name of a static key's ROOT segment — the top-level node it belongs to (`each@0/inner` → `each`). */
+function rootName(staticKey: string): string {
+  return parsePath(staticKey)[0]?.name ?? staticKey;
 }
 
 /** Index of the first top-level node with no recorded completion (its own bare name absent from `stepOutputs`). */

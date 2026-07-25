@@ -93,4 +93,54 @@ describe("fresh ≡ resume invariant (spec §8): resume state matches an interru
     // `before` (completed prefix) is not re-run.
     expect(resumeRun.calls.before).toBe(0);
   });
+
+  it("a step inside a completed-prefix FOREACH stays readable by explicit path after a resume", async () => {
+    // A foreach keeps its item index in the static key (spec §5.4), so its inner steps are recorded as
+    // `each@0/inner` — the seeded prefix must recognize those as belonging to the completed `each` node.
+    const build = () => {
+      let failAfter = true;
+      const body = createWorkflow({ name: "each-body" })
+        .then(createStep({ name: "inner", input: counterSchema, output: counterSchema, run: ({ input }) => ({ n: input.n * 10 }) }))
+        .commit();
+      const seen: unknown[] = [];
+      const workflow = createWorkflow({ name: "foreach-prefix" })
+        .foreach(body, () => [{ n: 1 }, { n: 2 }], { name: "each" })
+        .then(
+          createStep({
+            name: "after",
+            output: counterSchema,
+            run: ({ ctx }) => {
+              if (failAfter) {
+                failAfter = false;
+                throw new Error("boom in after");
+              }
+              seen.push(ctx.getStepResult("each@0/inner"), ctx.getStepResult("each@1/inner"));
+              return { n: 0 };
+            },
+          }),
+        )
+        .commit();
+      return { workflow, seen };
+    };
+
+    const fresh = build();
+    const freshHost = createTestHost();
+    expect((await runWorkflow(fresh.workflow, undefined, freshHost.host)).status).toBe("crashed");
+    // The retry-free crash leaves `after` incomplete; a second fresh run of the SAME definition (its
+    // `failAfter` latch now spent) is the baseline for what the reader should see.
+    const freshAgain = await runWorkflow(fresh.workflow, undefined, freshHost.host);
+    expect(freshAgain.status).toBe("completed");
+    expect(fresh.seen).toEqual([{ n: 10 }, { n: 20 }]);
+
+    const interrupted = build();
+    const { host, store } = createTestHost();
+    const first = await runWorkflow(interrupted.workflow, undefined, host);
+    expect(first.status).toBe("crashed");
+
+    const resumed = await resumeWorkflow(interrupted.workflow, await store.loadEvents(first.runId), host);
+    expect(resumed.status).toBe("completed");
+    // THE INVARIANT: the resumed `after` reads the completed foreach's per-item step outputs, exactly
+    // as a fresh run does — the foreach itself is NOT re-run for them to be there.
+    expect(interrupted.seen).toEqual([{ n: 10 }, { n: 20 }]);
+  });
 });
