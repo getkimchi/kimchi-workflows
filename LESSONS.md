@@ -118,11 +118,70 @@ I gave `implement` a 900s cap inside an 855s run. It could never fire, so a sing
 harness killed the run mid-edit — twice, on tasks the baseline solved. Any per-unit budget expressed in
 absolute units against a total the code doesn't read is decoration. Derive it, or don't claim it.
 
+### A constant calibrated at one scale is a bug at every other scale
+
+The sharper version of the lesson above, and it cost a whole benchmark run to learn properly. Two
+constants were tuned where the budget was always 900s:
+
+```
+MAX_ROUNDS = 3                       // three rounds IS a 900s budget
+implement  = min(45% of budget, 420s)  // the ceiling never binds at 900s
+```
+
+Across the full 89-task set, budgets run from 750s to 12000s, and both invert. A 12000s task got the
+same seven-minute implementation window as a 900s one, then `MAX_ROUNDS` ended the run:
+
+```
+build-pov-ray     stopped holding 11170s of 12000s  (7% used)
+compile-compcert  stopped holding  1861s of  2400s
+circuit-fibsqrt   used 4% of its budget
+```
+
+Long tasks spent a mean of **50%** of their allowance. The tell was not the score — it was that the
+*ratio of budget used to budget available* varied wildly by task size. Any constant that encodes "how
+much" should be derived from the quantity it is bounding, and if it can't be, its calibration range
+belongs in a comment next to it.
+
+### Measure the round you had, don't predict the round you'll get
+
+Replacing the fixed count with "stop when another round wouldn't fit" raises the question: how big is a
+round? Computing it from the step caps is wrong — caps are worst-case, and a real round routinely costs
+a fraction of them, so a cap-based estimate refuses rounds there is ample time for. Measuring what the
+round just cost (`remaining at open − remaining at close`) is both simpler and honest.
+
+### A safety valve must fail gracefully, or it is just a different crash
+
+Removing the round cap surfaced a case the clock cannot catch: rounds so cheap they consume no budget
+(every attempt failing in seconds) loop forever. The loop's own `maxIterations` guard *would* have
+caught it — by crashing the run and skipping the final report, losing the cleanup and the summary. So
+the valve has to live in the normal stop condition, not in the guard. The guard's job is to be the thing
+that never fires.
+
 ### Don't retry what a repeat cannot fix
 
 Wall-time overrun is not a transient failure: the work was too big for the box, and nothing about that
 changes on a second attempt. Two runs lost 216s and 270s of an 855s budget to retries that timed out
 identically. Retry classification should follow the *cause*, not the failure count.
+
+### Self-verification worked — and I nearly discarded it on principle
+
+The received wisdom is that a model checking its own work is worthless. Over 78 real trials, the
+verifier was **well calibrated**:
+
+| its verdict | trials | actually solved |
+| --- | --- | --- |
+| "done" | 34 | 27 (**79%**) |
+| "not done" | 44 | 8 (18%) |
+
+Seven false positives out of thirty-four. What makes the difference is not the model's judgement but the
+form of the question: the verifier is given *executable* criteria, runs them, and never sees the
+implementer's account of its own work. Asked to produce command output rather than an opinion, it is
+mostly right.
+
+That table also reframed the whole investigation. The failure was not bad judgement — it was that
+**44 runs stopped while their own verifier was still reporting failures**, most with budget left. Which
+is a scheduling bug, not a reasoning one, and I would have gone looking in the wrong place without
+splitting the trials by what the workflow *believed* about itself.
 
 ### Verification only counts if it executes, and if it's independent
 
@@ -154,6 +213,13 @@ will do the work.
 ---
 
 ## Measurement discipline
+
+### Diagnose the mechanism, not the score
+
+0.432 says nothing about what to fix. What identified the cause, in one pass over the run's own event
+logs, was a handful of derived quantities: percentage of budget consumed, what the workflow believed at
+the end, which step failed, and what stopped the loop. Score is the thing you optimise; mechanism is the
+thing you can act on, and at n=1 it is also the only one that is reliable.
 
 ### n=1 is not a measurement
 
@@ -209,4 +275,13 @@ within one live run.
   workflow that spawns a subprocess per step is penalised by contention far more than a single-session
   agent, and several tasks that finished comfortably alone ran to their deadline under load.
 - **Check the run actually finished before reading results.** I analysed a job while three containers
-  were still up and briefly believed two tasks had errored.
+  were still up and briefly believed two tasks had errored. Later I made the opposite error and
+  announced a completed run was "dead" because no processes remained — the job-level `result.json`
+  existed the whole time. Check for the artifact, not for the process.
+- **A full run exposes infrastructure, not just the agent.** Of 89 tasks: 8 never produced a trial, 9
+  errored, and one wrote a zero-byte `result.json` — the signature of a process dying mid-write while
+  the disk sat at 95%. Any of those can masquerade as model failure. Before reading a benchmark result,
+  reconcile the trial count against the task count and check `df`.
+- **Docker image sizes double-count shared layers.** Deleting 18 `arctus-backend` tags that `docker
+  images` listed at ~1.04GB each reclaimed ~1.1GB total, not ~18GB: they shared nearly every layer. The
+  build cache — invisible in `docker images` — was the real consumer at 37GB.
