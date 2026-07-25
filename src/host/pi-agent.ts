@@ -67,7 +67,7 @@
  * literal `"pi"` silently spawns the wrong binary whenever the embedding harness is anything other
  * than vanilla `pi` itself.
  */
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import type { ContextEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentRequest, AgentSession, AgentTurn, ConversationMessage } from "../engine/types.ts";
@@ -102,6 +102,14 @@ export function resolvePiInvocation(args: readonly string[]): { command: string;
   }
 
   return { command: "pi", args };
+}
+
+/** Where a resumable isolated step's session file lives; the harness creates the file, we own the directory. */
+function resumeSessionPath(resumeKey: string): string {
+  const dir = process.env.PI_WORKFLOW_SESSIONS_DIR ?? path.join(process.cwd(), ".pi", "workflows", "sessions");
+  mkdirSync(dir, { recursive: true });
+  // The key is a step name, which `.commit()` has already cleared of path syntax (spec §3).
+  return path.join(dir, `${resumeKey}.jsonl`);
 }
 
 /**
@@ -209,7 +217,12 @@ export function createPiAgentBridge(pi: ExtensionAPI, invocationResolver: PiInvo
 function backgroundSession(pi: ExtensionAPI, modelRegistry: ModelRegistry, request: AgentRequest, invocationResolver: PiInvocationResolver): AgentSession {
   return {
     async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
-      const args = ["--mode", "json", "-p", "--no-session"];
+      // `--session <path>` both writes and RESUMES that file (the CLI's own wording), so a step asking
+      // to continue across executions (`AgentRequest.resumeKey`) simply names the same file each time:
+      // the second run starts with everything the first one had read, tried and learned, instead of
+      // rediscovering it. Everything else stays ephemeral — a fresh, small context per step is what
+      // makes a chain of isolated steps cheap, and a verifier's whole value is not remembering.
+      const args = ["--mode", "json", "-p", ...(request.resumeKey ? ["--session", resumeSessionPath(request.resumeKey)] : ["--no-session"])];
       if (request.model) {
         // Resolved (and rejected) up front, same as the interactive path: a typo'd model should fail
         // clearly here rather than surface as an opaque nonzero exit from the child process.
