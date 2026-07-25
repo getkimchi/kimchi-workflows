@@ -255,6 +255,25 @@ parameter, and produced **four commits that didn't typecheck** — while the fin
 check out every commit, typecheck, run the suite. Changes that must move together (a signature and its
 call sites) cannot be separated for narrative tidiness.
 
+### Rule a cause out by measuring it, not by finding it plausible
+
+A container was OOM-killed at its 2GB cgroup limit, and the orchestrator process — the one that runs no
+LLM turns at all — held 1GB of it. Two framework explanations fit the shape of the evidence perfectly:
+
+- **The engine accumulates run state.** Ruled out: the run had completed 7 steps and 2 agent turns. Step
+  outputs are small JSON; there was nothing there to hold.
+- **`pi.exec` buffers the whole subagent stdout** (it does — the entire NDJSON event stream, parsed in
+  one pass, to extract only the final assistant message). Ruled out by measuring the actual ratio: a
+  400KB tool output produces 735KB of stdout, so reaching 683MB needs ~150MB of tool output, and the
+  task's whole session file was 204KB.
+
+I had started rewriting the spawn path on the second theory before measuring it. Both theories were
+mechanically sound and both were wrong; the cause is the host runtime's own heap behaviour in a cgroup
+it can't see (Bun/JSC sizes its heap from *host* RAM, 31GB, while confined to 2GB). The general point:
+"this could produce the symptom" is a hypothesis, and the cheap measurement that discriminates between
+hypotheses is almost always available. An unbounded buffer is still worth fixing on its own merits —
+but as its own change, with its own evidence, not smuggled in as a fix for something it didn't cause.
+
 ### Green offline suites hide exactly the bugs that matter
 
 The fake agent bridge doesn't model the harness's one-turn-in-flight limit; the offline suite doesn't
@@ -282,6 +301,13 @@ within one live run.
   errored, and one wrote a zero-byte `result.json` — the signature of a process dying mid-write while
   the disk sat at 95%. Any of those can masquerade as model failure. Before reading a benchmark result,
   reconcile the trial count against the task count and check `df`.
+- **A subprocess-per-step workflow pays a memory tax the single-session agent doesn't.** Task containers
+  cap at `memory_mb = 2048` (`task.toml`); a workflow runs orchestrator *and* subagent inside that one
+  limit. Measured steady state: subagents are stable at ~230MB, the orchestrator ranges 200MB–1GB, and
+  when the pair crosses 2GB the kernel kills it — `exit code 137`, which surfaces as a bare `0.0` reward
+  with a near-empty event log. This is environmental, not a framework defect (see the "rule a cause out"
+  entry above), and it cost ~10% of trials in both full runs. Check `dmesg` for
+  `constraint=CONSTRAINT_MEMCG` before blaming the model for a task that produced almost no events.
 - **Docker image sizes double-count shared layers.** Deleting 18 `arctus-backend` tags that `docker
   images` listed at ~1.04GB each reclaimed ~1.1GB total, not ~18GB: they shared nearly every layer. The
   build cache — invisible in `docker images` — was the real consumer at 37GB.
