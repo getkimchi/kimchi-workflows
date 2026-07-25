@@ -7,20 +7,26 @@
  * green suite hiding a race (see the module's tests, scheduler.test.ts, and the workflow-level
  * concurrency tests in parallel.test.ts / foreach-concurrency.test.ts).
  *
- * Two pieces:
+ * Two pieces, deliberately unaware of each other:
  *  - {@link ConcurrencyGate} — the RUN-WIDE ceiling (spec §3.6): one instance per run, shared by every
- *    construct (including nested workflows, which inherit it — see `RunState.concurrencyGate`), so the
- *    ceiling bounds TOTAL in-flight steps across the whole tree, not per construct.
- *  - {@link runConcurrent} — runs one construct's own items/arms through that shared gate, additionally
- *    bounded by a LOCAL cap (a foreach's own `concurrency`, or a parallel's arm count). Implements
- *    drain-then-crash (spec §9.5): once any settled result asks to stop, no further items START: already
- *    running ones finish naturally.
+ *    construct (including nested workflows, which inherit it — see `RunState.concurrencyGate`). It is
+ *    held by a STEP, for exactly as long as that step executes (`runStepNode`, execute.ts), so the
+ *    ceiling bounds "steps executing at once" across the whole tree, exactly as spec §3.6 words it.
+ *    Gating the enclosing CONSTRUCT instead would deadlock the moment constructs nest: a foreach at the
+ *    ceiling would hold every slot while its items waited for slots for their own inner fan-out.
+ *  - {@link runConcurrent} — runs one construct's own items/arms, bounded by a LOCAL cap (a foreach's
+ *    own `concurrency`, or the ceiling for a parallel, which declares none). Since a leaf step is what
+ *    holds a gate slot, this needs no gate of its own — lanes are the construct's shape, slots are the
+ *    run's budget. Implements drain-then-crash (spec §9.5): once any settled result asks to stop, no
+ *    further items START: already running ones finish naturally.
  *
  * Pure — no fs/PI/network/setTimeout.
  */
 
 /** A run-wide semaphore (spec §3.6): at most `limit` holders at once, FIFO wake order. */
 export interface ConcurrencyGate {
+  /** The ceiling this gate was sized to — also what a `.parallel` (which declares no cap of its own) uses as its lane count. */
+  readonly limit: number;
   /** Resolve once a slot is free (immediately if one already is). */
   acquire(): Promise<void>;
   /** Release a held slot, waking the longest-waiting queued acquirer, if any. */
@@ -34,6 +40,7 @@ export function createConcurrencyGate(limit: number): ConcurrencyGate {
   const queue: Array<() => void> = [];
 
   return {
+    limit: capacity,
     acquire(): Promise<void> {
       if (active < capacity) {
         active += 1;
@@ -55,22 +62,21 @@ export function createConcurrencyGate(limit: number): ConcurrencyGate {
 }
 
 /**
- * Run `items` through `worker`, each acquiring a slot from the shared run-wide `gate` (spec §3.6) AND
- * respecting `localLimit` — this construct's own concurrency cap (a foreach's declared `concurrency`,
- * or `items.length` for a parallel, which has none). Results land at their ITEM'S OWN INDEX in the
- * returned array regardless of completion order (spec §3.4/§3.5's item/name-ordering guarantee starts
- * here).
+ * Run `items` through `worker` in at most `localLimit` lanes — this construct's own concurrency cap (a
+ * foreach's declared `concurrency`, or the run's ceiling for a parallel, which declares none). Results
+ * land at their ITEM'S OWN INDEX in the returned array regardless of completion order (spec §3.4/§3.5's
+ * item/name-ordering guarantee starts here). The run-wide ceiling is enforced one level down, by the
+ * steps themselves (see the module header), so nothing here touches the gate.
  *
  * Drain-then-crash (spec §9.5): `shouldStop` is checked against each settled result; once it returns
- * true, no further items are STARTED (an item already past `gate.acquire()` and running is not
- * interrupted — it finishes and checkpoints normally, per spec). Already-queued-but-not-yet-started
- * items simply never run, staying whatever `results[i]` starts as (the caller distinguishes "ran" from
- * "never started" itself, e.g. via a discriminated `TResult`).
+ * true, no further items are STARTED — a lane claims its next item only after its current one settled,
+ * so the check is always seen before the claim. Items already running are not interrupted: they finish
+ * and checkpoint normally, per spec. Items that never start stay whatever `results[i]` starts as (the
+ * caller distinguishes "ran" from "never started" itself, e.g. via a discriminated `TResult`).
  */
 export async function runConcurrent<TItem, TResult>(
   items: readonly TItem[],
   worker: (item: TItem, index: number) => Promise<TResult>,
-  gate: ConcurrencyGate,
   localLimit: number,
   shouldStop: (result: TResult) => boolean,
 ): Promise<(TResult | undefined)[]> {
@@ -86,21 +92,11 @@ export async function runConcurrent<TItem, TResult>(
     return claimed;
   };
 
-  const runOne = async (index: number): Promise<void> => {
-    await gate.acquire();
-    try {
-      if (stopped) return; // crashed elsewhere while this lane waited for a slot — never start
+  const lane = async (): Promise<void> => {
+    for (let index = claimNext(); index !== undefined; index = claimNext()) {
       const result = await worker(items[index] as TItem, index);
       results[index] = result;
       if (shouldStop(result)) stopped = true;
-    } finally {
-      gate.release();
-    }
-  };
-
-  const lane = async (): Promise<void> => {
-    for (let index = claimNext(); index !== undefined; index = claimNext()) {
-      await runOne(index);
     }
   };
 

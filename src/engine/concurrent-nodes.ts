@@ -7,9 +7,11 @@
  * context.ts) rather than this file importing them — keeping the dependency one-directional
  * (execute.ts → here) instead of an import cycle.
  *
- * Every arm/item runs through the scheduler seam (scheduler.ts): a run-wide `ConcurrencyGate` shared by
- * every construct in the run (including nested workflows, which inherit it via `state`) plus a
- * per-construct local cap. Blocking (spec §8.6) suspends only its own arm — settling immediately with
+ * Every arm/item runs through the scheduler seam (scheduler.ts), bounded by this construct's own local
+ * cap (a foreach's declared `concurrency`; the run's ceiling for a parallel, which declares none). The
+ * run-wide ceiling itself is held one level down, by each STEP (`runStepNode`, execute.ts), so that
+ * constructs can nest without a construct ever waiting for a slot it is itself occupying — see
+ * scheduler.ts's header. Blocking (spec §8.6) suspends only its own arm — settling immediately with
  * its `questionnaire-asked` already recorded — while siblings keep running through the SAME pool. A
  * crash drains (spec §9.5): no new arms start, in-flight ones finish naturally, and any sibling that is
  * ALREADY blocked in the same round is abandoned (`step-cancelled`), not waited on. Resuming into a
@@ -24,7 +26,7 @@
  * Zero imports from PI, `node:fs`, or any network lib — see src/engine/types.ts.
  */
 import type { ForeachNode, ParallelNode } from "../flow/types.ts";
-import { createRunContext, type ExecOutcome, iso, type NodeWalker, type PendingBlock, type Reentry, type RunState } from "./context.ts";
+import { createRunContext, type ExecOutcome, emitNodeCompleted, iso, type NodeWalker, type PendingBlock, type Reentry, type RunState } from "./context.ts";
 import { appendForeachItem, appendSegment, formatPath, type NodePath, staticChildKey, staticKeyOf } from "./node-path.ts";
 import { runConcurrent } from "./scheduler.ts";
 import type { HostPort } from "./types.ts";
@@ -75,6 +77,19 @@ async function settleConcurrent(
 
 function toBlockedOutcome(block: PendingBlock): Extract<ExecOutcome, { kind: "blocked" }> {
   return { kind: "blocked", path: block.path, questionnaire: block.questionnaire, conversation: block.conversation };
+}
+
+/**
+ * The `onOk` a concurrent construct settles with (see {@link settleConcurrent}): checkpoint the
+ * construct's assembled output, then hand it to the next node. Deferred rather than emitted eagerly
+ * because a construct with any arm still pending has not completed at all — `output` is captured by
+ * reference, so arms that settle before this runs are included.
+ */
+function completeNode(host: HostPort, state: RunState, path: NodePath, output: unknown): () => Promise<ExecOutcome> {
+  return async () => {
+    await emitNodeCompleted(host, state, path, output);
+    return { kind: "ok", output };
+  };
 }
 
 async function emitStepCancelled(host: HostPort, state: RunState, path: string): Promise<void> {
@@ -168,7 +183,7 @@ async function runForeachSequential(
     innerReentry = undefined;
   }
 
-  await host.emit({ type: "node-completed", runId: state.runId, path: formatPath(foreachPath), output: results, at: iso(host) });
+  await emitNodeCompleted(host, state, foreachPath, results);
   return { kind: "ok", output: results };
 }
 
@@ -195,11 +210,7 @@ async function runForeachConcurrentFresh(
     else toRun.push(index);
   }
 
-  const emitOk = async (): Promise<ExecOutcome> => {
-    await host.emit({ type: "node-completed", runId: state.runId, path: formatPath(foreachPath), output: results, at: iso(host) });
-    return { kind: "ok", output: results };
-  };
-
+  const emitOk = completeNode(host, state, foreachPath, results);
   if (toRun.length === 0) return emitOk();
 
   const localLimit = Math.min(node.concurrency, toRun.length);
@@ -215,7 +226,6 @@ async function runForeachConcurrentFresh(
       }
       return outcome;
     },
-    state.concurrencyGate,
     localLimit,
     (outcome) => outcome.kind === "crashed" || outcome.kind === "cancelled",
   );
@@ -291,10 +301,7 @@ async function runForeachConcurrentReentry(
     extraOutcomes.push(outcome);
   }
 
-  return settleConcurrent(host, state, [targetOutcome, ...extraOutcomes], stillBlocked, async () => {
-    await host.emit({ type: "node-completed", runId: state.runId, path: formatPath(foreachPath), output: results, at: iso(host) });
-    return { kind: "ok", output: results };
-  });
+  return settleConcurrent(host, state, [targetOutcome, ...extraOutcomes], stillBlocked, completeNode(host, state, foreachPath, results));
 }
 
 /** The first item index with no recorded `foreach-item-completed` (0 if none recorded at all). */
@@ -346,8 +353,10 @@ export async function runParallelNode(
       const outcome = await walker.runStepNode(armStep, input, host, state, signal, parallelPath, undefined);
       return { name: armStep.name, outcome };
     },
-    state.concurrencyGate,
-    node.arms.length,
+    // A parallel declares no cap of its own (spec §3.5) — its lane count IS the run's ceiling, so a
+    // 20-arm fan-out runs `maxConcurrency` at a time (spec §3.6) and, once an arm crashes, the arms
+    // that have not started yet never do (drain-then-crash, spec §9.5).
+    state.concurrencyGate.limit,
     (result) => result.outcome.kind === "crashed" || result.outcome.kind === "cancelled",
   );
 
@@ -359,10 +368,7 @@ export async function runParallelNode(
     if (entry.outcome.kind === "ok") output[entry.name] = entry.outcome.output;
   }
 
-  return settleConcurrent(host, state, outcomes, [], async () => {
-    await host.emit({ type: "node-completed", runId: state.runId, path: formatPath(parallelPath), output, at: iso(host) });
-    return { kind: "ok", output };
-  });
+  return settleConcurrent(host, state, outcomes, [], completeNode(host, state, parallelPath, output));
 }
 
 async function runParallelReentry(
@@ -414,8 +420,5 @@ async function runParallelReentry(
   }
   if (targetOutcome.kind === "ok") output[targetName] = targetOutcome.output;
 
-  return settleConcurrent(host, state, [targetOutcome, ...extraOutcomes], stillBlocked, async () => {
-    await host.emit({ type: "node-completed", runId: state.runId, path: formatPath(parallelPath), output, at: iso(host) });
-    return { kind: "ok", output };
-  });
+  return settleConcurrent(host, state, [targetOutcome, ...extraOutcomes], stillBlocked, completeNode(host, state, parallelPath, output));
 }
