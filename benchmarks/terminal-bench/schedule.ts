@@ -29,10 +29,26 @@ export const BUDGET_SEC = Math.max(60, Number(process.env.TB_AGENT_TIMEOUT_SEC ?
  * 225s covers 98.8% of surveys that completed; 150s covered 88.8%.
  */
 export const SURVEY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.25, 180), 240) * 1000);
-// Ceiling 180s, not 300s: verification is paid ONCE PER ROUND, so a generous per-round cap compounds —
-// at a 1800s budget a 216s cap over two rounds put 25% of the run into checking. Observed cost is
-// 12-180s with a median near 40s, and it does not grow with task size the way the work does.
-export const VERIFY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.12, 120), 180) * 1000);
+/**
+ * The 12% stays and so does the ceiling — checking is paid ONCE PER ROUND, so a generous cap compounds
+ * over the rounds a long budget buys. Both BOUNDS move, because they were set below what checking costs.
+ *
+ * Measured in `jobs/2026-07-26__12-00-55`: 6 of 15 verifications died at their box, and the kills pile
+ * up ON the cap (180, 180, 180, 180) instead of trailing off — so the observed median of 101s is
+ * censored, not measured. A check killed at its cap is the worst outcome available: it spends the entire
+ * box AND returns nothing, so the round is decided by a default rather than by evidence.
+ *
+ * Only the CEILING moves, 180s -> 240s, and only because that is where the censoring actually is: four
+ * of the six kills are there, on the 1800s-and-up budgets where 240s is still a small share of the run.
+ *
+ * The floor stays at 120s against the temptation to raise it, because the surviving times say it is not
+ * the binding constraint: every verification that reached a verdict did so in 119s or less, so a check
+ * still going at 120s is one that has stopped converging rather than one that needs a little longer.
+ * Buying it more time on an 855s budget costs 30s per ROUND out of the work — on a run where checking
+ * already took 28% of the wall clock — to rescue a case the evidence says would not be rescued. The
+ * landing instruction in `verifyPrompt` is the fix for that end of the distribution, and it is free.
+ */
+export const VERIFY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.12, 120), 240) * 1000);
 
 /**
  * `implement` takes a share of the time ACTUALLY LEFT, resolved fresh on every round (spec §9.3's
@@ -77,11 +93,18 @@ export const implementBoxMs = (remainingSec: number): number => {
 };
 
 /**
- * The audit is `verify`'s job done by a different method over the same machine, so it is the same kind
- * of work with the same measured cost profile, and it gets the same box. Nothing about reading a machine
- * a second time is cheaper than reading it the first.
+ * The audit is NOT `verify` run twice, and pricing it as though it were killed every trial of it: both
+ * audits in `jobs/2026-07-26__12-27-05` spent their full 120s and returned no verdict at all — which
+ * `checkpoint` correctly reads as "no objection", so the step was pure cost and bought nothing.
+ *
+ * It is handed NO checklist, by design; that ignorance is the whole decorrelation. So before it can run
+ * a single check it has to derive its own, which is the reconnaissance `verify` is given for free. Its
+ * cost is `survey` PLUS `verify`, not `verify` — measured medians on this build, 130s and 101s.
+ *
+ * 20% floored at 240s and capped at 360s: roughly the sum of the two boxes whose work it actually does,
+ * so the step has room to reach a verdict rather than dying on the way to one.
  */
-export const AUDIT_CAP_MS = VERIFY_CAP_MS;
+export const AUDIT_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.2, 240), 360) * 1000);
 
 /**
  * Whether a second opinion on a "done" verdict is worth buying yet.
@@ -95,9 +118,11 @@ export const AUDIT_CAP_MS = VERIFY_CAP_MS;
  * So the question is not whether a second opinion is affordable but whether a DISAGREEMENT is: what has
  * to fit is the audit, plus the smallest repair round that could land anything, plus the check that
  * repair still has to pass, plus the settle margin. Below that the audit can only ever confirm a verdict
- * or deliver news nobody can act on, which is pure cost. At a 900s budget this lands at 390s, which is
- * also where the threshold analysis over those 45 verdicts put it: gating at ">300s left" would fire on
- * 27 of the 32 correct verdicts (what it costs) and on all 13 of the wrong ones (what it buys).
+ * or deliver news nobody can act on, which is pure cost. At a 900s budget this lands at 540s, up from
+ * 390s purely because the audit's own box grew (see `AUDIT_CAP_MS`). That is stricter than the ">300s
+ * left" the threshold analysis over those 45 verdicts pointed at — gating there would fire on 27 of the
+ * 32 correct verdicts (what it costs) and reach all 13 of the wrong ones (what it buys) — and the gate is
+ * only ever as generous as the audit is cheap. An audit that cannot finish reaches none of them.
  */
 export const auditIsAffordable = (remainingSec: number): boolean => remainingSec * 1000 >= AUDIT_CAP_MS + IMPLEMENT_FLOOR_MS + VERIFY_CAP_MS + ROUND_MARGIN_SEC * 1000;
 

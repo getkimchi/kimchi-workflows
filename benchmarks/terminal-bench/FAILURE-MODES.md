@@ -192,3 +192,47 @@ confirmed all 13.
 verdicts: gating at ">300s left" fires on 27 of the 32 correct verdicts (the cost) and reaches all 13 of
 the wrong ones (the opportunity). Below the gate a dissent cannot be repaired before the deadline, and a
 second opinion nobody can act on is pure cost — it can only confirm, or deliver news too late to use.
+
+---
+
+## F11. A check killed at its box costs the whole box and answers nothing
+
+**Measured** on the current build, per-step wall times from the workflow event logs:
+
+| step | job | n | timed out | times (s) |
+|---|---|---|---|---|
+| `survey` | `jobs/2026-07-26__12-00-55` | 14 | 3 (21%) | 51, 60, 60, 65, 79, 80, 129, 131, 131, 138, 165, 188, 199, 216 |
+| `verify` | `jobs/2026-07-26__12-00-55` | 15 | **6 (40%)** | 46, 46, 52, 54, 55, 57, 87, 101, 116, 119, 120, 180, 180, 180, 180 |
+| `implement` | `jobs/2026-07-26__12-00-55` | 16 | 4 (25%) | median 282 |
+| `audit` | `jobs/2026-07-26__12-27-05` | 2 | **2 (100%)** | 120, 120 |
+
+**A killed check is worse than a slow one, not merely later.** It spends the entire box AND returns
+nothing, so the round is decided by a DEFAULT instead of by evidence — and the two defaults point
+opposite ways. A silent `verify` reads as not passed, so the run pays another round to rediscover
+findings it had already made; a silent `audit` reads as no objection (correctly — F10's rule that silence
+must not reopen a finished round), so the run stops on the first checker's verdict and any defect the
+audit did find is lost with it. Both audit trials were exactly this: 120s spent, nothing bought.
+
+**Cause — the boxes were under the cost, and the surviving numbers say so.** The `verify` times pile up
+ON the cap (180, 180, 180, 180 at the large-budget cap; the 120s entries are the ~900s-budget cap) rather
+than trailing off, so the distribution is censored and its 101s "median" is not a measurement.
+`audit` was worse than mis-sized, it was mis-modelled: aliasing `AUDIT_CAP_MS = VERIFY_CAP_MS` assumed
+the same work by another method. It is not. The audit is handed NO checklist by design (that ignorance is
+the decorrelation), so it must derive its own checks before running any — it pays for the reconnaissance
+`verify` gets free, and costs `survey + verify`. Measured medians on this build: survey 130s, verify 101s.
+
+**Done:**
+- `VERIFY_CAP_MS` floor 120s -> 150s, ceiling 180s -> 240s. The 12% and the ceiling both stay: checking is
+  paid once per round, so a generous cap compounds over the rounds a long budget buys.
+- `AUDIT_CAP_MS` gets its own definition, `min(max(20%, 240s), 360s)` — roughly the two boxes whose work
+  it does. `auditIsAffordable` picks it up, so the gate moves from 390s to 540s at a 900s budget; the gate
+  is only ever as generous as the audit is cheap.
+- Both checker prompts now carry a landing instruction: reserve the final third of the box for writing
+  the verdict and stop investigating there, what that step's silence specifically costs, and that a
+  partial verdict delivered beats a thorough one that is not — report what was checked, list the rest
+  under `unchecked`. Prompt text only, near the end, before the verdict rules. **No landing loop**: F4
+  rejected the re-invocation, and unlike `survey` neither checker is resumable.
+
+**Still open:** `survey` truncated 3 in 14 and `implement` 4 in 16; neither box was changed here.
+`implement` is resumable, so its cap is recoverable (F4); `survey` is not, and its landing pass is what
+covers it.
