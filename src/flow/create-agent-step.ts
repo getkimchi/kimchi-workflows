@@ -1,5 +1,5 @@
 import type { Static, TSchema } from "typebox";
-import type { AgentPromptArgs, AgentStep, RetryPolicy } from "./types.ts";
+import type { AgentPromptArgs, AgentStep, RetryPolicy, RunContext } from "./types.ts";
 
 /** Static type the `prompt` builder receives as `input`: the input schema's Static type, or `undefined` when none. */
 type InferInput<TInputSchema extends TSchema | undefined> = TInputSchema extends TSchema ? Static<TInputSchema> : undefined;
@@ -23,8 +23,9 @@ export interface CreateAgentStepOptions<TInputSchema extends TSchema | undefined
   retry?: RetryPolicy;
   /** In-session output-steering budget (spec §9.2): corrections to attempt on invalid output. Default 2. */
   maxOutputRepairs?: number;
-  /** Per-step wall-time budget in ms (spec §9.3): exceeding it aborts the step → `budget-exceeded`. */
-  maxDurationMs?: number;
+  /** Per-step wall-time budget in ms (spec §9.3): exceeding it aborts the step → `budget-exceeded`.
+   * A function is resolved once per execution, letting a step in a loop size itself from remaining time. */
+  maxDurationMs?: number | ((args: { ctx: RunContext }) => number);
   /** Let the run continue when this step fails for good (spec §9.1): records `step-failed`, output is `undefined`. */
   optional?: boolean;
   /** Per-step token budget (spec §9.3): summed turn usage over this → `budget-exceeded`. */

@@ -15,11 +15,31 @@ import type { AgentTurn, HostPort, RetryReason } from "./types.ts";
 /** Default in-session output-steering budget (spec §9.2) when an agent step declares none. */
 const DEFAULT_MAX_OUTPUT_REPAIRS = 2;
 
-/** Fields the retry loop / budget wrapper need from any step. */
+/** Fields the retry loop / budget wrapper need from any step. The wall-time budget is NOT among them:
+ * it is resolved per execution by {@link resolveBudgetMs} and passed in already reduced to a number. */
 interface BudgetedStep {
   readonly name: string;
   readonly retry?: RetryPolicy;
-  readonly maxDurationMs?: number;
+}
+
+/**
+ * Reduce a step's declared budget (spec §9.3) to milliseconds for THIS execution.
+ *
+ * Called once, before the first attempt, so every retry of one execution races the same clock — a retry
+ * is a second try at the same work, not a fresh grant of time. The function form receives the same `ctx`
+ * a prompt builder does, which is what lets a step inside a loop take a share of the time actually left
+ * rather than a fixed slice sized for the worst case.
+ *
+ * A non-finite result is treated as "no budget declared" rather than crashing the run: the alternative
+ * is failing a step over arithmetic in a budget expression. A non-positive one is passed through
+ * unchanged — it means "no time left", and `withTimeBudget` turns that into an immediate
+ * `budget-exceeded` without starting the attempt.
+ */
+function resolveBudgetMs(step: { readonly maxDurationMs?: number | ((args: { ctx: RunContext }) => number) }, ctx: RunContext): number | undefined {
+  const declared = step.maxDurationMs;
+  if (declared === undefined) return undefined;
+  const value = typeof declared === "function" ? declared({ ctx }) : declared;
+  return Number.isFinite(value) ? value : undefined;
 }
 
 /**
@@ -60,7 +80,7 @@ export async function runFunctionStep(
 ): Promise<StepOutcome> {
   const ctx = createRunContext(state, parentPath);
   const logger = createStepLogger(host, state.runId, path);
-  return retryLoop(step, host, state, signal, path, (sig) => runFunctionAttempt(step, input, ctx, logger, sig));
+  return retryLoop(step, host, state, signal, path, (sig) => runFunctionAttempt(step, input, ctx, logger, sig), resolveBudgetMs(step, ctx));
 }
 
 /**
@@ -100,7 +120,7 @@ export async function runAgentStep(
   // terminal-bench runs bear this out: retries rescued attempts that would otherwise have crashed the
   // run outright. An author who declares `retry` still overrides this in either direction.
   const unsteerable = step.background === true || step.isolated === true;
-  return retryLoop(step, host, state, signal, path, attempt, carryOverMs, unsteerable ? 1 : 0);
+  return retryLoop(step, host, state, signal, path, attempt, resolveBudgetMs(step, ctx), carryOverMs, unsteerable ? 1 : 0);
 }
 
 /**
@@ -116,6 +136,7 @@ async function retryLoop(
   runSignal: AbortSignal,
   path: string,
   attempt: (signal: AbortSignal) => Promise<AttemptResult>,
+  budgetMs: number | undefined,
   carryOverMs = 0,
   defaultMaxRetry = 0,
 ): Promise<StepOutcome> {
@@ -128,7 +149,7 @@ async function retryLoop(
 
     // The budget carry (spec §9.4) applies only to this loop's FIRST attempt — the one continuing an
     // interrupted block. A subsequent retry (n > 1) is a fresh attempt and gets a clean budget.
-    const result = await withTimeBudget(step, host, runSignal, attempt, n === 1 ? carryOverMs : 0);
+    const result = await withTimeBudget(step, budgetMs, host, runSignal, attempt, n === 1 ? carryOverMs : 0);
     if (result.kind === "cancelled") return { kind: "cancelled" };
     if (result.kind === "ok") return { kind: "ok", output: result.output };
     if (result.kind === "blocked") {
@@ -160,18 +181,19 @@ async function retryLoop(
  */
 async function withTimeBudget(
   step: BudgetedStep,
+  budgetMs: number | undefined,
   host: HostPort,
   runSignal: AbortSignal,
   attempt: (signal: AbortSignal) => Promise<AttemptResult>,
   consumedMs = 0,
 ): Promise<AttemptResult> {
-  if (step.maxDurationMs === undefined) {
+  if (budgetMs === undefined) {
     return attempt(runSignal);
   }
 
-  const remainingMs = step.maxDurationMs - consumedMs;
+  const remainingMs = budgetMs - consumedMs;
   if (remainingMs <= 0) {
-    return { kind: "retryable", reason: "budget-exceeded", error: `step "${step.name}" exceeded its ${step.maxDurationMs}ms time budget` };
+    return { kind: "retryable", reason: "budget-exceeded", error: `step "${step.name}" exceeded its ${budgetMs}ms time budget` };
   }
 
   const startedAt = host.now().getTime();
@@ -188,7 +210,7 @@ async function withTimeBudget(
   if (outcome === "timeout") {
     timeout.abort(); // ask the running step to stop at its next safe point (spec §8.6)
     void attemptPromise.catch(() => {}); // swallow the abandoned step's eventual rejection
-    return { kind: "retryable", reason: "budget-exceeded", error: `step "${step.name}" exceeded its ${step.maxDurationMs}ms time budget` };
+    return { kind: "retryable", reason: "budget-exceeded", error: `step "${step.name}" exceeded its ${budgetMs}ms time budget` };
   }
   cleanup.abort(); // the step finished first — cancel the timer so it does not linger
 
