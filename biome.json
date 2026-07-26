@@ -1,7 +1,7 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.5/schema.json",
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
-  "files": { "experimentalScannerIgnores": ["node_modules", ".pi"] },
+  "files": { "experimentalScannerIgnores": ["node_modules", ".pi", "dist"] },
   "formatter": {
     "enabled": true,
     "indentStyle": "space",
