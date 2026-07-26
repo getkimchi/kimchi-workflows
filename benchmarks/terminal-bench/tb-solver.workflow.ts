@@ -36,7 +36,7 @@
  */
 import { type Static, Type } from "typebox";
 import { createAgentStep, createStep, createWorkflow } from "../../src/flow/index.ts";
-import { criteriaBlock, GRADING_CONTRACT, implementSchema, planSchema, READ_ONLY, taskInputSchema, timeLine, verifySchema } from "./contract.ts";
+import { criteriaBlock, GRADING_CONTRACT, planSchema, READ_ONLY, taskInputSchema, timeLine, verifySchema } from "./contract.ts";
 
 /** `provider/model` for every step; the adapter pins this so subagents match the parent (spec §9.5). */
 const MODEL = process.env.TB_MODEL ?? "kimchi-dev/kimi-k2.7";
@@ -76,8 +76,20 @@ const BUDGET_SEC = Math.max(60, Number(process.env.TB_AGENT_TIMEOUT_SEC ?? 900))
  * everything downstream is built on. The cap is only half the fix: every step is now told ITS OWN box
  * (see `timeLine`), so it paces itself instead of exploring as though it owned the whole run.
  */
-const SURVEY_CAP_MS = Math.round(Math.min(BUDGET_SEC * 0.08, 120) * 1000);
-const VERIFY_CAP_MS = Math.round(Math.min(BUDGET_SEC * 0.1, 300) * 1000);
+/**
+ * Recon and checking are sized from what they MEASURABLY COST, with a floor, not from a percentage.
+ *
+ * A pure fraction has been wrong in both directions. At 25% of the budget survey was a quarter of the
+ * run before any work started; cutting it to 8% put the cap (72s at a 900s budget) BELOW the observed
+ * median, and four of six surveys then died at their limit — leaving those runs with no acceptance
+ * criteria at all, which is the one thing everything downstream is built on. Observed survey durations
+ * across runs: 16, 25, 38, 100, 108, 221, 231s. Observed verify: 12, 33, 38, 66, 97, 121, 180s.
+ *
+ * The floor is what makes these steps survive on short tasks, where a percentage is simply too small to
+ * finish the job; the ceiling is what stops them eating a long one.
+ */
+const SURVEY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.15, 150), 240) * 1000);
+const VERIFY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.12, 120), 300) * 1000);
 
 /**
  * `implement` takes a share of the time ACTUALLY LEFT, resolved fresh on every round (spec §9.3's
@@ -109,8 +121,16 @@ const IMPLEMENT_FLOOR_MS = 90_000;
  * because half of a small remainder is never worth starting).
  */
 const implementBoxMs = (remainingSec: number): number => {
-  const spendableMs = remainingSec * 1000 - VERIFY_CAP_MS - ROUND_MARGIN_SEC * 1000;
-  return Math.max(IMPLEMENT_FLOOR_MS, Math.round(Math.min(remainingSec * 1000 * IMPLEMENT_SHARE_OF_REMAINING, spendableMs)));
+  const remainingMs = remainingSec * 1000;
+  // Everything physically available once this round's check and the settle margin are paid for.
+  const spendableMs = remainingMs - VERIFY_CAP_MS - ROUND_MARGIN_SEC * 1000;
+  const shareMs = remainingMs * IMPLEMENT_SHARE_OF_REMAINING;
+  // Holding back half only makes sense if a further round can actually use it. Ask whether one would
+  // still fit after this round took its share; when it would not, this IS the last round, so it takes
+  // everything instead of leaving a remainder too small to start anything with. Without this a 900s
+  // task stopped with 233 of 855 seconds unspent — a reserve kept for a round that could never happen.
+  const anotherRoundFits = remainingMs - shareMs - VERIFY_CAP_MS - VERIFY_CAP_MS - ROUND_MARGIN_SEC * 1000 >= IMPLEMENT_FLOOR_MS;
+  return Math.max(IMPLEMENT_FLOOR_MS, Math.round(anotherRoundFits ? Math.min(shareMs, spendableMs) : spendableMs));
 };
 
 /** Slack kept back so the last round settles instead of being cut off mid-write. */
@@ -203,7 +223,12 @@ const budget = createStep({
 const implement = createAgentStep({
   name: "implement",
   description: "Do the work",
-  output: implementSchema,
+  // No output schema on purpose. This step's product is the machine, and `verify` reads the machine —
+  // so nothing downstream needs it to say anything, and demanding a shape it must hit adds only a way
+  // to fail at work that already landed. It used to report {changes, ranChecks, incomplete}; that
+  // summary was redundant with the session the next round resumes, empty in most runs (the step
+  // usually spends its whole box), and twice fatal: replies beginning `/auto` and `/perm` failed the
+  // step and discarded the round with the edits already on disk.
   background: true,
   // A share of what is left when THIS round opens (see IMPLEMENT_SHARE_OF_REMAINING), so the first
   // round is long and each later one is smaller. `optional` so hitting the box costs the round rather
@@ -223,20 +248,18 @@ const implement = createAgentStep({
     const round = ctx.getStepResult<{ remainingSec: number; round: number }>("budget");
     const lastVerify = ctx.getStepResult<Static<typeof verifySchema>>("verify");
     const failures = lastVerify?.failures ?? [];
-    // The previous round's report, carried by `checkpoint` — NOT read from "implement" directly, which
-    // is this very step and is in flight while its prompt is built (spec §3.9: a step cannot observe
-    // itself, and the engine throws rather than pretend). Each round is a fresh subagent with no
-    // memory, so without this a time-boxed implementer restarts cold and re-derives what the last one
-    // already knew — measured as the reason a task needing sustained work never converged.
-    const previous = ctx.getStepResult<{ lastChanges: string; lastIncomplete: string }>("solve/checkpoint");
+    // Continuity across rounds is the SESSION's job, not a summary's: this step is `resumable`, so a
+    // later round reopens the same conversation and still holds everything it read, ran and learned.
+    // A three-field report of the same thing was strictly worse — lossier, and usually absent, since a
+    // round that spends its whole box produces no report at all.
+    const continuing = (round?.round ?? 1) > 1;
 
-    const priorWork = previous?.lastChanges
+    const priorWork = continuing
       ? [
           "",
-          "WHAT THE PREVIOUS ROUND DID (it ran out of time, or its work was judged incomplete — you are",
-          "continuing it, not starting over; re-read the files before you change them):",
-          `  changed: ${previous.lastChanges || "(nothing reported)"}`,
-          `  unfinished: ${previous.lastIncomplete || "(nothing reported)"}`,
+          "YOU HAVE BEEN HERE BEFORE. This conversation is your own from the previous round, which ran",
+          "out of time or was judged incomplete — continue it rather than starting over, and re-read any",
+          "file before you change it again.",
         ].join("\n")
       : "";
 
@@ -344,9 +367,6 @@ const checkpoint = createStep({
     mustStop: Type.Boolean(),
     remainingSec: Type.Number(),
     round: Type.Number(),
-    // Carried so the NEXT round's implementer can pick up where this one left off (see `implement`).
-    lastChanges: Type.String(),
-    lastIncomplete: Type.String(),
   }),
   run: ({ ctx, logger }) => {
     const task = ctx.getInitData<{ deadlineIso: string }>();
@@ -355,7 +375,6 @@ const checkpoint = createStep({
     const result = ctx.getStepResult<Static<typeof verifySchema>>("verify");
     const opened = ctx.getStepResult<{ round: number; remainingSec: number }>("budget");
     const round = opened?.round ?? 0;
-    const work = ctx.getStepResult<Static<typeof implementSchema>>("implement"); // settled by now
     const remainingSec = (new Date(task?.deadlineIso ?? Date.now()).getTime() - Date.now()) / 1000;
     // Stop when the NEXT round — whose size is now known exactly, because `implement` takes a fixed
     // share of whatever is left — would not fit in what remains.
@@ -375,8 +394,6 @@ const checkpoint = createStep({
       mustStop,
       remainingSec,
       round,
-      lastChanges: work?.changes ?? "",
-      lastIncomplete: work?.incomplete ?? "",
     };
   },
 });

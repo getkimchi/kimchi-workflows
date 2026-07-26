@@ -120,13 +120,24 @@ export interface FunctionStep extends StepBase {
 }
 
 /**
- * Agent step (spec §2.2): the engine runs it through the `HostPort.startAgent` seam. `outputSchema`
- * is required — the agent's final text is parsed to JSON and validated against it. `model` overrides
+ * Agent step (spec §2.2): the engine runs it through the `HostPort.startAgent` seam. `model` overrides
  * the workflow/session default (resolution: step → workflow default → session, spec §9.5).
+ *
+ * `outputSchema` is optional, and its absence is a real mode rather than a missing declaration: the step
+ * ACTS instead of REPORTING. Nothing is parsed, nothing is validated, no output contract is injected
+ * into the prompt, and the step succeeds if the agent's turn completes — its final text becomes the
+ * output as-is.
+ *
+ * That mode exists because demanding a structured answer from a step whose product is a side effect
+ * makes formatting a way to fail at work that already succeeded. Measured: an implementation step whose
+ * edits were already on disk was failed twice for replying `/auto` and `/perm` instead of JSON, losing
+ * 374s and the round — while the summary it was asked for was redundant with the session the next round
+ * resumes anyway. A step whose output something downstream actually consumes should still declare a
+ * schema; a step that changes the world and is judged by looking at the world should not.
  */
 export interface AgentStep extends StepBase {
   readonly kind: "agent";
-  readonly outputSchema: TSchema;
+  readonly outputSchema?: TSchema;
   readonly model?: string;
   readonly buildPrompt: (args: AgentPromptArgs<unknown>) => string;
   /**

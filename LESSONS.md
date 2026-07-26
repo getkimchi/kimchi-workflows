@@ -255,6 +255,29 @@ parameter, and produced **four commits that didn't typecheck** — while the fin
 check out every commit, typecheck, run the suite. Changes that must move together (a signature and its
 call sites) cannot be separated for narrative tidiness.
 
+### Only demand structured output from a step whose output is consumed
+
+`implement` was required to return `{changes, ranChecks, incomplete}`. Nothing needed it:
+
+- **Redundant.** The step is `resumable`, so the next round reopens the same session and already holds
+  everything it read, ran and learned — strictly more than a three-field summary.
+- **Usually absent.** A round that spends its whole time box produces no output at all, so the field was
+  `""` in nearly every checkpoint of every run.
+- **Yet fatal.** Two implementations replied `/auto` and `/perm` instead of JSON. The schema check
+  failed the step, and the round was discarded — with its edits already on disk. 374s lost to the shape
+  of a message nobody read.
+
+The fix was to delete the requirement, not to harden it. `output` is now optional on agent steps: with
+no schema, no contract is injected, nothing is parsed, and the raw text is the output. A step that
+changes the world and is judged by looking at the world should not also have to describe itself.
+
+The general rule: **a validated contract is a liability wherever it is not a dependency.** Before
+requiring a step to report, find the code that reads the report. If the answer is "the next prompt,
+loosely" — and especially if some other mechanism already carries the same information — the contract is
+buying nothing and can only cost. The near-miss here is instructive: the first two fixes considered were
+retrying the step and nudging it in-session, both of which would have added machinery to protect a field
+that should not have existed.
+
 ### Rule a cause out by measuring it, not by finding it plausible
 
 A container was OOM-killed at its 2GB cgroup limit, and the orchestrator process — the one that runs no

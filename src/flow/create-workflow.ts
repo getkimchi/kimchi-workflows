@@ -355,6 +355,15 @@ function assertNoBackgroundAsks(workflowName: string, nodes: readonly WorkflowNo
         `workflow "${workflowName}": agent step "${step.name}" declares both background and asks — a background step runs isolated and unwatched, so it cannot block the run to ask a question (spec §10.1)`,
       );
     }
+    // An asking step's questionnaire IS its output schema (spec §10.1) — the questions are derived from
+    // it. Without one there is nothing to ask, and the step would silently degrade into a plain
+    // acting step that can never block, which is a wiring bug worth catching at commit rather than
+    // discovering as a run that never paused.
+    if (step.asks && step.outputSchema === undefined) {
+      throw new Error(
+        `workflow "${workflowName}": agent step "${step.name}" declares asks but no output schema — an asking step's questions are derived from its schema (spec §10.1); declare \`output\`, or drop \`asks\` if the step only acts`,
+      );
+    }
   });
 }
 
