@@ -76,9 +76,42 @@ const BUDGET_SEC = Math.max(60, Number(process.env.TB_AGENT_TIMEOUT_SEC ?? 900))
  * everything downstream is built on. The cap is only half the fix: every step is now told ITS OWN box
  * (see `timeLine`), so it paces itself instead of exploring as though it owned the whole run.
  */
-const SURVEY_CAP_MS = Math.round(Math.min(BUDGET_SEC * 0.25, 400) * 1000);
-const IMPLEMENT_CAP_MS = Math.round(BUDGET_SEC * 0.2 * 1000);
-const VERIFY_CAP_MS = Math.round(BUDGET_SEC * 0.12 * 1000);
+const SURVEY_CAP_MS = Math.round(Math.min(BUDGET_SEC * 0.08, 120) * 1000);
+const VERIFY_CAP_MS = Math.round(Math.min(BUDGET_SEC * 0.1, 300) * 1000);
+
+/**
+ * `implement` takes a share of the time ACTUALLY LEFT, resolved fresh on every round (spec §9.3's
+ * function form) — not a fixed fraction of the whole budget.
+ *
+ * A fixed fraction is the same on every round, which forces a choice between two bad schedules. Small
+ * (20%, what this was) fragments the work: a full-benchmark run had 53 of 89 implementations cut off
+ * mid-job, each restart re-establishing footing the last one already had. Large enough to be useful
+ * overruns instead — 15 runs were killed by the deadline mid-edit, because the last round was granted
+ * the same slice as the first when a fraction of it remained.
+ *
+ * Taking 70% of what is left is self-correcting: round one gets the long coherent stretch that is the
+ * agent's actual strength, each later round is necessarily smaller, and the 30% held back always covers
+ * `verify` plus the margin — so the loop shrinks toward its deadline instead of colliding with it.
+ */
+const IMPLEMENT_SHARE_OF_REMAINING = 0.5;
+/** Never hand a round less than this; below it a subagent cannot finish a single useful edit. */
+const IMPLEMENT_FLOOR_MS = 90_000;
+
+/**
+ * What a round may spend on implementation, given the seconds left when it opened. This is the ONE
+ * definition — used both as the enforced budget and as the number the prompt quotes, so the agent is
+ * never told a deadline the engine will not honour.
+ *
+ * Two bounds, and the tighter one wins. The share keeps early rounds from eating the clock, so there is
+ * always something left to repair with. `spendableMs` is what physically remains once checking and
+ * settling are paid for — it binds on the LAST round, letting it fill the tail exactly instead of
+ * taking half of it and idling the rest (a 750s task otherwise finished with 38% of its budget unused,
+ * because half of a small remainder is never worth starting).
+ */
+const implementBoxMs = (remainingSec: number): number => {
+  const spendableMs = remainingSec * 1000 - VERIFY_CAP_MS - ROUND_MARGIN_SEC * 1000;
+  return Math.max(IMPLEMENT_FLOOR_MS, Math.round(Math.min(remainingSec * 1000 * IMPLEMENT_SHARE_OF_REMAINING, spendableMs)));
+};
 
 /** Slack kept back so the last round settles instead of being cut off mid-write. */
 const ROUND_MARGIN_SEC = 60;
@@ -172,10 +205,11 @@ const implement = createAgentStep({
   description: "Do the work",
   output: implementSchema,
   background: true,
-  // Time-boxed to a share of the run so a round always ends with the clock intact, and `optional` so
-  // hitting that box costs the round rather than the run: the work it did land stays on disk, `verify`
-  // still gets to say what is actually true, and the loop can spend what remains repairing it.
-  maxDurationMs: IMPLEMENT_CAP_MS,
+  // A share of what is left when THIS round opens (see IMPLEMENT_SHARE_OF_REMAINING), so the first
+  // round is long and each later one is smaller. `optional` so hitting the box costs the round rather
+  // than the run: the work it did land stays on disk, `verify` still gets to say what is actually true,
+  // and the loop can spend what remains repairing it.
+  maxDurationMs: ({ ctx }) => implementBoxMs(ctx.getStepResult<{ remainingSec: number }>("budget")?.remainingSec ?? 0),
   optional: true,
   retry: { maxRetry: 0 },
   // The one step that continues across rounds (spec §2.2). Being time-boxed, it is the step most likely
@@ -222,8 +256,15 @@ const implement = createAgentStep({
       "TASK:",
       task?.instruction ?? "(missing)",
       "",
-      "ACCEPTANCE CRITERIA — these are what your work is measured against:",
+      // Deliberately NOT "what your work is measured against" — that is what they used to say, and it
+      // made a quick reconnaissance pass the definition of success. The criteria are written by a step
+      // that had looked at the machine for under two minutes and had never attempted the work; the
+      // hidden tests are written from the task. Where they disagree, the task wins, and an implementer
+      // that has learned something the survey did not know must be free to act on it.
+      "CHECKLIST FROM A QUICK RECONNAISSANCE PASS — useful, but NOT the specification:",
       (design?.criteria?.length ?? 0) > 0 ? criteriaBlock(design?.criteria ?? []) : "  (none were derived — satisfy the task statement above, in full)",
+      "Treat these as a floor, not a ceiling: satisfying every one of them is not the same as completing",
+      "the task, and if one contradicts the task statement above, the task statement is right.",
       "",
       `PLANNED APPROACH: ${design?.approach ?? "(none derived — work from the task statement above)"}`,
       priorWork,
@@ -231,7 +272,7 @@ const implement = createAgentStep({
       "",
       GRADING_CONTRACT,
       "",
-      timeLine(IMPLEMENT_CAP_MS / 1000, round?.remainingSec ?? 0),
+      timeLine(implementBoxMs(round?.remainingSec ?? 0) / 1000, round?.remainingSec ?? 0),
       "",
       "You are time-boxed. If you cannot finish everything, land the most important criteria FIRST and",
       "leave the machine in a working state — a partial result that runs beats a half-applied edit that",
@@ -316,18 +357,19 @@ const checkpoint = createStep({
     const round = opened?.round ?? 0;
     const work = ctx.getStepResult<Static<typeof implementSchema>>("implement"); // settled by now
     const remainingSec = (new Date(task?.deadlineIso ?? Date.now()).getTime() - Date.now()) / 1000;
-    // Stop when another round of THE SIZE THIS ONE TURNED OUT TO BE would not fit. Measuring beats
-    // predicting: the caps are worst-case and a real round usually costs a fraction of them, so deciding
-    // from the caps would refuse rounds there was ample time for. Deciding from a fixed COUNT was worse
-    // still — it ended runs still holding most of their budget (a full-benchmark run left `build-pov-ray`
-    // with 11170s of 12000s unspent), which measured as the single biggest thing wrong with this workflow.
-    const roundCostSec = Math.max(1, (opened?.remainingSec ?? remainingSec) - remainingSec);
-    // Admit a round when there is time for a USEFUL CHUNK of one, not a whole one. Demanding a full
-    // round left four of seven measured tasks idle for 36-46% of their budget while their own verifier
-    // was still listing failures. A truncated round is no longer wasted: `implement` is `optional` and
-    // `resumable`, so its work lands on disk and the next execution continues it.
-    const mustStop = remainingSec < roundCostSec * 0.4 + ROUND_MARGIN_SEC || round >= ROUND_SAFETY_VALVE;
-    logger.info("round finished", { round, allPass: result?.allPass ?? false, remainingSec: Math.round(remainingSec), roundCostSec: Math.round(roundCostSec), mustStop });
+    // Stop when the NEXT round — whose size is now known exactly, because `implement` takes a fixed
+    // share of whatever is left — would not fit in what remains.
+    //
+    // This is computable rather than estimated, which the previous two rules were not. Deciding from a
+    // fixed round COUNT ended runs holding most of their budget (`build-pov-ray` finished with 11170s of
+    // 12000s unspent). Deciding from the round that just happened fixed the idling but admitted rounds
+    // that could not finish, and 15 runs were killed by the deadline mid-edit. Since the box is
+    // `share * remaining`, the condition below is just `remaining * (1 - share) < verify + margin`: the
+    // point at which the part of the clock a round does NOT consume no longer covers checking and
+    // settling. It cannot admit a round it knows will overrun.
+    const spendableSec = remainingSec - VERIFY_CAP_MS / 1000 - ROUND_MARGIN_SEC;
+    const mustStop = spendableSec < IMPLEMENT_FLOOR_MS / 1000 || round >= ROUND_SAFETY_VALVE;
+    logger.info("round finished", { round, allPass: result?.allPass ?? false, remainingSec: Math.round(remainingSec), spendableSec: Math.round(spendableSec), mustStop });
     return {
       allPass: result?.allPass === true,
       mustStop,

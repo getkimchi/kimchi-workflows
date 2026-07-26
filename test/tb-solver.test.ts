@@ -115,7 +115,7 @@ describe("tb-solver: what the steps are told", () => {
       expect(run.agent(step).messages[0], step).toContain("for THIS step");
     }
     const surveyPrompt = run.agent("survey").messages[0] as string;
-    expect(surveyPrompt).toContain(`about ${Math.round(900 * 0.25)}s for THIS step`);
+    expect(surveyPrompt).toContain(`about ${Math.round(900 * 0.08)}s for THIS step`);
 
     const implementPrompt = run.agent("implement").messages[0] as string;
     expect(implementPrompt).toContain("[c1] cli prints ok");
@@ -146,30 +146,37 @@ describe("tb-solver: what the steps are told", () => {
     expect(second).toContain("continuing it, not starting over");
   });
 
-  it("time-boxes every agent step to a share of the run, and lets the workers fail without ending it", () => {
+  it("gives implement a shrinking share of the time left, and lets the workers fail without ending it", () => {
     // A cap in absolute ms is meaningless against a clock it does not know: an implement step capped at
     // 900s inside an 855s run can never fire, which is how v2 lost tasks the baseline solved.
-    const steps = new Map<string, { maxDurationMs?: number; optional?: boolean }>();
+    type Boxed = { maxDurationMs?: number | ((args: { ctx: unknown }) => number); optional?: boolean };
+    const steps = new Map<string, Boxed>();
     const walk = (nodes: readonly unknown[]): void => {
-      for (const node of nodes as { kind: string; step?: { kind: string; name: string; maxDurationMs?: number; optional?: boolean }; body?: { nodes: unknown[] } }[]) {
+      for (const node of nodes as { kind: string; step?: { kind: string; name: string } & Boxed; body?: { nodes: unknown[] } }[]) {
         if (node.kind === "step" && node.step?.kind === "agent") steps.set(node.step.name, node.step);
         if (node.body) walk(node.body.nodes);
       }
     };
     walk(tbSolver.nodes);
 
-    const budgetMs = 900_000; // the default the workflow is built against
-    for (const [name, step] of steps) {
-      expect(step.maxDurationMs, name).toBeGreaterThan(0);
-      expect(step.maxDurationMs ?? 0, name).toBeLessThan(budgetMs / 2);
-    }
-    // One survey plus a full round has to fit, with room left to settle.
-    const round = (steps.get("survey")?.maxDurationMs ?? 0) + (steps.get("implement")?.maxDurationMs ?? 0) + (steps.get("verify")?.maxDurationMs ?? 0);
-    expect(round).toBeLessThan(budgetMs * 0.8);
-    // No absolute ceilings on the workers: they must scale with the budget, or a long task gets the
-    // same seven-minute window as a short one (measured: 7% of a 12000s budget spent, then stopped).
-    expect(steps.get("implement")?.maxDurationMs).toBe(Math.round(900 * 0.2 * 1000));
-    expect(steps.get("verify")?.maxDurationMs).toBe(Math.round(900 * 0.12 * 1000));
+    // Recon and checking stay fixed and small; only the WORK scales with what is left.
+    expect(steps.get("survey")?.maxDurationMs).toBe(Math.round(900 * 0.08 * 1000));
+    expect(steps.get("verify")?.maxDurationMs).toBe(Math.round(900 * 0.1 * 1000));
+
+    // `implement` is a function of run state, so each round can be smaller than the last. A constant
+    // could not do this: sized small it fragments the work (53 of 89 implementations were cut off
+    // mid-job), sized large the final round overruns and the deadline kills it mid-edit (15 runs).
+    const box = steps.get("implement")?.maxDurationMs;
+    expect(typeof box).toBe("function");
+    const boxFor = (remainingSec: number): number => (box as (a: { ctx: unknown }) => number)({ ctx: { getStepResult: () => ({ remainingSec }) } });
+    expect(boxFor(800)).toBe(400_000); // half of what is left…
+    expect(boxFor(300)).toBe(150_000); // …so a later round is necessarily smaller
+    expect(boxFor(10)).toBe(90_000); // floored: below this no useful edit lands
+
+    // The box plus its verify must leave the clock intact, or the round cannot settle.
+    const verifyMs = steps.get("verify")?.maxDurationMs;
+    expect(typeof verifyMs).toBe("number");
+    expect(boxFor(800) + (verifyMs as number)).toBeLessThan(800_000);
 
     // The workers may be cut short; that must cost the round, not the run.
     expect(steps.get("implement")?.optional).toBe(true);
