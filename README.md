@@ -96,13 +96,21 @@ Status is derived from the event log — nothing stores a status that can drift 
 pnpm install        # or: npm install
 ```
 
-Register `piWorkflowsExtension` (a named export of `src/host`) with your PI extension host — it calls `pi.registerCommand("workflow", …)`, adding the `/workflow` command family to your PI session:
+`src/host/extension.ts` default-exports the factory PI expects (`(pi: ExtensionAPI) => void`); it calls `pi.registerCommand("workflow", …)`, adding the `/workflow` command family to your session. `package.json` declares it under the `pi` key, so PI's own package machinery can install it:
+
+```bash
+pi install /path/to/pi-workflows       # user-wide (~/.pi/agent/settings.json)
+pi install -l /path/to/pi-workflows    # this project only (.pi/settings.json), then pass -a once to trust it
+```
+
+A local path is recorded, not copied, so the checkout keeps its own `node_modules` — which it needs, because PI does not supply `jiti`. The equivalent one-off is `pi -e /path/to/pi-workflows/src/host/extension.ts`, and dropping a re-export in `~/.pi/agent/extensions/` or `.pi/extensions/` works too (that location is also what makes `/reload` pick up edits). Registering it by hand stays available for a custom host:
 
 ```ts
-import { piWorkflowsExtension } from "pi-workflows/src/host";
-// wire it into your PI extension host
+import { piWorkflowsExtension } from "pi-workflows/host";
 piWorkflowsExtension(pi);
 ```
+
+> **A package with no `pi` key loads nothing.** PI records it in settings and contributes no resources, silently — no error on startup. After installing, confirm `/workflow` actually exists.
 
 Once registered, the commands are available inside PI:
 
@@ -121,6 +129,37 @@ Only one run executes **per project** at a time, enforced by a lock in the run s
 **Where things live.** Authored workflows go in `.pi/workflows/` as `*.workflow.ts`, following PI's convention for project resources (`.pi/extensions/`, `.pi/skills/`, …). Run logs are written to the same directory as `<run-id>.jsonl` plus a `.meta.json` sidecar, alongside the `run.lock` held by an executing run; discovery filters on the `.workflow.ts` suffix, so they never collide. `list` is reserved as the first argument to `run`, so no workflow can be reached as `/workflow run list`.
 
 > **Listing imports every workflow.** `/workflow list` reads each file's declared name by importing it, which executes project code — the same trust boundary `.pi/extensions/` sits behind. Keep workflow modules free of import-time side effects: define the workflow, export it, do nothing else.
+
+### Authoring in another project
+
+Workflows belong to the project you run PI in, not to this repo: everything keys off the session's cwd, so any repo with a `.pi/workflows/*.workflow.ts` is an authoring home. **Running one requires that project to install nothing.** A workflow file is imported from its own directory, where `typebox` and `pi-workflows` would ordinarily be unresolvable, so `src/host/load-workflow.ts` hands the loader those modules directly (jiti `virtualModules`, the same device PI's extension loader uses for its own bundled packages). `test/load-workflow-external.test.ts` runs a workflow from a temp directory with no `node_modules` to keep that true, and a negative control asserts the bare loader still fails there.
+
+A useful side effect: the workflow and the engine share **one** typebox instance — under the harness, PI's bundled copy — so a schema built in the workflow is validated by the very module that built it.
+
+Editors are a separate question, because `tsc` and `biome` resolve from disk rather than through jiti. For autocomplete and type-checking of authored workflows, either install for real:
+
+```bash
+pnpm add file:/path/to/pi-workflows typebox   # types and runtime both resolve; jiti's modules still win at run time
+```
+
+…or keep the zero-install setup and point the compiler at the two locations:
+
+```jsonc
+// <project>/tsconfig.json
+"compilerOptions": {
+  "moduleResolution": "Bundler",
+  "allowImportingTsExtensions": true,
+  "paths": {
+    "pi-workflows": ["/path/to/pi-workflows/src/flow/index.ts"],
+    "pi-workflows/flow": ["/path/to/pi-workflows/src/flow/index.ts"],
+    "pi-workflows/engine": ["/path/to/pi-workflows/src/engine/index.ts"],
+    "typebox": ["/path/to/pi/node_modules/typebox"],
+    "typebox/*": ["/path/to/pi/node_modules/typebox/*"]
+  }
+}
+```
+
+Biome needs nothing: it does no type-aware resolution, and the only two rules that would object to an import it cannot resolve — `noUndeclaredDependencies` and `noUnresolvedImports` — are off in this repo's `biome.json` for that reason.
 
 ### `/workflow create`
 
@@ -142,7 +181,7 @@ A minimal function-step workflow:
 
 ```ts
 import { Type } from "typebox";
-import { createStep, createWorkflow } from "pi-workflows/src/flow";
+import { createStep, createWorkflow } from "pi-workflows";
 
 const sayHello = createStep({
   name: "say-hello",
@@ -222,7 +261,7 @@ Function-only and questionnaire examples run with no network; agent examples use
 A workflow's behaviour is pinned by three things: the agents' replies, the answers given to questions, and what its steps do. `src/testing` supplies all three — no PI, no filesystem, no network, and no runner-specific matchers, so it works under Vitest, Jest, or `node:test`.
 
 ```ts
-import { ask, createTestRun, reply } from "pi-workflows/src/testing";
+import { ask, createTestRun, reply } from "pi-workflows/testing";
 
 const blocked = await createTestRun(planningWorkflow, {
   agents: {
