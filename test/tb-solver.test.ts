@@ -182,6 +182,42 @@ describe("tb-solver: what the steps are told", () => {
     expect(verifyPrompt).toContain("whether the header row counts toward the total");
   });
 
+  it("retries recon when it produced no criteria, and tells the second pass to stop looking", async () => {
+    const run = await createTestRun(tbSolver, {
+      input: roomyInput(),
+      agents: {
+        // Pass one yields nothing usable — live, this is the step dying at its cap with the contract
+        // unwritten, which left four runs in six with no criteria at all.
+        survey: [reply({ approach: "", requirements: [], criteria: [], uncertainties: [] }), reply(plan)],
+        implement: [raw(work)],
+        verify: [reply(allGood)],
+      },
+    });
+
+    expect(run.status).toBe("completed");
+    const passes = run.agent("survey").messages;
+    expect(passes).toHaveLength(2);
+    // Pass two must not go looking again — there is only time to write the answer down.
+    expect(passes[1]).toContain("DO NOT RUN ANY MORE COMMANDS");
+    expect(passes[1]).toContain("produce it NOW from what you already know");
+    // Two executions, but one conversation: the step is `resumable`, so the host reopens pass one's
+    // session by name rather than starting cold (the resume-key wiring itself is covered in
+    // test/resumable-step.test.ts). That is the only reason a 60s landing pass can succeed at all.
+    expect(run.agent("survey").sessions).toBe(2);
+    // The criteria that eventually arrived are what the implementer works against.
+    expect(run.agent("implement").messages[0]).toContain("[c1] cli prints ok");
+  });
+
+  it("does not re-run recon when the first pass produced criteria", async () => {
+    const run = await createTestRun(tbSolver, {
+      input: roomyInput(),
+      agents: { survey: [reply(plan)], implement: [raw(work)], verify: [reply(allGood)] },
+    });
+
+    expect(run.status).toBe("completed");
+    expect(run.agent("survey").messages).toHaveLength(1); // the common case costs nothing
+  });
+
   it("makes the surveyor enumerate requirements and mark what it inferred", async () => {
     const run = await createTestRun(tbSolver, {
       input: roomyInput(),
@@ -207,6 +243,10 @@ describe("tb-solver: what the steps are told", () => {
 
     // `implement` changes the machine and `verify` reads the machine, so nothing consumes its words.
     expect(steps.get("implement")?.outputSchema).toBeUndefined();
+    // Both looping workers resume rather than restart — for `survey` that is what makes a cheap second
+    // pass possible instead of redoing the exploration that blew the first box.
+    expect((steps.get("survey") as { resumable?: boolean })?.resumable).toBe(true);
+    expect((steps.get("implement") as { resumable?: boolean })?.resumable).toBe(true);
     // The two steps whose output IS consumed keep their contracts.
     expect(steps.get("survey")?.outputSchema).toBeDefined();
     expect(steps.get("verify")?.outputSchema).toBeDefined();
@@ -215,7 +255,10 @@ describe("tb-solver: what the steps are told", () => {
   it("gives implement a shrinking share of the time left, and lets the workers fail without ending it", () => {
     // A cap in absolute ms is meaningless against a clock it does not know: an implement step capped at
     // 900s inside an 855s run can never fire, which is how v2 lost tasks the baseline solved.
-    type Boxed = { maxDurationMs?: number | ((args: { ctx: unknown }) => number); optional?: boolean };
+    interface Boxed {
+      maxDurationMs?: number | ((args: { ctx: unknown }) => number);
+      optional?: boolean;
+    }
     const steps = new Map<string, Boxed>();
     const walk = (nodes: readonly unknown[]): void => {
       for (const node of nodes as { kind: string; step?: { kind: string; name: string } & Boxed; body?: { nodes: unknown[] } }[]) {
@@ -225,10 +268,18 @@ describe("tb-solver: what the steps are told", () => {
     };
     walk(tbSolver.nodes);
 
-    // Recon and checking are sized from measured cost with a floor, not a bare percentage: at 900s a
-    // pure 8%/10% put both caps below their observed medians and four of six surveys died at the limit.
-    expect(steps.get("survey")?.maxDurationMs).toBe(150_000);
+    // Checking is sized from measured cost with a floor, not a bare percentage: at 900s a pure 10% put
+    // the cap below the observed median and three verifies died at the limit.
     expect(steps.get("verify")?.maxDurationMs).toBe(120_000);
+
+    // Survey's box depends on which recon pass it is: the first explores, a later one only writes down
+    // what that pass already found, so it gets a much smaller box. A second full-sized box would put a
+    // third of a short run into reconnaissance.
+    const surveyBox = steps.get("survey")?.maxDurationMs;
+    expect(typeof surveyBox).toBe("function");
+    const surveyFor = (pass: number): number => (surveyBox as (a: { ctx: unknown }) => number)({ ctx: { getStepResult: () => ({ pass, remainingSec: 3600 }) } });
+    expect(surveyFor(1)).toBe(150_000); // explore
+    expect(surveyFor(2)).toBe(60_000); // land it
 
     // `implement` is a function of run state, so each round can be smaller than the last. A constant
     // could not do this: sized small it fragments the work (53 of 89 implementations were cut off
