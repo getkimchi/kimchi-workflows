@@ -82,8 +82,19 @@ slack for ordinary overshoot, and an abort discards everything not yet written d
 The gap absorbs overshoot and converts "killed mid-sentence" into "delivered something".
 
 **Note:** true mid-flight steering ("you have 30s left, wrap up") is **not available** for background
-steps — they are one-shot `pi.exec` subprocesses with no channel to send into a running turn. The soft
-deadline and the round boundary are the achievable substitutes.
+steps — they are one-shot `pi.exec` subprocesses with no channel to send into a running turn. Nor would
+controlling the spawn ourselves help: in `--print` mode the agent loop runs autonomously to completion
+with no stdin to inject into. The only way to "nudge" is to start another turn.
+
+**Rejected: a "landing" invocation** — re-invoking a timed-out `implement` on its resumed session purely
+to say "wrap up, you have N seconds". It is strictly dominated by what the loop already does: a nudge
+spends a process spawn on *communication*, whereas the next round spends the same spawn on communication
+**and continued work**, since the step is `resumable`. Do not re-propose it.
+
+**Where the soft deadline actually matters:** only on steps that cannot be resumed. `implement` is
+`resumable` and `optional`, so hitting its cap is recoverable — the next round continues the same
+session. `survey` and `verify` are neither, so a timeout discards everything they had. The slack is
+insurance for them; on `implement` it is close to a no-op.
 
 ---
 
