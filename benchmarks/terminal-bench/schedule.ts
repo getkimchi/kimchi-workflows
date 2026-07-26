@@ -77,6 +77,31 @@ export const implementBoxMs = (remainingSec: number): number => {
 };
 
 /**
+ * The audit is `verify`'s job done by a different method over the same machine, so it is the same kind
+ * of work with the same measured cost profile, and it gets the same box. Nothing about reading a machine
+ * a second time is cheaper than reading it the first.
+ */
+export const AUDIT_CAP_MS = VERIFY_CAP_MS;
+
+/**
+ * Whether a second opinion on a "done" verdict is worth buying yet.
+ *
+ * A wrong "done" is the most expensive thing that happens in a run: of 45 such verdicts in one full run
+ * 13 were wrong, and those 13 stopped with a median of 1412s of budget still unspent (p25 641s, max
+ * 8700s) — the run halts holding exactly the time that would have fixed the task. The mirror-image error
+ * is nearly free, because a run that is told "not done" simply keeps working: 9 of 42 "not done"
+ * verdicts were also wrong and every one of them still scored 1.0.
+ *
+ * So the question is not whether a second opinion is affordable but whether a DISAGREEMENT is: what has
+ * to fit is the audit, plus the smallest repair round that could land anything, plus the check that
+ * repair still has to pass, plus the settle margin. Below that the audit can only ever confirm a verdict
+ * or deliver news nobody can act on, which is pure cost. At a 900s budget this lands at 390s, which is
+ * also where the threshold analysis over those 45 verdicts put it: gating at ">300s left" would fire on
+ * 27 of the 32 correct verdicts (what it costs) and on all 13 of the wrong ones (what it buys).
+ */
+export const auditIsAffordable = (remainingSec: number): boolean => remainingSec * 1000 >= AUDIT_CAP_MS + IMPLEMENT_FLOOR_MS + VERIFY_CAP_MS + ROUND_MARGIN_SEC * 1000;
+
+/**
  * A later recon pass only WRITES DOWN what the first one already found — it does not look again, so it
  * needs room to emit JSON and nothing more. Keeping it small is what makes the recon loop affordable:
  * a second full-sized box would put a third of a short run into reconnaissance.

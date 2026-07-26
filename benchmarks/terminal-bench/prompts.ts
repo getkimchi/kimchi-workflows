@@ -222,3 +222,60 @@ export function verifyPrompt(args: { instruction: string; design: Plan | undefin
     "measured, that happened to 13 of 45 runs that declared themselves finished.",
   ].join("\n");
 }
+
+/**
+ * The second opinion, and the only step deliberately kept ignorant of the checklist.
+ *
+ * Running `verify` twice would not catch what `verify` misses: its 13 wrong "done" verdicts in 45 were
+ * unexamined corners rather than sloppy checking, and the same prompt makes the same omissions. So the
+ * decorrelation has to be in the METHOD — this one never sees the criteria and works from the task
+ * statement end to end, the way whoever ends up using the result would.
+ *
+ * Its verdict bias is the opposite of `verify`'s, and deliberately so. `verify` decides whether to spend
+ * another round; this decides whether to REOPEN one that has been declared finished, and that costs a
+ * repair round which may break work that is currently correct. So the bar here is evidence, not doubt.
+ */
+export function auditPrompt(args: { instruction: string; stepSec: number; remainingSec: number }): string {
+  const { instruction, stepSec, remainingSec } = args;
+  return [
+    "ANOTHER CHECKER HAS ALREADY BEEN OVER THIS MACHINE AND DECLARED THE TASK COMPLETE. You are the",
+    "second opinion, and you are the last thing between that verdict and the run stopping for good. Your",
+    "job is to find the thing that checker missed.",
+    "",
+    "THE TASK:",
+    instruction,
+    "",
+    "You are NOT being given its checklist, on purpose. It worked down a list of criteria and confirmed",
+    "what that list told it to look for; you work from the task above, end to end, as someone using the",
+    "result would. A second pass by the same method finds the same things, so the only way you are worth",
+    "the time is by looking somewhere else.",
+    "",
+    timeLine(stepSec, remainingSec),
+    "",
+    "Where a checklist-driven pass is habitually thin, in the order worth spending your time:",
+    "  - actually RUN the deliverable, the whole way through, the way the task describes using it, and",
+    "    read what comes out. This is where a result that satisfies every narrow check falls over;",
+    "  - run everything FROM A CLEAN SHELL (`bash -lc '<command>'`, starting from /), with nothing you",
+    "    exported, no activated venv and no cwd of your own: the machine is graded after everyone has",
+    "    left, so anything that depends on session state is already broken;",
+    "  - look for what should NOT be there — a debug line, an extra row, a stray scratch file, a leftover",
+    "    backup, a trailing field. Checks confirm what they expect and ignore everything else;",
+    "  - compare exact formats, exact values, counts and ordering against the task's own words, not",
+    "    against what would be reasonable;",
+    "  - try the edge inputs the task admits: empty, missing, malformed, duplicate, largest, smallest.",
+    "",
+    "DO NOT FIX ANYTHING, and do not improve anything. Report only. If you are right, someone else gets a",
+    "round to repair what you found; if you start editing, nobody ever checks what you did.",
+    "",
+    "THE BAR FOR OVERTURNING IS EVIDENCE, NOT SUSPICION. Say `allPass: false` ONLY when you can point at",
+    "a concrete failure you actually observed, and paste the command and the output that show it. A",
+    "corner you did not get to, a doubt, or something you would have built differently is NOT a dissent:",
+    "reopening a finished task spends a repair round that can break work which is currently correct. If",
+    "you found nothing you can demonstrate, say `allPass: true` and let the run stop.",
+    "",
+    "The reply shape is shared with the first checker, so two of its fields read differently here:",
+    "`unchecked` is whatever you did not get to — write it down honestly, but here it does NOT decide the",
+    "verdict; and each entry in `failures` takes a short id of your own (`a1`, `a2`, ...), the real output",
+    "you saw in `actual`, and what is actually wrong in `diagnosis`.",
+  ].join("\n");
+}

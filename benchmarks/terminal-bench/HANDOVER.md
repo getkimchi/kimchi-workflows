@@ -8,6 +8,29 @@ and what is genuinely still open.
 
 ---
 
+## 0. Unattended session, 2026-07-26 ~12:00-18:00
+
+Owner away; instruction was to make **data-driven** decisions autonomously, aim for 60-70% accuracy,
+ignore corner cases, record decisions in files, and use subagents for implementation.
+
+**Honest framing of that target, decided before starting.** Current is 0.461 (41/89). The addressable
+buckets in the last full run are **13 false positives** (verifier said done, task was broken → run
+stopped with budget unspent) and 15 deadline cancellations. Converting every false positive lands
+around 0.53. The remaining ~33 tasks were correctly judged unsolved — those are model-capability
+limits, not scheduling ones. So 60% is a stretch and 70% is almost certainly out of reach through
+workflow changes with kimi-k2.7; progress will be reported as progress, not dressed up as arrival.
+
+**Primary metric is FALSE-POSITIVE RATE, not score.** At 89 tasks and k=1 the standard error on mean
+reward is ~5 points, so score cannot resolve any change made today. The verifier's verdict is in every
+run log and can be compared against the real reward, which is a far more sensitive instrument:
+precision was **71% (32 of 45)** in `jobs/2026-07-26__00-06-23`, and that is the number to move.
+
+**Four config changes have been made since the last live run** (`8378540`, `29a5179`, `c1f3d43`, plus
+the `42f4633` engine change). All are reasoned from logs, none validated. That is exactly the pattern
+that produced the v5 regression and the 150s-floor error, so the first action is a run, not more edits.
+
+---
+
 ## 1. Settled facts — do not re-litigate these
 
 **The framework is the product; the benchmark is a demonstration of it.** Terminal-bench is a poor
