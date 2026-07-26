@@ -70,7 +70,7 @@ const approveSchema = Type.Object({
  * is what actually prevents it.
  */
 const API_EXAMPLE = `import { Type } from "typebox";
-import { createStep, createAgentStep, createQuestionnaireStep, createWorkflow } from "pi-workflows/src/flow";
+import { createStep, createAgentStep, createQuestionnaireStep, createWorkflow } from "pi-workflows";
 
 const askSchema = Type.Object({
   topic: Type.String({ description: "What should we write about?" }),
