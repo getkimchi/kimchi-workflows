@@ -94,8 +94,14 @@ skips correctly. It is also what caught the audit dying at its box every time.
 
 ### Still unaddressed, in size order
 
-- **34 tasks finished, spent the clock, and were still wrong** (median 128s left). No scheduling change
-  reaches these. This is the ceiling: converting *both* addressable buckets in full lands at 0.73.
+- **34 tasks finished, spent the clock, and were still wrong** (median 128s left) — but "no scheduling
+  change reaches these" turned out to be **wrong, and it was wrong because nobody looked**. Of the 21
+  that ran to completion and were correctly judged not-done, **eight spent exactly 540s on
+  implementation and completed zero rounds**: three attempts, each killed at the flat 180s box, on a
+  step that never once got to finish. Those are not capability limits, they are the fragmentation the
+  share-of-remaining box (`ee98c0e`) was built to fix, and they were sitting inside the bucket labelled
+  unfixable. The honest ceiling is therefore higher than 0.73 — and the lesson is the one in
+  `LESSONS.md`: a cause is ruled out by measuring it, not by finding the label plausible.
 - **Container OOM is 3.4%, not 10%** — 3 of 89 (`circuit-fibsqrt`, `dna-assembly`,
   `schemelike-metacircular-eval`), all `exit code 137`, plus `regex-chess` in the subset. Worth ~3
   points and still environmental; the earlier 10% estimate was too high.
