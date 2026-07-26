@@ -60,6 +60,47 @@ overspend**, and it is paid once per round: 209 verify spawns across 89 tasks.
    loads it from that one path, so building a new bundle while a job is running silently swaps the
    workflow under the trials that have not started yet. A second checkout with its own `dist/` is what
    makes it safe to test a change and a baseline at the same time.
+3. **The checks were being killed before they could answer** (`eb868d0`). Measured on the current
+   build: **6 of 15 verifications and 2 of 2 audits died at their box.** A check killed at its cap is
+   the worst outcome available — it spends the whole box AND returns nothing, so the round is decided
+   by a default rather than by evidence, and the two defaults point opposite ways (a silent `verify`
+   reads as not-passed, a silent `audit` as no-objection). `verify`'s ceiling went 180s → 240s and
+   `audit` got its own box, 20% floored at 240s, because it is handed no checklist and so pays for the
+   reconnaissance `verify` gets free.
+4. **`verify`'s floor deliberately left at 120s**, against the obvious symmetric fix. Every
+   verification that ever reached a verdict did so in under 119s; the kills pile up ON the cap rather
+   than trailing off, so a check still running at 120s has stopped converging rather than needing a
+   little longer. Raising it would cost 30s per round out of the work, on runs where checking already
+   took 28% of the wall clock, to rescue a case the data says is not rescuable. The free half of the
+   fix — telling both checkers to keep the last third of the box for writing the verdict, and what
+   their own silence costs — is where that end of the distribution gets addressed.
+
+### What the two validation jobs showed
+
+`jobs/2026-07-26__12-00-55` — 16 tasks, **11 of the 13 false positives** from the full run plus 5
+controls, on the recon-loop build with no audit. Enriched for exactly the failure being chased, and:
+
+> **precision on "done" was 4/4 with zero false positives**, against 32/45 = 71% on the same kind of
+> tasks a run earlier. Two of the four FP tasks that finished (`log-summary-date-ranges`,
+> `video-processing`) came back 1.0; the rest were correctly judged not-done.
+
+So the *prompt* work — the `unchecked` list written before the verdict, "re-read the task", the
+explicit bias toward not-done — appears to be what moved the number, before `audit` existed. n is 4, so
+this is evidence and not proof, but it does mean **`audit` is now insurance rather than the main fix**,
+and its cost has to stay proportionate to that.
+
+`jobs/2026-07-26__12-27-05` — 6-task smoke of the `audit` branch: 5/6, precision 3/3, branch fires and
+skips correctly. It is also what caught the audit dying at its box every time.
+
+### Still unaddressed, in size order
+
+- **34 tasks finished, spent the clock, and were still wrong** (median 128s left). No scheduling change
+  reaches these. This is the ceiling: converting *both* addressable buckets in full lands at 0.73.
+- **Container OOM is 3.4%, not 10%** — 3 of 89 (`circuit-fibsqrt`, `dna-assembly`,
+  `schemelike-metacircular-eval`), all `exit code 137`, plus `regex-chess` in the subset. Worth ~3
+  points and still environmental; the earlier 10% estimate was too high.
+- **`survey` now costs a median 130s, up from 66s**, and 23-24% of wall — the richer prompt is not
+  free. It is at the 20% target rather than over it, and it feeds two steps, so it stays for now.
 
 ---
 
