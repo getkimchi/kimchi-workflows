@@ -124,7 +124,34 @@ def report(job: Path) -> None:
         print(f"     {f['reward']!s:>5}  {verdict:<8} r={f['rounds']} left={f['left'] and round(f['left'])!s:>5}  {f['task']:<34} {spent}{flag}")
 
 
+def compare(before: Path, after: Path) -> None:
+    """Paired over the tasks BOTH jobs scored, which is the only comparison that means anything.
+
+    Two runs rarely score the same set — a trial that OOMs or is still in flight produces no reward at
+    all — and comparing the two headline averages silently attributes that difference in coverage to the
+    change. It cost a full day once: `0.432 -> 0.461` looked like an improvement and was 11 recovered
+    tasks over a flat 35 -> 36.
+    """
+    a = {f["task"]: f for f in (trial_facts(p) for p in sorted(p for p in before.iterdir() if p.is_dir())) if f["reward"] is not None}
+    b = {f["task"]: f for f in (trial_facts(p) for p in sorted(p for p in after.iterdir() if p.is_dir())) if f["reward"] is not None}
+    shared = sorted(set(a) & set(b))
+    won = [t for t in shared if a[t]["reward"] != 1.0 and b[t]["reward"] == 1.0]
+    lost = [t for t in shared if a[t]["reward"] == 1.0 and b[t]["reward"] != 1.0]
+    print(f"== paired over {len(shared)} tasks scored by both  ({before.name} -> {after.name})")
+    print(f"   {sum(1 for t in shared if a[t]['reward'] == 1.0)} -> {sum(1 for t in shared if b[t]['reward'] == 1.0)}   gained {len(won)}, lost {len(lost)}, net {len(won) - len(lost):+d}")
+    print(f"   only in {before.name}: {sorted(set(a) - set(b))}")
+    print(f"   only in {after.name}: {sorted(set(b) - set(a))}")
+    if won:
+        print("   GAINED: " + ", ".join(won))
+    if lost:
+        print("   LOST:   " + ", ".join(lost))
+
+
 if __name__ == "__main__":
-    for arg in sys.argv[1:] or ["."]:
-        report(Path(arg))
-        print()
+    args = sys.argv[1:]
+    if args and args[0] == "--compare":
+        compare(Path(args[1]), Path(args[2]))
+    else:
+        for arg in args or ["."]:
+            report(Path(arg))
+            print()
