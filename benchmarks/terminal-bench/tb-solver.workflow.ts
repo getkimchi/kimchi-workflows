@@ -1,5 +1,5 @@
 /**
- * A terminal-bench solver, as a workflow (spec §3): survey → (implement → verify)* .
+ * A terminal-bench solver, as a workflow (spec §3): (survey)* → (implement → verify)* .
  *
  * The bet this workflow makes is narrow and, I think, the only one worth making at the workflow level:
  * a benchmark task is graded on the machine's FINAL STATE by tests the agent never sees, and the
@@ -36,114 +36,57 @@
  */
 import { type Static, Type } from "typebox";
 import { createAgentStep, createStep, createWorkflow } from "../../src/flow/index.ts";
-import { criteriaBlock, GRADING_CONTRACT, planSchema, READ_ONLY, taskInputSchema, timeLine, verifySchema } from "./contract.ts";
+import { planSchema, taskInputSchema, verifySchema } from "./contract.ts";
+import { implementPrompt, surveyLandingPrompt, surveyPrompt, verifyPrompt } from "./prompts.ts";
+import { IMPLEMENT_FLOOR_MS, implementBoxMs, RECON_MAX_PASSES, ROUND_MARGIN_SEC, ROUND_SAFETY_VALVE, SURVEY_CAP_MS, SURVEY_LANDING_MS, VERIFY_CAP_MS } from "./schedule.ts";
 
 /** `provider/model` for every step; the adapter pins this so subagents match the parent (spec §9.5). */
 const MODEL = process.env.TB_MODEL ?? "kimchi-dev/kimi-k2.7";
 
-/**
- * The agent phase's total budget. Every per-step wall-time cap below is a FRACTION of it, because a cap
- * expressed in absolute milliseconds is meaningless against a clock it does not know: v2 gave
- * `implement` 900s inside an 855s run, so the cap could never fire, and two tasks the baseline solved
- * were lost to a single step that ran until the harness killed the run mid-edit — no verify, no repair
- * round, no settle.
- */
-const BUDGET_SEC = Math.max(60, Number(process.env.TB_AGENT_TIMEOUT_SEC ?? 900));
-
-/**
- * Per-step wall-time caps, as a share of THIS run's budget.
- *
- * `implement` and `verify` have no absolute ceiling on purpose. An earlier version capped them at 420s
- * and 200s, which is sensible at 900s and absurd at 12000s — it handed every task the same seven-minute
- * implementation window however long it actually had. A full-benchmark run then spent a mean of 50% of
- * the budget on long tasks (`build-pov-ray`: 7% of 12000s, then stopped). Only `survey` keeps a ceiling:
- * reconnaissance does not get better for taking twenty minutes.
- *
- * The sizes come from what the steps actually cost, measured over a run: implement median 141s, verify
- * median 33s, survey median 135s. Two things follow.
- *
- * `implement` is 20%, not the 45% it was, because a box stopped being a deadline the moment the step
- * became `optional` (running out costs the round, not the run) and `resumable` (the next round continues
- * the same session). It is now a CHECKPOINT INTERVAL, and the right interval is the shortest one that
- * still gets work done between verifications — every checkpoint buys a calibrated list of what is still
- * broken. At 20% the median implement finishes inside its box, and three to four rounds fit where one
- * did before.
- *
- * `verify` is 12% because it is cheap (median 33s, max 107s), so more rounds cost little overhead.
- *
- * `survey` gets 25% (ceiling 400s) rather than 15%, because at 15% FOUR IN TEN surveys hit the cap — and
- * a survey that times out leaves the run with no acceptance criteria at all, which is the one thing
- * everything downstream is built on. The cap is only half the fix: every step is now told ITS OWN box
- * (see `timeLine`), so it paces itself instead of exploring as though it owned the whole run.
- */
-/**
- * Recon and checking are sized from what they MEASURABLY COST, with a floor, not from a percentage.
- *
- * A pure fraction has been wrong in both directions. At 25% of the budget survey was a quarter of the
- * run before any work started; cutting it to 8% put the cap (72s at a 900s budget) BELOW the observed
- * median, and four of six surveys then died at their limit — leaving those runs with no acceptance
- * criteria at all, which is the one thing everything downstream is built on. Observed survey durations
- * across runs: 16, 25, 38, 100, 108, 221, 231s. Observed verify: 12, 33, 38, 66, 97, 121, 180s.
- *
- * The floor is what makes these steps survive on short tasks, where a percentage is simply too small to
- * finish the job; the ceiling is what stops them eating a long one.
- */
-const SURVEY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.15, 150), 240) * 1000);
-const VERIFY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.12, 120), 300) * 1000);
-
-/**
- * `implement` takes a share of the time ACTUALLY LEFT, resolved fresh on every round (spec §9.3's
- * function form) — not a fixed fraction of the whole budget.
- *
- * A fixed fraction is the same on every round, which forces a choice between two bad schedules. Small
- * (20%, what this was) fragments the work: a full-benchmark run had 53 of 89 implementations cut off
- * mid-job, each restart re-establishing footing the last one already had. Large enough to be useful
- * overruns instead — 15 runs were killed by the deadline mid-edit, because the last round was granted
- * the same slice as the first when a fraction of it remained.
- *
- * Taking 70% of what is left is self-correcting: round one gets the long coherent stretch that is the
- * agent's actual strength, each later round is necessarily smaller, and the 30% held back always covers
- * `verify` plus the margin — so the loop shrinks toward its deadline instead of colliding with it.
- */
-const IMPLEMENT_SHARE_OF_REMAINING = 0.5;
-/** Never hand a round less than this; below it a subagent cannot finish a single useful edit. */
-const IMPLEMENT_FLOOR_MS = 90_000;
-
-/**
- * What a round may spend on implementation, given the seconds left when it opened. This is the ONE
- * definition — used both as the enforced budget and as the number the prompt quotes, so the agent is
- * never told a deadline the engine will not honour.
- *
- * Two bounds, and the tighter one wins. The share keeps early rounds from eating the clock, so there is
- * always something left to repair with. `spendableMs` is what physically remains once checking and
- * settling are paid for — it binds on the LAST round, letting it fill the tail exactly instead of
- * taking half of it and idling the rest (a 750s task otherwise finished with 38% of its budget unused,
- * because half of a small remainder is never worth starting).
- */
-const implementBoxMs = (remainingSec: number): number => {
-  const remainingMs = remainingSec * 1000;
-  // Everything physically available once this round's check and the settle margin are paid for.
-  const spendableMs = remainingMs - VERIFY_CAP_MS - ROUND_MARGIN_SEC * 1000;
-  const shareMs = remainingMs * IMPLEMENT_SHARE_OF_REMAINING;
-  // Holding back half only makes sense if a further round can actually use it. Ask whether one would
-  // still fit after this round took its share; when it would not, this IS the last round, so it takes
-  // everything instead of leaving a remainder too small to start anything with. Without this a 900s
-  // task stopped with 233 of 855 seconds unspent — a reserve kept for a round that could never happen.
-  const anotherRoundFits = remainingMs - shareMs - VERIFY_CAP_MS - VERIFY_CAP_MS - ROUND_MARGIN_SEC * 1000 >= IMPLEMENT_FLOOR_MS;
-  return Math.max(IMPLEMENT_FLOOR_MS, Math.round(anotherRoundFits ? Math.min(shareMs, spendableMs) : spendableMs));
-};
-
-/** Slack kept back so the last round settles instead of being cut off mid-write. */
-const ROUND_MARGIN_SEC = 60;
-/**
- * A safety valve, NOT the policy — the clock decides when rounds end. This exists for the pathological
- * case the clock cannot catch: rounds so cheap they never consume the budget (every attempt failing in
- * seconds), which would otherwise spin until the loop's `maxIterations` guard CRASHED the run and
- * skipped the final report. Set far above any round count a real budget can pay for.
- */
-const ROUND_SAFETY_VALVE = 15;
-
 // -- Steps ------------------------------------------------------------------------------------------
+
+/** Clock and pass number at the top of a recon pass, so `survey` knows whether it is looking or landing. */
+const reconClock = createStep({
+  name: "recon-clock",
+  description: "How much time is left, and which recon pass this is",
+  output: Type.Object({ remainingSec: Type.Number(), pass: Type.Number() }),
+  run: ({ ctx }) => {
+    const task = ctx.getInitData<{ deadlineIso: string }>();
+    const previous = ctx.getStepResult<{ pass: number }>("recon/recon-check");
+    const remainingSec = (new Date(task?.deadlineIso ?? Date.now()).getTime() - Date.now()) / 1000;
+    return { remainingSec, pass: (previous?.pass ?? 0) + 1 };
+  },
+});
+
+/**
+ * Did recon produce a contract, and can we afford to try again?
+ *
+ * `survey` is the only step whose output TWO others consume — `implement` works against its criteria and
+ * `verify` checks against them — so losing it degrades the work and blinds the check at once. It was
+ * nonetheless the least protected step in the workflow: hard cap, no repeat, and `optional`, so a
+ * timeout simply deleted the contract (measured: four surveys in six died at their cap, leaving those
+ * runs with nothing). Looping until it has actually produced criteria inverts that, and costs nothing
+ * in the common case where the first pass succeeds.
+ */
+const reconCheck = createStep({
+  name: "recon-check",
+  description: "Decide whether another recon pass is needed and affordable",
+  output: Type.Object({ hasCriteria: Type.Boolean(), mustStop: Type.Boolean(), pass: Type.Number() }),
+  run: ({ ctx, logger }) => {
+    const task = ctx.getInitData<{ deadlineIso: string }>();
+    const design = ctx.getStepResult<Static<typeof planSchema>>("survey");
+    const opened = ctx.getStepResult<{ pass: number }>("recon-clock");
+    const pass = opened?.pass ?? 1;
+    const remainingSec = (new Date(task?.deadlineIso ?? Date.now()).getTime() - Date.now()) / 1000;
+    const hasCriteria = (design?.criteria?.length ?? 0) > 0;
+    // Recon must never starve the work. Stop the moment another pass would eat the smallest round that
+    // could still land something — an unverified implementation beats a perfect contract and no time.
+    const reserveSec = (SURVEY_LANDING_MS + IMPLEMENT_FLOOR_MS + VERIFY_CAP_MS) / 1000 + ROUND_MARGIN_SEC;
+    const mustStop = remainingSec < reserveSec || pass >= RECON_MAX_PASSES;
+    logger.info("recon pass finished", { pass, hasCriteria, remainingSec: Math.round(remainingSec), mustStop });
+    return { hasCriteria, mustStop, pass };
+  },
+});
 
 /**
  * Look at the machine and turn the task into a checkable contract, in one step. Reconnaissance and
@@ -160,66 +103,31 @@ const survey = createAgentStep({
   // survey blow its budget twice and crash the whole run at the 216s mark with NOTHING attempted and
   // 640s left on the clock. It is `optional` now, and the steps below fall back to working straight
   // from the task statement, which is roughly what a plain agent would have done anyway.
-  maxDurationMs: SURVEY_CAP_MS,
+  // A first pass explores; a later one only writes down what that pass already found, so it gets a much
+  // smaller box (see SURVEY_LANDING_MS). Sizing this from run state is what makes the recon loop cheap
+  // enough to be worth having.
+  maxDurationMs: ({ ctx }) => {
+    const recon = ctx.getStepResult<{ pass: number; remainingSec: number }>("recon-clock");
+    const box = (recon?.pass ?? 1) > 1 ? SURVEY_LANDING_MS : SURVEY_CAP_MS;
+    return Math.max(30_000, Math.min(box, (recon?.remainingSec ?? 0) * 1000 - ROUND_MARGIN_SEC * 1000));
+  },
   optional: true,
-  // No repeat. A step that blew its WALL-TIME budget will blow it again — the work was too big for the
-  // box, and nothing about that changed — so the repeat just burns the budget twice for no output.
-  // Measured: two tasks lost 216s and 270s of a 855s run to exactly this. The engine cannot know that
-  // in general (a repeat is right for a thrown error), but here it is: `optional` above already means a
-  // failed survey costs the criteria, not the run.
+  // Still no in-place repeat: a COLD restart would redo the exploration and die at the same wall (two
+  // tasks lost 216s and 270s of an 855s run to exactly that). The recon loop around this step is the
+  // replacement — it comes back with the session intact, so the next pass continues instead of redoing.
   retry: { maxRetry: 0 },
+  // The one reason the loop works: pass two reopens pass one's conversation and still holds everything
+  // it read, so it only has to write the answer down.
+  resumable: true,
   prompt: ({ ctx }) => {
     const task = ctx.getInitData<{ instruction: string }>();
-    const budget = ctx.getStepResult<{ remainingSec: number }>("budget");
-    return [
-      "Inspect this machine and turn the task below into an acceptance contract that can be checked by",
-      "running commands.",
-      "",
-      "TASK:",
-      task?.instruction ?? "(missing)",
-      "",
-      READ_ONLY,
-      "",
-      GRADING_CONTRACT,
-      "",
-      timeLine(SURVEY_CAP_MS / 1000, budget?.remainingSec ?? 0),
-      "",
-      "First look around (ls, cat, find, git status/log, running processes, installed tooling) until you",
-      "know what is actually here — do not plan against a machine you have imagined. Be quick about it:",
-      "a few commands, not an audit. You are not solving the task in this step, and every second here is",
-      "one the work itself does not get.",
-      "",
-      "Then, BEFORE writing any check, list `requirements`: go through the task sentence by sentence and",
-      "write down every distinct thing it demands — each path, filename, format, exact value, exit code,",
-      "count and behaviour. Quote its words. This list is what your criteria must cover; anything you fail",
-      "to notice here is something nobody downstream will ever check.",
-      "",
-      "Then turn those requirements into acceptance criteria.",
-      "Rules for criteria:",
-      "  - each is checkable by ONE non-interactive shell command that exits 0 exactly when it holds;",
-      "  - EVERY check must be able to fail on the WRONG thing being present, not only on the right thing",
-      "    being absent. A check that confirms the values you expect, while ignoring whatever else is",
-      "    there, passes a result with an extra row, a stray file or a trailing field — and the real tests",
-      "    will not. Count things exhaustively, compare whole outputs, assert the absence of extras.",
-      "  - the command must test real behaviour (run the program, query the service, parse the output),",
-      "    not merely that a file exists — unless existence is genuinely all that is required;",
-      "  - prefer a check that costs seconds over one that costs minutes: it is run more than once, by",
-      "    more than one step. Where the honest check is expensive (cracking a hash, a full test suite),",
-      "    checking the ARTIFACT it should have produced is usually just as decisive;",
-      "  - no command may reference tests you have not seen, or write to the paths under test;",
-      "  - keep it to the handful that actually decide the outcome, ordered most important first.",
-      "",
-      "For each criterion set `source` to the task's own words that require it, or the literal word",
-      "INFERRED when the task does not say it and you worked it out. Be honest about which is which: an",
-      "inference stated as a requirement is how a run ends up confidently satisfying the wrong contract.",
-      "Then CHECK YOUR OWN WORK for contradictions — if one criterion enumerates a set and another counts",
-      "it, the numbers must agree. (Measured: a survey demanded 16 rows for a table it had itself",
-      "enumerated as 5 x 3 = 15. Every check passed; the task scored zero.)",
-      "",
-      "Finally, list `uncertainties`: the places the task is genuinely ambiguous and you had to pick a",
-      "reading. Naming them is what lets the later check spend its scepticism where it is warranted.",
-      "Also give the approach you would take, briefly.",
-    ].join("\n");
+    const recon = ctx.getStepResult<{ remainingSec: number; pass: number }>("recon-clock");
+    const remainingSec = recon?.remainingSec ?? 0;
+    // A later pass has already looked; sending it back to explore is how a recon loop becomes a budget
+    // leak. It gets the landing prompt and a much smaller box instead.
+    return (recon?.pass ?? 1) > 1
+      ? surveyLandingPrompt(SURVEY_LANDING_MS / 1000, remainingSec)
+      : surveyPrompt(task?.instruction ?? "(missing)", SURVEY_CAP_MS / 1000, remainingSec);
   },
 });
 
@@ -262,76 +170,18 @@ const implement = createAgentStep({
   resumable: true,
   prompt: ({ ctx }) => {
     const task = ctx.getInitData<{ instruction: string }>();
-    const design = ctx.getStepResult<Static<typeof planSchema>>("survey");
+    const design = ctx.getStepResult<Static<typeof planSchema>>("recon/survey");
     const round = ctx.getStepResult<{ remainingSec: number; round: number }>("budget");
     const lastVerify = ctx.getStepResult<Static<typeof verifySchema>>("verify");
-    const failures = lastVerify?.failures ?? [];
-    // Continuity across rounds is the SESSION's job, not a summary's: this step is `resumable`, so a
-    // later round reopens the same conversation and still holds everything it read, ran and learned.
-    // A three-field report of the same thing was strictly worse — lossier, and usually absent, since a
-    // round that spends its whole box produces no report at all.
-    const continuing = (round?.round ?? 1) > 1;
-
-    const priorWork = continuing
-      ? [
-          "",
-          "YOU HAVE BEEN HERE BEFORE. This conversation is your own from the previous round, which ran",
-          "out of time or was judged incomplete — continue it rather than starting over, and re-read any",
-          "file before you change it again.",
-        ].join("\n")
-      : "";
-
-    const retryBlock =
-      failures.length > 0
-        ? [
-            "",
-            "AN INDEPENDENT CHECK FOUND THE WORK INCOMPLETE.",
-            "These criteria did NOT pass — fix the underlying cause, do not paper over them:",
-            ...failures.map((f) => `  [${f.id}] observed: ${f.actual}\n        diagnosis: ${f.diagnosis}`),
-          ].join("\n")
-        : "";
-
-    return [
-      "Complete this task on the machine you are on.",
-      "",
-      "TASK:",
-      task?.instruction ?? "(missing)",
-      "",
-      // Deliberately NOT "what your work is measured against" — that is what they used to say, and it
-      // made a quick reconnaissance pass the definition of success. The criteria are written by a step
-      // that had looked at the machine for under two minutes and had never attempted the work; the
-      // hidden tests are written from the task. Where they disagree, the task wins, and an implementer
-      // that has learned something the survey did not know must be free to act on it.
-      "CHECKLIST FROM A QUICK RECONNAISSANCE PASS — useful, but NOT the specification:",
-      (design?.criteria?.length ?? 0) > 0 ? criteriaBlock(design?.criteria ?? []) : "  (none were derived — satisfy the task statement above, in full)",
-      "Treat these as a floor, not a ceiling: satisfying every one of them is not the same as completing",
-      "the task, and if one contradicts the task statement above, the task statement is right.",
-      "",
-      `PLANNED APPROACH: ${design?.approach ?? "(none derived — work from the task statement above)"}`,
-      priorWork,
-      retryBlock,
-      "",
-      GRADING_CONTRACT,
-      "",
-      timeLine(implementBoxMs(round?.remainingSec ?? 0) / 1000, round?.remainingSec ?? 0),
-      "",
-      "You are time-boxed. If you cannot finish everything, land the most important criteria FIRST and",
-      "leave the machine in a working state — a partial result that runs beats a half-applied edit that",
-      "does not, and another round may follow this one.",
-      "",
-      "Do the work now, then RUN EACH CHECK COMMAND ABOVE YOURSELF and fix what fails — catching your",
-      "own mistakes here is worth more than any later step can be, because you still have the context to",
-      "fix them. (Measured: an implementer told to leave checking to the verifier lands broken work and",
-      "the run rarely has time to repair it.)",
-      "",
-      "Check the task's own words too, not only the checklist above — it was written before anyone",
-      "attempted the work and it misses things. Re-read the task for every path, filename, exact format,",
-      "value and count it names, and make sure your result contains exactly what is asked for and nothing",
-      "extra: a stray row, file or field fails a real test that a narrow check waves through.",
-      "",
-      "Delete any scratch files, probe scripts or sample outputs YOU created that the task did not ask",
-      "for — they can only confuse whatever grades this machine.",
-    ].join("\n");
+    const remainingSec = round?.remainingSec ?? 0;
+    return implementPrompt({
+      instruction: task?.instruction ?? "(missing)",
+      design,
+      failures: lastVerify?.failures ?? [],
+      continuing: (round?.round ?? 1) > 1,
+      stepSec: implementBoxMs(remainingSec) / 1000,
+      remainingSec,
+    });
   },
 });
 
@@ -351,52 +201,14 @@ const verify = createAgentStep({
   retry: { maxRetry: 0 },
   prompt: ({ ctx }) => {
     const task = ctx.getInitData<{ instruction: string }>();
-    const design = ctx.getStepResult<Static<typeof planSchema>>("survey");
+    const design = ctx.getStepResult<Static<typeof planSchema>>("recon/survey");
     const round = ctx.getStepResult<{ remainingSec: number }>("budget");
-    return [
-      "You are auditing a machine that someone else has just worked on. Assume nothing they may have",
-      "claimed is true: your job is to find out what is actually the case, by running commands.",
-      "",
-      "THE TASK THEY WERE GIVEN:",
-      task?.instruction ?? "(missing)",
-      "",
-      "THE QUESTION YOU ARE ANSWERING is whether THE TASK ABOVE is done — not whether the checklist below",
-      "passes. The checklist was written by someone who had looked at this machine for a couple of minutes",
-      "and had not yet attempted the work. It is a starting point and it is often incomplete. The tests",
-      "that decide the outcome were written from the task, so the task is what you audit.",
-      "",
-      "STARTING CHECKLIST — run each one and observe the real result:",
-      (design?.criteria?.length ?? 0) > 0 ? criteriaBlock(design?.criteria ?? []) : "  (none were derived — judge the task statement above on its own terms, end to end)",
-      (design?.uncertainties?.length ?? 0) > 0
-        ? ["", "THE CHECKLIST'S AUTHOR WAS UNSURE ABOUT THESE — check them harder than the rest:", ...(design?.uncertainties ?? []).map((u) => `  - ${u}`)].join("\n")
-        : "",
-      "",
-      timeLine(VERIFY_CAP_MS / 1000, round?.remainingSec ?? 0),
-      "",
-      "Rules:",
-      "  - run every check FROM A CLEAN SHELL (`bash -lc '<check>'`, starting from /), never from state",
-      "    you have set up yourself: the machine is graded after everyone has left, so anything that",
-      "    depends on an exported variable, a cwd or an activated venv is already broken;",
-      "  - run every check; never mark one passed because it looks like it should pass;",
-      "  - then RE-READ THE TASK and check what the checklist does not cover. Go requirement by",
-      "    requirement: every path, filename, format, exact value, count and exit code it names. This is",
-      "    where the outcome is usually decided;",
-      "  - look for what should NOT be there as well as what should: an extra row, a stray file, a wrong",
-      "    order, a trailing field. Checks tend to confirm the expected and ignore the unexpected, and the",
-      "    real tests do not;",
-      "  - an end-to-end run of what the task actually asks for often fails where every narrow check passes;",
-      "  - if a check command is itself broken, judge the underlying criterion by other means and say so;",
-      "  - DO NOT FIX ANYTHING. Report only. Someone else gets one more round to repair what you find.",
-      "",
-      "Then the verdict. List in `unchecked` everything the task requires that you did not actually",
-      "verify — write that list BEFORE you decide `allPass`, and let it decide for you: if the list is not",
-      "empty, `allPass` is false. Set `allPass` true only if you personally ran checks covering every",
-      "requirement of the task and saw them all hold.",
-      "",
-      "WHEN IN DOUBT, SAY NOT DONE. Being wrong in that direction costs one more round, which there is",
-      "time for. Being wrong the other way ends the run with the task broken and the clock unspent —",
-      "measured, that happened to 13 of 45 runs that declared themselves finished.",
-    ].join("\n");
+    return verifyPrompt({
+      instruction: task?.instruction ?? "(missing)",
+      design,
+      stepSec: VERIFY_CAP_MS / 1000,
+      remainingSec: round?.remainingSec ?? 0,
+    });
   },
 });
 
@@ -440,6 +252,8 @@ const checkpoint = createStep({
   },
 });
 
+const reconRound = createWorkflow({ name: "recon-round" }).then(reconClock).then(survey).then(reconCheck).commit();
+
 const solveRound = createWorkflow({ name: "solve-round" }).then(budget).then(implement).then(verify).then(checkpoint).commit();
 
 const report = createStep({
@@ -458,8 +272,14 @@ export default createWorkflow({
   input: taskInputSchema,
   defaultModel: MODEL,
 })
-  .then(budget)
-  .then(survey)
+  // Recon repeats until it has actually produced a contract. `survey` is the only step TWO others
+  // consume, so an empty result degrades the work and blinds the check at once — yet it used to be the
+  // least protected step here, and four surveys in six once died at their cap leaving nothing behind.
+  // A later pass reopens the same session and only writes down what the first already found.
+  .dountil(reconRound, (_ctx, last) => (last as { hasCriteria: boolean }).hasCriteria || (last as { mustStop: boolean }).mustStop, {
+    name: "recon",
+    maxIterations: RECON_MAX_PASSES + 1, // a guard; `recon-check` stops on the clock and the pass count
+  })
   // Rounds continue until an independent check passes everything, the clock runs low, or we run out
   // of rounds — `maxIterations` is a guard, not the intended exit (spec §3.3).
   .dountil(solveRound, (_ctx, last) => (last as { allPass: boolean; mustStop: boolean }).allPass || (last as { mustStop: boolean }).mustStop, {
