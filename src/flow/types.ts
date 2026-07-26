@@ -81,8 +81,22 @@ interface StepBase {
   /**
    * Per-step wall-time budget in milliseconds (spec §9.3). If the step runs longer, its abort signal
    * fires and the attempt fails with `budget-exceeded` — counted against the retry policy (§9.1).
+   *
+   * The function form is resolved ONCE per execution, immediately before the first attempt, against the
+   * same `ctx` a prompt sees (so every retry of one execution races the same clock — a retry is a second
+   * try at the same work, not a fresh grant of time).
+   *
+   * It exists because a step inside a loop cannot otherwise be sized honestly: a constant is the same on
+   * every iteration, so the author must either pick a slice small enough for the worst case — which
+   * fragments the work and leaves the tail of the budget unspent — or one large enough to be useful,
+   * which overruns the deadline on the last iteration. Reading the clock lets an iteration take a share
+   * of what is ACTUALLY LEFT, so rounds can be deliberately unequal and the final one is exactly as big
+   * as the time remaining.
+   *
+   * Returning a non-positive value means "no time left": the attempt fails immediately with
+   * `budget-exceeded` without starting, which for an `optional` step costs the step and not the run.
    */
-  readonly maxDurationMs?: number;
+  readonly maxDurationMs?: number | ((args: { readonly ctx: RunContext }) => number);
   /**
    * Let the run CONTINUE when this step fails for good (spec §9.1: retries exhausted, or a wall-time
    * budget blown). The failure is recorded as a `step-failed` event, the step's output is `undefined`,

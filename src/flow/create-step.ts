@@ -1,5 +1,5 @@
 import type { Static, TSchema } from "typebox";
-import type { FunctionStep, RetryPolicy, StepRunArgs, StepRunFn } from "./types.ts";
+import type { FunctionStep, RetryPolicy, RunContext, StepRunArgs, StepRunFn } from "./types.ts";
 
 /** Static type a step's `run` receives as `input`: the schema's Static type, or `undefined` when no input schema is declared. */
 type InferInput<TInputSchema extends TSchema | undefined> = TInputSchema extends TSchema ? Static<TInputSchema> : undefined;
@@ -17,8 +17,9 @@ export interface CreateStepOptions<TInputSchema extends TSchema | undefined = un
   output?: TOutputSchema;
   /** Unified repeat policy (spec §9.1): retry thrown errors / invalid output up to `maxRetry` times. */
   retry?: RetryPolicy;
-  /** Per-step wall-time budget in ms (spec §9.3): exceeding it aborts the step → `budget-exceeded`. */
-  maxDurationMs?: number;
+  /** Per-step wall-time budget in ms (spec §9.3): exceeding it aborts the step → `budget-exceeded`.
+   * A function is resolved once per execution, letting a step in a loop size itself from remaining time. */
+  maxDurationMs?: number | ((args: { ctx: RunContext }) => number);
   /** Let the run continue when this step fails for good (spec §9.1): records `step-failed`, output is `undefined`. */
   optional?: boolean;
   run: StepRunFn<InferInput<TInputSchema>, InferOutput<TOutputSchema>>;
