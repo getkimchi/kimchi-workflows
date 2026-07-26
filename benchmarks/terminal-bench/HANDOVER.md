@@ -29,6 +29,36 @@ precision was **71% (32 of 45)** in `jobs/2026-07-26__00-06-23`, and that is the
 the `42f4633` engine change). All are reasoned from logs, none validated. That is exactly the pattern
 that produced the v5 regression and the 150s-floor error, so the first action is a run, not more edits.
 
+### Result of the session, `jobs/2026-07-26__12-54-29`
+
+**44/88 = 0.500**, 4h 52m, `-k 1 -n 6`, 8.94M workflow tokens (down from 10.75M for a higher score).
+Paired over the 88 tasks both runs scored: **41 → 44, net +3** (11 gained, 8 lost).
+
+| | before | after |
+| --- | --- | --- |
+| score | 41/89 = 0.461 | 44/88 = 0.500 |
+| precision on "done" | 32/45 = **0.711** | 24/29 = **0.828** |
+| false positives | 13 | 5 |
+| killed by the deadline | 11 | 0 |
+| time survey / implement / verify | 12 / 65 / 23 | 19 / 57 / 21 (+3 audit) |
+
+**Read this honestly.** A +3 swing at k=1 across 88 tasks is inside the noise band — 11 tasks flipped
+each way. The number that genuinely moved is **precision, 71% → 83%**, and it moved because it is
+measured over 29 verdicts instead of inferred from one coin flip per task. Deadline kills went to zero,
+which is a mechanism claim and safe to make. The score claim is not.
+
+**What the session establishes is a localization, not a win.** Both buckets that looked addressable —
+wrong "done" verdicts and deadline overruns — were largely closed, and the score moved by three tasks.
+So the remaining loss is not in how the work is arranged. Roughly 34 tasks spend their whole budget and
+are still wrong at the end, and no scheduling or checking change reaches them.
+
+**And the benchmark's shape denies this approach its best move.** Every task is one machine graded on
+final state, so several independent attempts with the best one kept — the thing a workflow is actually
+good at — is unavailable, because the attempts would trample each other on the same filesystem. What
+is left is sequencing and checking, which is the thin part. Chasing this number further is not the
+best use of the framework; a use case where attempts are independent, or the artifact is not a mutated
+machine, has far more room.
+
 ### Where the 48 losses actually are
 
 `tools/job-report.py` (added this session, and the durable version of what used to live in `/tmp`)
