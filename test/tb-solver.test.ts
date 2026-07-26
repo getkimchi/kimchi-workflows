@@ -26,7 +26,7 @@ const roomyInput = () => ({ instruction: "Make the cli print ok.", deadlineIso: 
 
 /**
  * A deadline above every other threshold in the schedule but BELOW the one that makes a second opinion
- * worth buying (audit 120s + a floor implement round 90s + its verify 120s + the 60s margin = 390s at a
+ * worth buying (audit 240s + a floor implement round 90s + its verify 150s + the 60s margin = 540s at a
  * 900s budget). Rounds still open here; only the audit is priced out.
  */
 const noTimeToActInput = () => ({ instruction: "Make the cli print ok.", deadlineIso: new Date(Date.now() + 300_000).toISOString() });
@@ -159,7 +159,7 @@ describe("tb-solver: the second opinion", () => {
 
     expect(run.status).toBe("completed");
     // 300s left: a round still fits, but not the audit PLUS the repair round a dissent would demand
-    // plus its check plus the margin (390s). A second opinion nobody can act on is pure cost.
+    // plus its check plus the margin (540s). A second opinion nobody can act on is pure cost.
     expect(run.agent("audit").sessions).toBe(0);
     expect(run.output).toMatchObject({ allPass: true, rounds: 1 });
   });
@@ -185,6 +185,10 @@ describe("tb-solver: the second opinion", () => {
     // which currently passes, so a doubt is not a dissent.
     expect(auditPrompt).toContain("EVIDENCE, NOT SUSPICION");
     expect(auditPrompt).toContain("DO NOT FIX ANYTHING");
+    // Both trials of this step were killed at their box and returned nothing, which reads as no
+    // objection — so it is told to land the verdict, and what its silence would cost.
+    expect(auditPrompt).toContain("KEEP THE LAST THIRD OF YOUR BOX");
+    expect(auditPrompt).toContain("NO OBJECTION");
   });
 
   it("keeps the loop going on a dissent, and carries both checks' findings into the next round", async () => {
@@ -219,7 +223,7 @@ describe("tb-solver: the second opinion", () => {
         implement: [raw(work)],
         verify: [reply(allGood)],
         // The step is `optional`, so this is what a blown box looks like from `checkpoint`: nothing.
-        audit: [throws(new Error('step "audit" exceeded its 120000ms time budget'))],
+        audit: [throws(new Error('step "audit" exceeded its 240000ms time budget'))],
       },
     });
 
@@ -310,6 +314,10 @@ describe("tb-solver: what the steps are told", () => {
     expect(verifyPrompt).toContain("what should NOT be there");
     // A false positive ends the run broken; a false negative costs one round there is time for.
     expect(verifyPrompt).toContain("WHEN IN DOUBT, SAY NOT DONE");
+    // 6 checks in 15 were killed at their box, which costs the box AND returns nothing: it is told to
+    // reserve time for the verdict, and that silence here reads as not passed.
+    expect(verifyPrompt).toContain("KEEP THE LAST THIRD OF YOUR BOX");
+    expect(verifyPrompt).toContain("NOT PASSED");
     // Survey's own doubts are forwarded, so scepticism lands where it is warranted.
     expect(verifyPrompt).toContain("whether the header row counts toward the total");
   });
@@ -387,11 +395,13 @@ describe("tb-solver: what the steps are told", () => {
     // 900s inside an 855s run can never fire, which is how v2 lost tasks the baseline solved.
     const steps = agentSteps();
 
-    // Checking is sized from measured cost with a floor, not a bare percentage: at 900s a pure 10% put
-    // the cap below the observed median and three verifies died at the limit.
+    // Checking is sized from measured cost, and its two bounds answer different evidence: the ceiling
+    // moved because four of six killed verifications piled up on it, while the floor stayed because
+    // every verification that ever reached a verdict did so in under 120s.
     expect(steps.get("verify")?.maxDurationMs).toBe(120_000);
-    // The audit is the same kind of work over the same machine, so it gets the same box.
-    expect(steps.get("audit")?.maxDurationMs).toBe(120_000);
+    // The audit gets a bigger box than the check it second-guesses, because it is handed no checklist:
+    // it pays for the reconnaissance `verify` is given for free, so it costs survey PLUS verify.
+    expect(steps.get("audit")?.maxDurationMs).toBe(240_000);
 
     // Survey's box depends on which recon pass it is: the first explores, a later one only writes down
     // what that pass already found, so it gets a much smaller box. A second full-sized box would put a
@@ -409,16 +419,16 @@ describe("tb-solver: what the steps are told", () => {
     expect(typeof box).toBe("function");
     const boxFor = (remainingSec: number): number => (box as (a: { ctx: unknown }) => number)({ ctx: { getStepResult: () => ({ remainingSec }) } });
     // Half of what is left, while a further round could still use the other half…
-    expect(boxFor(800)).toBe(400_000);
+    expect(boxFor(1000)).toBe(500_000);
     // …but once no further round can fit, this is the last one, so it takes the whole tail rather than
-    // reserving half of it for a round that will never happen (would be 150s under a plain share).
-    expect(boxFor(300)).toBe(120_000);
+    // reserving half of it for a round that will never happen (would be 250s under a plain share).
+    expect(boxFor(500)).toBe(320_000);
     expect(boxFor(10)).toBe(90_000); // floored: below this no useful edit lands
 
     // The box plus its verify must leave the clock intact, or the round cannot settle.
     const verifyMs = steps.get("verify")?.maxDurationMs;
     expect(typeof verifyMs).toBe("number");
-    expect(boxFor(800) + (verifyMs as number)).toBeLessThan(800_000);
+    expect(boxFor(1000) + (verifyMs as number)).toBeLessThan(1_000_000);
 
     // The workers may be cut short; that must cost the round, not the run.
     expect(steps.get("implement")?.optional).toBe(true);

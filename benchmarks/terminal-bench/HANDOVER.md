@@ -29,6 +29,38 @@ precision was **71% (32 of 45)** in `jobs/2026-07-26__00-06-23`, and that is the
 the `42f4633` engine change). All are reasoned from logs, none validated. That is exactly the pattern
 that produced the v5 regression and the 150s-floor error, so the first action is a run, not more edits.
 
+### Where the 48 losses actually are
+
+`tools/job-report.py` (added this session, and the durable version of what used to live in `/tmp`)
+breaks the last full run down. Every number below is from `jobs/2026-07-26__00-06-23`:
+
+| Bucket | Count | What it costs | Addressed by |
+| --- | --- | --- | --- |
+| Verifier said done, task was broken | **13** | median **1412s** of budget unspent (p25 641s, max 8700s) | `audit`, `acb271f` |
+| Killed by the harness deadline | **11** | all eleven died *inside `verify`*, after `implement` had already taken its box | round sizing, `ee98c0e` + `c1f3d43` |
+| Finished, used the clock, still wrong | **34** | median 128s left — the budget was spent | nothing here; this is the model |
+| No result at all | **3** | container OOM | environmental |
+
+The third row is the honest ceiling. Even converting *both* addressable buckets in full lands at
+`(41 + 24) / 89 = 0.73`, and converting half of each lands at 0.59 — which is why 60% is the number
+worth aiming at and 70% is not.
+
+**Time actually went 12% survey / 65% implement / 23% verify** (counting steps that were killed at
+their box, which the naive `step-completed` accounting silently drops — that bug made an earlier
+reading show 53% of wall time unaccounted for). Against the 20/70/10 target, **checking is the
+overspend**, and it is paid once per round: 209 verify spawns across 89 tasks.
+
+### Decisions taken this session
+
+1. **`audit` — a second opinion before the run may stop early** (`acb271f`). See the table above and
+   `FAILURE-MODES.md` F10. Gated on `verify` saying done *and* enough clock left to repair a
+   disagreement, so it costs nothing on rounds that were going to continue anyway.
+2. **Validated on an isolated copy of the tree** (`/tmp/pi-wf-audit`) rather than in place. The
+   harness rebuilds `benchmarks/terminal-bench/dist/tb-workflow.js` at every launch and every trial
+   loads it from that one path, so building a new bundle while a job is running silently swaps the
+   workflow under the trials that have not started yet. A second checkout with its own `dist/` is what
+   makes it safe to test a change and a baseline at the same time.
+
 ---
 
 ## 1. Settled facts — do not re-litigate these
