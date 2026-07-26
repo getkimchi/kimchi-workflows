@@ -120,10 +120,10 @@ describe("tb-solver: what the steps are told", () => {
       expect(run.agent(step).messages[0], step).toContain("finished with THIS step");
     }
     const surveyPrompt = run.agent("survey").messages[0] as string;
-    // The quoted deadline is SOFT — below the 150s the engine actually enforces, so ordinary overshoot
+    // The quoted deadline is SOFT — below the 225s the engine actually enforces, so ordinary overshoot
     // is absorbed instead of discarding the answer mid-sentence.
-    expect(surveyPrompt).toContain("about 113s");
-    expect(surveyPrompt).not.toContain("about 150s");
+    expect(surveyPrompt).toContain("about 169s");
+    expect(surveyPrompt).not.toContain("about 225s");
 
     const implementPrompt = run.agent("implement").messages[0] as string;
     expect(implementPrompt).toContain("[c1] cli prints ok");
@@ -278,7 +278,7 @@ describe("tb-solver: what the steps are told", () => {
     const surveyBox = steps.get("survey")?.maxDurationMs;
     expect(typeof surveyBox).toBe("function");
     const surveyFor = (pass: number): number => (surveyBox as (a: { ctx: unknown }) => number)({ ctx: { getStepResult: () => ({ pass, remainingSec: 3600 }) } });
-    expect(surveyFor(1)).toBe(150_000); // explore
+    expect(surveyFor(1)).toBe(225_000); // explore
     expect(surveyFor(2)).toBe(60_000); // land it
 
     // `implement` is a function of run state, so each round can be smaller than the last. A constant

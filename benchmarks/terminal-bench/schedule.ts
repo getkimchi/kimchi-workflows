@@ -9,18 +9,26 @@
 export const BUDGET_SEC = Math.max(60, Number(process.env.TB_AGENT_TIMEOUT_SEC ?? 900));
 
 /**
- * Recon and checking are sized from what they MEASURABLY COST, with a floor, not from a percentage.
+ * Recon is sized from what it MEASURABLY COSTS, and that turns out not to depend on the budget at all.
  *
- * A pure fraction has been wrong in both directions. At 25% of the budget survey was a quarter of the
- * run before any work started; cutting it to 8% put the cap (72s at a 900s budget) BELOW the observed
- * median, and four of six surveys then died at their limit — leaving those runs with no acceptance
- * criteria at all, which is the one thing everything downstream is built on. Observed survey durations
- * across runs: 16, 25, 38, 100, 108, 221, 231s. Observed verify: 12, 33, 38, 66, 97, 121, 180s.
+ * Measured over 88 surveys in one full run: median 66s, p90 153s, p95 211s, max 276s — and crucially,
+ * flat across task size. `build-pov-ray`, with a 11955s budget, surveyed in **59s**; `sam-cell-seg`
+ * (7155s) took 129s; every task in the 2000-5000s band finished under a 400s cap with none truncated
+ * and a maximum of 211s. Reconnaissance is bounded by how much looking around is USEFUL, not by how big
+ * the task is: a bigger build does not mean more `ls`.
  *
- * The floor is what makes these steps survive on short tasks, where a percentage is simply too small to
- * finish the job; the ceiling is what stops them eating a long one.
+ * So a percentage is the wrong instrument, and it has now been wrong in both directions — 25% made
+ * recon a quarter of the run before any work began, while 8% and then a 150s floor put the cap under
+ * the p90 and truncated roughly one survey in nine. A near-CONSTANT cap with a guard for tiny budgets
+ * is what the distribution actually supports.
+ *
+ * The cap is a ceiling, not a target: at a 66s median it almost never binds, so setting it generously
+ * costs nothing in the common case and only spends time on the tail — which is precisely the case where
+ * the alternative is losing the acceptance contract entirely.
+ *
+ * 225s covers 98.8% of surveys that completed; 150s covered 88.8%.
  */
-export const SURVEY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.15, 150), 240) * 1000);
+export const SURVEY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.25, 180), 240) * 1000);
 // Ceiling 180s, not 300s: verification is paid ONCE PER ROUND, so a generous per-round cap compounds —
 // at a 1800s budget a 216s cap over two rounds put 25% of the run into checking. Observed cost is
 // 12-180s with a median near 40s, and it does not grow with task size the way the work does.
