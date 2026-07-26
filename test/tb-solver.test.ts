@@ -11,9 +11,14 @@ import { createTestRun, raw, reply } from "../src/testing/index.ts";
 
 const plan = {
   approach: "fix the parser",
-  criteria: [{ id: "c1", statement: "cli prints ok", check: "python /app/main.py", expect: "prints ok, exits 0" }],
+  requirements: ["the cli must print ok"],
+  criteria: [{ id: "c1", statement: "cli prints ok", check: "python /app/main.py", expect: "prints ok, exits 0", source: "Make the cli print ok." }],
+  uncertainties: [],
 };
-const work = { changes: "patched /app/main.py", ranChecks: "ran it, prints ok", incomplete: "" };
+/** `implement` declares no output schema — it acts, so any text is a valid reply. */
+const work = "patched /app/main.py";
+/** A clean verdict: nothing left unchecked, nothing failing. */
+const allGood = { allPass: true, unchecked: [], failures: [] };
 
 /** A deadline far enough out that the round loop is never the thing that stops the run. */
 const roomyInput = () => ({ instruction: "Make the cli print ok.", deadlineIso: new Date(Date.now() + 3_600_000).toISOString() });
@@ -24,8 +29,8 @@ describe("tb-solver: the round loop", () => {
       input: roomyInput(),
       agents: {
         survey: [reply(plan)],
-        implement: [reply(work)],
-        verify: [reply({ allPass: true, failures: [] })],
+        implement: [raw(work)],
+        verify: [reply(allGood)],
       },
     });
 
@@ -40,8 +45,8 @@ describe("tb-solver: the round loop", () => {
       input: roomyInput(),
       agents: {
         survey: [reply(plan)],
-        implement: [reply(work), reply({ ...work, changes: "fixed the real cause" })],
-        verify: [reply({ allPass: false, failures: [{ id: "c1", actual: "exit 1: SyntaxError", diagnosis: "stray paren" }] }), reply({ allPass: true, failures: [] })],
+        implement: [raw(work), raw("fixed the real cause")],
+        verify: [reply({ allPass: false, unchecked: [], failures: [{ id: "c1", actual: "exit 1: SyntaxError", diagnosis: "stray paren" }] }), reply(allGood)],
       },
     });
 
@@ -58,7 +63,7 @@ describe("tb-solver: the round loop", () => {
   });
 
   it("keeps opening rounds while the clock allows, rather than stopping at a fixed count", async () => {
-    const failing = reply({ allPass: false, failures: [{ id: "c1", actual: "exit 1", diagnosis: "still broken" }] });
+    const failing = reply({ allPass: false, unchecked: [], failures: [{ id: "c1", actual: "exit 1", diagnosis: "still broken" }] });
     // A generous deadline and instant (test-double) rounds: the round count is now governed by time, so
     // more than the old fixed maximum of three must be possible. A fixed count ended real runs while
     // they still held most of their budget.
@@ -66,7 +71,7 @@ describe("tb-solver: the round loop", () => {
       input: roomyInput(),
       agents: {
         survey: [reply(plan)],
-        implement: Array.from({ length: 18 }, () => reply(work)),
+        implement: Array.from({ length: 18 }, () => raw(work)),
         verify: Array.from({ length: 18 }, () => failing),
       },
     });
@@ -86,8 +91,8 @@ describe("tb-solver: the round loop", () => {
       input: { instruction: "Make the cli print ok.", deadlineIso: new Date(Date.now() - 1000).toISOString() },
       agents: {
         survey: [reply(plan)],
-        implement: [reply(work)],
-        verify: [reply({ allPass: false, failures: [{ id: "c1", actual: "exit 1", diagnosis: "not done" }] })],
+        implement: [raw(work)],
+        verify: [reply({ allPass: false, unchecked: [], failures: [{ id: "c1", actual: "exit 1", diagnosis: "not done" }] })],
       },
     });
 
@@ -103,8 +108,8 @@ describe("tb-solver: what the steps are told", () => {
       input: roomyInput(),
       agents: {
         survey: [reply(plan)],
-        implement: [reply(work)],
-        verify: [reply({ allPass: true, failures: [] })],
+        implement: [raw(work)],
+        verify: [reply(allGood)],
       },
     });
     expect(run.status).toBe("completed");
@@ -112,10 +117,13 @@ describe("tb-solver: what the steps are told", () => {
     // Every step is told its OWN box, not just the run's remaining time: a step that thinks it owns the
     // whole budget overruns its cap and is killed mid-thought (measured: 4 in 10 surveys).
     for (const step of ["survey", "implement", "verify"]) {
-      expect(run.agent(step).messages[0], step).toContain("for THIS step");
+      expect(run.agent(step).messages[0], step).toContain("finished with THIS step");
     }
     const surveyPrompt = run.agent("survey").messages[0] as string;
-    expect(surveyPrompt).toContain("about 150s for THIS step"); // floored, not 15% of 900
+    // The quoted deadline is SOFT — below the 150s the engine actually enforces, so ordinary overshoot
+    // is absorbed instead of discarding the answer mid-sentence.
+    expect(surveyPrompt).toContain("about 113s");
+    expect(surveyPrompt).not.toContain("about 150s");
 
     const implementPrompt = run.agent("implement").messages[0] as string;
     expect(implementPrompt).toContain("[c1] cli prints ok");
@@ -137,7 +145,7 @@ describe("tb-solver: what the steps are told", () => {
         // An acting step: no schema, so whatever it says is accepted — including the `/auto` that used
         // to fail the step outright and throw away a round whose edits were already on disk.
         implement: [raw("/auto"), raw("done")],
-        verify: [reply({ allPass: false, failures: [{ id: "c1", actual: "exit 1", diagnosis: "not built" }] }), reply({ allPass: true, failures: [] })],
+        verify: [reply({ allPass: false, unchecked: [], failures: [{ id: "c1", actual: "exit 1", diagnosis: "not built" }] }), reply(allGood)],
       },
     });
 
@@ -150,6 +158,41 @@ describe("tb-solver: what the steps are told", () => {
     expect(second).toContain("continue it rather than starting over");
     // The verifier's findings still reach it — that is the part a session cannot supply.
     expect(second).toContain("exit 1");
+  });
+
+  it("tells the verifier to judge the task rather than the checklist, and to bias toward not-done", async () => {
+    const run = await createTestRun(tbSolver, {
+      input: roomyInput(),
+      agents: {
+        survey: [reply({ ...plan, uncertainties: ["whether the header row counts toward the total"] })],
+        implement: [raw(work)],
+        verify: [reply(allGood)],
+      },
+    });
+    const verifyPrompt = run.agent("verify").messages[0] as string;
+
+    // Precision was 71% over a full run, and the losses were unexamined corners rather than sloppy
+    // checking: criteria written before anyone attempted the work simply did not cover the requirement.
+    expect(verifyPrompt).toContain("whether THE TASK ABOVE is done");
+    expect(verifyPrompt).toContain("RE-READ THE TASK");
+    expect(verifyPrompt).toContain("what should NOT be there");
+    // A false positive ends the run broken; a false negative costs one round there is time for.
+    expect(verifyPrompt).toContain("WHEN IN DOUBT, SAY NOT DONE");
+    // Survey's own doubts are forwarded, so scepticism lands where it is warranted.
+    expect(verifyPrompt).toContain("whether the header row counts toward the total");
+  });
+
+  it("makes the surveyor enumerate requirements and mark what it inferred", async () => {
+    const run = await createTestRun(tbSolver, {
+      input: roomyInput(),
+      agents: { survey: [reply(plan)], implement: [raw(work)], verify: [reply(allGood)] },
+    });
+    const surveyPrompt = run.agent("survey").messages[0] as string;
+
+    expect(surveyPrompt).toContain("BEFORE writing any check");
+    // The failure this addresses: checks that confirm expected values while ignoring everything else.
+    expect(surveyPrompt).toContain("fail on the WRONG thing being present");
+    expect(surveyPrompt).toContain("INFERRED");
   });
 
   it("never asks the implementer for a structured reply, so it cannot fail at formatting", () => {
