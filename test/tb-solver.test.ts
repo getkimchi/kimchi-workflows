@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import tbSolver from "../benchmarks/terminal-bench/tb-solver.workflow.ts";
-import { createTestRun, reply } from "../src/testing/index.ts";
+import { createTestRun, raw, reply } from "../src/testing/index.ts";
 
 /**
  * Structural tests for the terminal-bench solver (benchmarks/terminal-bench/tb-solver.workflow.ts),
@@ -115,7 +115,7 @@ describe("tb-solver: what the steps are told", () => {
       expect(run.agent(step).messages[0], step).toContain("for THIS step");
     }
     const surveyPrompt = run.agent("survey").messages[0] as string;
-    expect(surveyPrompt).toContain(`about ${Math.round(900 * 0.08)}s for THIS step`);
+    expect(surveyPrompt).toContain("about 150s for THIS step"); // floored, not 15% of 900
 
     const implementPrompt = run.agent("implement").messages[0] as string;
     expect(implementPrompt).toContain("[c1] cli prints ok");
@@ -129,21 +129,44 @@ describe("tb-solver: what the steps are told", () => {
     expect(verifyPrompt).toContain("DO NOT FIX ANYTHING");
   });
 
-  it("carries the previous round's own work forward, so a time-boxed implementer resumes instead of restarting", async () => {
+  it("tells a second-round implementer it is continuing its own session, not starting over", async () => {
     const run = await createTestRun(tbSolver, {
       input: roomyInput(),
       agents: {
         survey: [reply(plan)],
-        implement: [reply({ changes: "wrote half of /app/ext.pyx", ranChecks: "none yet", incomplete: "the setup.py build still fails" }), reply(work)],
+        // An acting step: no schema, so whatever it says is accepted — including the `/auto` that used
+        // to fail the step outright and throw away a round whose edits were already on disk.
+        implement: [raw("/auto"), raw("done")],
         verify: [reply({ allPass: false, failures: [{ id: "c1", actual: "exit 1", diagnosis: "not built" }] }), reply({ allPass: true, failures: [] })],
       },
     });
 
     expect(run.status).toBe("completed");
+    const first = run.agent("implement").messages[0] as string;
     const second = run.agent("implement").messages[1] as string;
-    expect(second).toContain("wrote half of /app/ext.pyx"); // what it did…
-    expect(second).toContain("the setup.py build still fails"); // …and what it knew was left
-    expect(second).toContain("continuing it, not starting over");
+    // Round one has no past to refer to; round two is told the conversation it is reading IS its own.
+    expect(first).not.toContain("YOU HAVE BEEN HERE BEFORE");
+    expect(second).toContain("YOU HAVE BEEN HERE BEFORE");
+    expect(second).toContain("continue it rather than starting over");
+    // The verifier's findings still reach it — that is the part a session cannot supply.
+    expect(second).toContain("exit 1");
+  });
+
+  it("never asks the implementer for a structured reply, so it cannot fail at formatting", () => {
+    const steps = new Map<string, { outputSchema?: unknown }>();
+    const walk = (nodes: readonly unknown[]): void => {
+      for (const node of nodes as { kind: string; step?: { kind: string; name: string; outputSchema?: unknown }; body?: { nodes: unknown[] } }[]) {
+        if (node.kind === "step" && node.step?.kind === "agent") steps.set(node.step.name, node.step);
+        if (node.body) walk(node.body.nodes);
+      }
+    };
+    walk(tbSolver.nodes);
+
+    // `implement` changes the machine and `verify` reads the machine, so nothing consumes its words.
+    expect(steps.get("implement")?.outputSchema).toBeUndefined();
+    // The two steps whose output IS consumed keep their contracts.
+    expect(steps.get("survey")?.outputSchema).toBeDefined();
+    expect(steps.get("verify")?.outputSchema).toBeDefined();
   });
 
   it("gives implement a shrinking share of the time left, and lets the workers fail without ending it", () => {
@@ -159,9 +182,10 @@ describe("tb-solver: what the steps are told", () => {
     };
     walk(tbSolver.nodes);
 
-    // Recon and checking stay fixed and small; only the WORK scales with what is left.
-    expect(steps.get("survey")?.maxDurationMs).toBe(Math.round(900 * 0.08 * 1000));
-    expect(steps.get("verify")?.maxDurationMs).toBe(Math.round(900 * 0.1 * 1000));
+    // Recon and checking are sized from measured cost with a floor, not a bare percentage: at 900s a
+    // pure 8%/10% put both caps below their observed medians and four of six surveys died at the limit.
+    expect(steps.get("survey")?.maxDurationMs).toBe(150_000);
+    expect(steps.get("verify")?.maxDurationMs).toBe(120_000);
 
     // `implement` is a function of run state, so each round can be smaller than the last. A constant
     // could not do this: sized small it fragments the work (53 of 89 implementations were cut off
@@ -169,8 +193,11 @@ describe("tb-solver: what the steps are told", () => {
     const box = steps.get("implement")?.maxDurationMs;
     expect(typeof box).toBe("function");
     const boxFor = (remainingSec: number): number => (box as (a: { ctx: unknown }) => number)({ ctx: { getStepResult: () => ({ remainingSec }) } });
-    expect(boxFor(800)).toBe(400_000); // half of what is left…
-    expect(boxFor(300)).toBe(150_000); // …so a later round is necessarily smaller
+    // Half of what is left, while a further round could still use the other half…
+    expect(boxFor(800)).toBe(400_000);
+    // …but once no further round can fit, this is the last one, so it takes the whole tail rather than
+    // reserving half of it for a round that will never happen (would be 150s under a plain share).
+    expect(boxFor(300)).toBe(120_000);
     expect(boxFor(10)).toBe(90_000); // floored: below this no useful edit lands
 
     // The box plus its verify must leave the clock intact, or the round cannot settle.

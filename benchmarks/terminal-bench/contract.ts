@@ -24,11 +24,8 @@ export const planSchema = Type.Object({
   criteria: Type.Array(criterionSchema, { description: "Acceptance criteria, each independently checkable." }),
 });
 
-export const implementSchema = Type.Object({
-  changes: Type.String({ description: "What you actually changed, as paths and one-line reasons." }),
-  ranChecks: Type.String({ description: "Which acceptance checks you ran yourself, and their real output." }),
-  incomplete: Type.String({ description: "Anything you could NOT finish. Empty string if nothing." }),
-});
+// No schema for `implement`: it acts on the machine and `verify` reads the machine, so nothing consumes
+// its words. Requiring a shape there only added a way to fail at work that had already landed.
 
 export const verifySchema = Type.Object({
   allPass: Type.Boolean({ description: "True only if every criterion's check actually passed when you ran it." }),

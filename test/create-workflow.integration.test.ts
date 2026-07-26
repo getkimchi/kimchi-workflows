@@ -12,7 +12,7 @@ import { forEachNode } from "../src/flow/types.ts";
 import createWorkflowWorkflow from "../src/host/builtin/create.workflow.ts";
 import { loadWorkflowFile } from "../src/host/load-workflow.ts";
 import { workflowsDir } from "../src/host/workflow-catalog.ts";
-import { createTestRun, reply } from "../src/testing/index.ts";
+import { createTestRun, raw, reply } from "../src/testing/index.ts";
 import { createTestHost } from "./helpers.ts";
 import { createKimiAgentStarter, resolveKimiApiKey } from "./kimi-agent.ts";
 
@@ -119,7 +119,9 @@ async function smokeRun(workflow: WorkflowDefinition, model: string): Promise<Ru
   const agents: Record<string, ReturnType<typeof reply>[]> = {};
   forEachNode(workflow.nodes, (node) => {
     if (node.kind === "step" && node.step.kind === "agent") {
-      agents[node.step.name] = [reply(Value.Create(node.step.outputSchema))];
+      // A step with no declared schema acts rather than reports: any text is a valid reply.
+      const schema = node.step.outputSchema;
+      agents[node.step.name] = [schema ? reply(Value.Create(schema)) : raw("done")];
     }
   });
 

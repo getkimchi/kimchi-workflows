@@ -280,9 +280,11 @@ async function runAgentSession(
   // src/host/pi-agent.ts): there is no resumable conversation to steer, so its repair budget is forced
   // to 0 regardless of what the step itself declares — the loop below then runs exactly one turn before
   // it must succeed or fail outright.
-  const noSteering = step.background === true || isolated;
+  // A step with no output contract has nothing to be steered TOWARD: its reply is whatever it says, and
+  // cannot be wrong (spec §2.2 — it acts rather than reports).
+  const noSteering = step.background === true || isolated || step.outputSchema === undefined;
   const maxRepairs = noSteering ? 0 : Math.max(0, step.maxOutputRepairs ?? DEFAULT_MAX_OUTPUT_REPAIRS);
-  const steerSchema = step.asks ? buildQaSchema(step.outputSchema) : step.outputSchema;
+  const steerSchema = step.outputSchema && (step.asks ? buildQaSchema(step.outputSchema) : step.outputSchema);
   const history = entry.kind === "answer" ? entry.conversation : undefined;
   // `resumeKey` is the step's own name: every execution of THIS step continues the same conversation,
   // which is what makes a round-two worker pick up where round one was cut off (spec §2.2).
@@ -339,7 +341,7 @@ async function runAgentSession(
       }
       lastViolation = check.violation;
 
-      if (repair < maxRepairs) {
+      if (repair < maxRepairs && steerSchema) {
         await host.emit({ type: "agent-steer", runId: state.runId, path, attempt: repair + 1, violation: lastViolation, at: iso(host) });
         message = buildCorrectionMessage(steerSchema, lastViolation);
         continue;
@@ -360,6 +362,9 @@ type ReplyCheck = { ok: true; kind: "result"; value: unknown } | { ok: true; kin
 
 /** Validate the agent's reply against the step's output schema — or, for Q&A steps, the `{result}|{questions}` union. */
 function checkAgentReply(step: AgentStep, text: string): ReplyCheck {
+  // No declared contract: the step acts, and whatever it said IS the output. Nothing here can fail,
+  // which is the point — a step whose edits are already on disk must not be failed over formatting.
+  if (step.outputSchema === undefined) return { ok: true, kind: "result", value: text };
   if (step.asks) {
     const check = validateQaOutput(step.outputSchema, text);
     if (!check.ok) return check;
@@ -384,6 +389,8 @@ function checkAgentReply(step: AgentStep, text: string): ReplyCheck {
  */
 function freshPrompt(step: AgentStep, input: unknown, ctx: RunContext): string {
   const prompt = step.buildPrompt({ input, ctx });
+  // No contract to state: an acting step is asked to do the work, not to describe it in a fixed shape.
+  if (step.outputSchema === undefined) return prompt;
   return `${prompt}\n\n${step.asks ? buildAskingProtocol(step.outputSchema) : buildOutputProtocol(step.outputSchema)}`;
 }
 
