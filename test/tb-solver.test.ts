@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import tbSolver from "../benchmarks/terminal-bench/tb-solver.workflow.ts";
-import { createTestRun, raw, reply } from "../src/testing/index.ts";
+import { type AgentStep, forEachNode } from "../src/flow/index.ts";
+import { createTestRun, raw, reply, throws } from "../src/testing/index.ts";
 
 /**
  * Structural tests for the terminal-bench solver (benchmarks/terminal-bench/tb-solver.workflow.ts),
@@ -17,11 +18,31 @@ const plan = {
 };
 /** `implement` declares no output schema — it acts, so any text is a valid reply. */
 const work = "patched /app/main.py";
-/** A clean verdict: nothing left unchecked, nothing failing. */
+/** A clean verdict: nothing left unchecked, nothing failing. From `audit`, it means "no objection". */
 const allGood = { allPass: true, unchecked: [], failures: [] };
 
 /** A deadline far enough out that the round loop is never the thing that stops the run. */
 const roomyInput = () => ({ instruction: "Make the cli print ok.", deadlineIso: new Date(Date.now() + 3_600_000).toISOString() });
+
+/**
+ * A deadline above every other threshold in the schedule but BELOW the one that makes a second opinion
+ * worth buying (audit 120s + a floor implement round 90s + its verify 120s + the 60s margin = 390s at a
+ * 900s budget). Rounds still open here; only the audit is priced out.
+ */
+const noTimeToActInput = () => ({ instruction: "Make the cli print ok.", deadlineIso: new Date(Date.now() + 300_000).toISOString() });
+
+/**
+ * Every agent step in the committed tree, by name. This goes through the engine's own tree walk rather
+ * than a hand-rolled one because `audit` sits inside a branch ARM, which a "recurse into node.body" walk
+ * skips silently — turning the structural assertions below into no-ops that still pass.
+ */
+function agentSteps(): Map<string, AgentStep> {
+  const steps = new Map<string, AgentStep>();
+  forEachNode(tbSolver.nodes, (node) => {
+    if (node.kind === "step" && node.step.kind === "agent") steps.set(node.step.name, node.step);
+  });
+  return steps;
+}
 
 describe("tb-solver: the round loop", () => {
   it("stops after one round when the independent check passes everything", async () => {
@@ -31,6 +52,8 @@ describe("tb-solver: the round loop", () => {
         survey: [reply(plan)],
         implement: [raw(work)],
         verify: [reply(allGood)],
+        // The clock is roomy, so a passing check also buys a second opinion before the run may stop.
+        audit: [reply(allGood)],
       },
     });
 
@@ -47,6 +70,7 @@ describe("tb-solver: the round loop", () => {
         survey: [reply(plan)],
         implement: [raw(work), raw("fixed the real cause")],
         verify: [reply({ allPass: false, unchecked: [], failures: [{ id: "c1", actual: "exit 1: SyntaxError", diagnosis: "stray paren" }] }), reply(allGood)],
+        audit: [reply(allGood)], // only round two reaches it: round one already knows the work is unfinished
       },
     });
 
@@ -102,6 +126,111 @@ describe("tb-solver: the round loop", () => {
   });
 });
 
+/**
+ * The second opinion (spec of the failure it answers: FAILURE-MODES.md F10). A wrong "done" is the most
+ * expensive event in a run — 13 of 45 such verdicts were wrong and each stopped with a median of 1412s
+ * unspent — so a second, differently-argued check stands between the first verdict and the run halting.
+ * What has to be pinned here is when it is bought, when it is not, and which way silence reads.
+ */
+describe("tb-solver: the second opinion", () => {
+  it("does not buy one when the first check already says the work is unfinished", async () => {
+    const run = await createTestRun(tbSolver, {
+      input: roomyInput(),
+      agents: {
+        survey: [reply(plan)],
+        implement: [raw(work), raw("fixed it")],
+        verify: [reply({ allPass: false, unchecked: [], failures: [{ id: "c1", actual: "exit 1", diagnosis: "not built" }] }), reply(allGood)],
+        audit: [reply(allGood)],
+      },
+    });
+
+    expect(run.status).toBe("completed");
+    // Two rounds were checked, but only the one that said "done" was worth second-guessing: a verdict
+    // that already sends the loop round again has nothing to overturn, and the round costs a subagent.
+    expect(run.agent("verify").sessions).toBe(2);
+    expect(run.agent("audit").sessions).toBe(1);
+  });
+
+  it("does not buy one when there would be no time to act on a disagreement", async () => {
+    const run = await createTestRun(tbSolver, {
+      input: noTimeToActInput(),
+      agents: { survey: [reply(plan)], implement: [raw(work)], verify: [reply(allGood)], audit: [reply(allGood)] },
+    });
+
+    expect(run.status).toBe("completed");
+    // 300s left: a round still fits, but not the audit PLUS the repair round a dissent would demand
+    // plus its check plus the margin (390s). A second opinion nobody can act on is pure cost.
+    expect(run.agent("audit").sessions).toBe(0);
+    expect(run.output).toMatchObject({ allPass: true, rounds: 1 });
+  });
+
+  it("buys one when the check says done and there is still time to repair a disagreement", async () => {
+    const run = await createTestRun(tbSolver, {
+      input: roomyInput(),
+      agents: { survey: [reply(plan)], implement: [raw(work)], verify: [reply(allGood)], audit: [reply(allGood)] },
+    });
+
+    expect(run.status).toBe("completed");
+    expect(run.agent("audit").sessions).toBe(1);
+    expect(run.output).toMatchObject({ allPass: true, rounds: 1 }); // no objection, so the run stops
+
+    const auditPrompt = run.agent("audit").messages[0] as string;
+    // Decorrelated by METHOD, not merely by context window: it is never shown the checklist, because a
+    // second pass down the same criteria repeats the first pass's omissions rather than finding them.
+    expect(auditPrompt).not.toContain("[c1] cli prints ok");
+    expect(auditPrompt).not.toContain("python /app/main.py");
+    expect(auditPrompt).toContain("DECLARED THE TASK COMPLETE");
+    expect(auditPrompt).toContain("Make the cli print ok.");
+    // Its bias is the opposite of the verifier's: overturning costs a repair round that can break work
+    // which currently passes, so a doubt is not a dissent.
+    expect(auditPrompt).toContain("EVIDENCE, NOT SUSPICION");
+    expect(auditPrompt).toContain("DO NOT FIX ANYTHING");
+  });
+
+  it("keeps the loop going on a dissent, and carries both checks' findings into the next round", async () => {
+    const run = await createTestRun(tbSolver, {
+      input: roomyInput(),
+      agents: {
+        survey: [reply(plan)],
+        implement: [raw(work), raw("removed the stray row")],
+        // A verdict of done that still lists a failing check is a shape a model really produces; the
+        // implementer must be told about both lists, whichever of them reopened the round.
+        verify: [reply({ allPass: true, unchecked: [], failures: [{ id: "c1", actual: "exit 0, 16 rows", diagnosis: "row count unconfirmed" }] }), reply(allGood)],
+        audit: [reply({ allPass: false, unchecked: [], failures: [{ id: "a1", actual: "$ ./run | wc -l -> 17", diagnosis: "a debug line is still printed" }] }), reply(allGood)],
+      },
+    });
+
+    expect(run.status).toBe("completed");
+    // The first round PASSED its check and was reopened anyway — that is the whole point of the step.
+    expect(run.output).toMatchObject({ allPass: true, rounds: 2 });
+    expect(run.agent("implement").sessions).toBe(2);
+
+    const second = run.agent("implement").messages[1] as string;
+    expect(second).toContain("a debug line is still printed"); // the dissent itself
+    expect(second).toContain("$ ./run | wc -l -> 17"); // with the output that demonstrates it
+    expect(second).toContain("row count unconfirmed"); // and what the first check saw, merged in
+  });
+
+  it("reads an audit that never returned as no objection, so a timeout cannot spin the loop", async () => {
+    const run = await createTestRun(tbSolver, {
+      input: roomyInput(),
+      agents: {
+        survey: [reply(plan)],
+        implement: [raw(work)],
+        verify: [reply(allGood)],
+        // The step is `optional`, so this is what a blown box looks like from `checkpoint`: nothing.
+        audit: [throws(new Error('step "audit" exceeded its 120000ms time budget'))],
+      },
+    });
+
+    expect(run.status).toBe("completed");
+    // Silence is not a dissent. The first check said done, and a second opinion that never arrived is no
+    // evidence against it — reading it the other way would reopen the round on every timeout.
+    expect(run.output).toMatchObject({ allPass: true, rounds: 1 });
+    expect(run.agent("implement").sessions).toBe(1);
+  });
+});
+
 describe("tb-solver: what the steps are told", () => {
   it("gives the implementer the criteria and the grading contract, and the verifier no story to inherit", async () => {
     const run = await createTestRun(tbSolver, {
@@ -110,13 +239,14 @@ describe("tb-solver: what the steps are told", () => {
         survey: [reply(plan)],
         implement: [raw(work)],
         verify: [reply(allGood)],
+        audit: [reply(allGood)],
       },
     });
     expect(run.status).toBe("completed");
 
     // Every step is told its OWN box, not just the run's remaining time: a step that thinks it owns the
     // whole budget overruns its cap and is killed mid-thought (measured: 4 in 10 surveys).
-    for (const step of ["survey", "implement", "verify"]) {
+    for (const step of ["survey", "implement", "verify", "audit"]) {
       expect(run.agent(step).messages[0], step).toContain("finished with THIS step");
     }
     const surveyPrompt = run.agent("survey").messages[0] as string;
@@ -146,6 +276,7 @@ describe("tb-solver: what the steps are told", () => {
         // to fail the step outright and throw away a round whose edits were already on disk.
         implement: [raw("/auto"), raw("done")],
         verify: [reply({ allPass: false, unchecked: [], failures: [{ id: "c1", actual: "exit 1", diagnosis: "not built" }] }), reply(allGood)],
+        audit: [reply(allGood)],
       },
     });
 
@@ -167,6 +298,7 @@ describe("tb-solver: what the steps are told", () => {
         survey: [reply({ ...plan, uncertainties: ["whether the header row counts toward the total"] })],
         implement: [raw(work)],
         verify: [reply(allGood)],
+        audit: [reply(allGood)],
       },
     });
     const verifyPrompt = run.agent("verify").messages[0] as string;
@@ -191,6 +323,7 @@ describe("tb-solver: what the steps are told", () => {
         survey: [reply({ approach: "", requirements: [], criteria: [], uncertainties: [] }), reply(plan)],
         implement: [raw(work)],
         verify: [reply(allGood)],
+        audit: [reply(allGood)],
       },
     });
 
@@ -211,7 +344,7 @@ describe("tb-solver: what the steps are told", () => {
   it("does not re-run recon when the first pass produced criteria", async () => {
     const run = await createTestRun(tbSolver, {
       input: roomyInput(),
-      agents: { survey: [reply(plan)], implement: [raw(work)], verify: [reply(allGood)] },
+      agents: { survey: [reply(plan)], implement: [raw(work)], verify: [reply(allGood)], audit: [reply(allGood)] },
     });
 
     expect(run.status).toBe("completed");
@@ -221,7 +354,7 @@ describe("tb-solver: what the steps are told", () => {
   it("makes the surveyor enumerate requirements and mark what it inferred", async () => {
     const run = await createTestRun(tbSolver, {
       input: roomyInput(),
-      agents: { survey: [reply(plan)], implement: [raw(work)], verify: [reply(allGood)] },
+      agents: { survey: [reply(plan)], implement: [raw(work)], verify: [reply(allGood)], audit: [reply(allGood)] },
     });
     const surveyPrompt = run.agent("survey").messages[0] as string;
 
@@ -232,45 +365,33 @@ describe("tb-solver: what the steps are told", () => {
   });
 
   it("never asks the implementer for a structured reply, so it cannot fail at formatting", () => {
-    const steps = new Map<string, { outputSchema?: unknown }>();
-    const walk = (nodes: readonly unknown[]): void => {
-      for (const node of nodes as { kind: string; step?: { kind: string; name: string; outputSchema?: unknown }; body?: { nodes: unknown[] } }[]) {
-        if (node.kind === "step" && node.step?.kind === "agent") steps.set(node.step.name, node.step);
-        if (node.body) walk(node.body.nodes);
-      }
-    };
-    walk(tbSolver.nodes);
+    const steps = agentSteps();
 
     // `implement` changes the machine and `verify` reads the machine, so nothing consumes its words.
     expect(steps.get("implement")?.outputSchema).toBeUndefined();
     // Both looping workers resume rather than restart — for `survey` that is what makes a cheap second
     // pass possible instead of redoing the exploration that blew the first box.
-    expect((steps.get("survey") as { resumable?: boolean })?.resumable).toBe(true);
-    expect((steps.get("implement") as { resumable?: boolean })?.resumable).toBe(true);
-    // The two steps whose output IS consumed keep their contracts.
+    expect(steps.get("survey")?.resumable).toBe(true);
+    expect(steps.get("implement")?.resumable).toBe(true);
+    // `audit` must NOT: its whole value is a reader who has never seen this machine or its own earlier
+    // opinion of it, and a resumed session would inherit exactly the beliefs it exists to break.
+    expect(steps.get("audit")?.resumable).not.toBe(true);
+    // The three steps whose output IS consumed keep their contracts.
     expect(steps.get("survey")?.outputSchema).toBeDefined();
     expect(steps.get("verify")?.outputSchema).toBeDefined();
+    expect(steps.get("audit")?.outputSchema).toBeDefined();
   });
 
   it("gives implement a shrinking share of the time left, and lets the workers fail without ending it", () => {
     // A cap in absolute ms is meaningless against a clock it does not know: an implement step capped at
     // 900s inside an 855s run can never fire, which is how v2 lost tasks the baseline solved.
-    interface Boxed {
-      maxDurationMs?: number | ((args: { ctx: unknown }) => number);
-      optional?: boolean;
-    }
-    const steps = new Map<string, Boxed>();
-    const walk = (nodes: readonly unknown[]): void => {
-      for (const node of nodes as { kind: string; step?: { kind: string; name: string } & Boxed; body?: { nodes: unknown[] } }[]) {
-        if (node.kind === "step" && node.step?.kind === "agent") steps.set(node.step.name, node.step);
-        if (node.body) walk(node.body.nodes);
-      }
-    };
-    walk(tbSolver.nodes);
+    const steps = agentSteps();
 
     // Checking is sized from measured cost with a floor, not a bare percentage: at 900s a pure 10% put
     // the cap below the observed median and three verifies died at the limit.
     expect(steps.get("verify")?.maxDurationMs).toBe(120_000);
+    // The audit is the same kind of work over the same machine, so it gets the same box.
+    expect(steps.get("audit")?.maxDurationMs).toBe(120_000);
 
     // Survey's box depends on which recon pass it is: the first explores, a later one only writes down
     // what that pass already found, so it gets a much smaller box. A second full-sized box would put a
@@ -305,18 +426,14 @@ describe("tb-solver: what the steps are told", () => {
     // Survey is optional too: a slow recon that blew its cap used to crash the run with nothing
     // attempted, so the workers fall back to the task statement instead.
     expect(steps.get("survey")?.optional).toBe(true);
+    // The audit above all: a verdict that never arrived is silence, and silence must not be able to
+    // reopen a round the first check already passed, or a timeout spins the loop to the deadline.
+    expect(steps.get("audit")?.optional).toBe(true);
   });
 
   it("runs every step as an isolated subagent, so no two share a conversation", () => {
-    const names = ["survey", "implement", "verify"];
-    const agents = new Map<string, { background?: boolean }>();
-    const walk = (nodes: readonly unknown[]): void => {
-      for (const node of nodes as { kind: string; step?: { kind: string; name: string; background?: boolean }; body?: { nodes: unknown[] } }[]) {
-        if (node.kind === "step" && node.step?.kind === "agent") agents.set(node.step.name, node.step);
-        if (node.body) walk(node.body.nodes);
-      }
-    };
-    walk(tbSolver.nodes);
+    const names = ["survey", "implement", "verify", "audit"];
+    const agents = agentSteps();
 
     expect([...agents.keys()].sort()).toEqual([...names].sort());
     for (const name of names) expect(agents.get(name)?.background).toBe(true);

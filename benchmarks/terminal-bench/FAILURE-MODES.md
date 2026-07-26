@@ -159,3 +159,36 @@ changes needed". The run passed, but the division of labour that makes `verify` 
 important". Raising the stakes invites test-hunting and hardcoded outputs, and since the tests are not in
 the container during the agent phase, those attempts burn the clock and fail anyway. `GRADING_CONTRACT`
 states what is graded without naming the game.
+
+---
+
+## F10. A wrong "done" stops the run with the time that would have fixed it still on the clock
+
+**Measured** over the 89-task run: `verify`'s precision on a "done" verdict was **32/45 = 71%**, and the
+13 wrong ones halted their run with a **median of 1412s of budget unspent** (p25 641s, max 8700s). That
+makes a false positive the single largest waste in the system — not merely a wrong verdict, but a wrong
+verdict that *stops the machine*. The mirror-image error is nearly free, as F3 already recorded: 9 of 42
+"not done" verdicts were also wrong and **every one of them still scored 1.0**, because the run kept
+working.
+
+**Cause:** a checklist-driven pass confirms what it was told to look for. F1 and F3 sharpened the
+verifier's wording and its verdict bias, and 71% is what that leaves — the residue is not sloppy
+checking but **unexamined corners**: the criteria were written before anyone attempted the work, so the
+requirement nobody wrote down is the requirement nobody runs.
+
+**Done:** an `audit` step, added to the solve round between `verify` and `checkpoint` behind a
+`.branch()` that fires only when (a) `verify` said done and (b) the clock still covers the audit plus a
+floor repair round plus its verification plus the settle margin (`auditIsAffordable`, ~390s at a 900s
+budget). `checkpoint` passes the round only when both checks are content; a dissent's failures are merged
+with `verify`'s into the next `implement` prompt. The audit is decorrelated **by method**: a fresh
+session, never given the checklist, working the task end to end as a user of the result would, told to
+overturn only on a concrete observed failure it can paste the output of.
+
+**Rejected: running `verify` twice.** Two runs of the same prompt make the same omissions — the losses
+were corners nobody looked at, not checks done badly — so a second pass down the same criteria would have
+confirmed all 13.
+
+**Rejected: auditing on every "done" regardless of the clock.** Threshold analysis over those 45
+verdicts: gating at ">300s left" fires on 27 of the 32 correct verdicts (the cost) and reaches all 13 of
+the wrong ones (the opportunity). Below the gate a dissent cannot be repaired before the deadline, and a
+second opinion nobody can act on is pure cost — it can only confirm, or deliver news too late to use.

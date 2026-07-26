@@ -1,5 +1,5 @@
 /**
- * A terminal-bench solver, as a workflow (spec §3): (survey)* → (implement → verify)* .
+ * A terminal-bench solver, as a workflow (spec §3): (survey)* → (implement → verify → audit?)* .
  *
  * The bet this workflow makes is narrow and, I think, the only one worth making at the workflow level:
  * a benchmark task is graded on the machine's FINAL STATE by tests the agent never sees, and the
@@ -13,6 +13,11 @@
  *    criteria and the task — never the implementer's story about what it did. It re-derives the truth
  *    by running the checks. An implementer reviewing its own transcript agrees with itself; one that
  *    has to produce failing command output does not.
+ *  - `audit` is a SECOND opinion on a "done" verdict, and the only step never shown the criteria — it is
+ *    decorrelated by METHOD, not merely by context window. It is bought only when `verify` says done AND
+ *    a disagreement could still be repaired, because a wrong "done" is the most expensive thing that
+ *    happens here: 13 of 45 such verdicts were wrong and stopped their run with a median of 1412s
+ *    unspent, while a wrong "not done" costs one round the schedule already has.
  *  - the loop is what turns a failed check back into work, bounded by `maxIterations` and by the wall
  *    clock (`checkpoint` below), so the run always leaves time to finish rather than being killed
  *    mid-edit by the harness timeout.
@@ -33,12 +38,54 @@
  * size, is the lever. Hence the shape above: `orient` folded into `survey` (the planner reads the
  * machine itself rather than a summary of it), and `sweep` folded into `verify` (which re-checks from a
  * clean shell anyway) and into `implement` (which cleans up after itself). Five subagents became three.
+ *
+ * `audit` is the one spawn bought BACK, and only where that arithmetic reverses: on a round that is
+ * about to stop, an unspent budget is worth nothing at all, so the step spends time the run was
+ * otherwise going to throw away. Every other round skips it.
  */
 import { type Static, Type } from "typebox";
-import { createAgentStep, createStep, createWorkflow } from "../../src/flow/index.ts";
+import { createAgentStep, createStep, createWorkflow, type RunContext } from "../../src/flow/index.ts";
 import { planSchema, taskInputSchema, verifySchema } from "./contract.ts";
-import { implementPrompt, surveyLandingPrompt, surveyPrompt, verifyPrompt } from "./prompts.ts";
-import { IMPLEMENT_FLOOR_MS, implementBoxMs, RECON_MAX_PASSES, ROUND_MARGIN_SEC, ROUND_SAFETY_VALVE, SURVEY_CAP_MS, SURVEY_LANDING_MS, VERIFY_CAP_MS } from "./schedule.ts";
+import { auditPrompt, implementPrompt, surveyLandingPrompt, surveyPrompt, verifyPrompt } from "./prompts.ts";
+import {
+  AUDIT_CAP_MS,
+  auditIsAffordable,
+  IMPLEMENT_FLOOR_MS,
+  implementBoxMs,
+  RECON_MAX_PASSES,
+  ROUND_MARGIN_SEC,
+  ROUND_SAFETY_VALVE,
+  SURVEY_CAP_MS,
+  SURVEY_LANDING_MS,
+  VERIFY_CAP_MS,
+} from "./schedule.ts";
+
+type Verdict = Static<typeof verifySchema>;
+
+/**
+ * The audit's arm is a one-step sub-workflow, so the branch's output is `{ [AUDIT_ARM]: verdict }` — or
+ * `{}` on a round that bought no second opinion. Both readers below go through the BRANCH's output
+ * rather than the step's own, which is what makes "did the audit run THIS round" answerable: the branch
+ * key is rewritten on every round, while the step's key would keep the last dissent it ever produced and
+ * re-close a round that has since been repaired.
+ */
+const AUDIT_ARM = "audit-round";
+
+/** This round's second opinion, if one was bought and it survived its box. `undefined` means silence. */
+const auditVerdict = (ctx: RunContext): Verdict | undefined => ctx.getStepResult<Record<string, Verdict | undefined>>("second-opinion")?.[AUDIT_ARM];
+
+/**
+ * Everything the previous round's two checks observed, as one list. A dissent that never reaches the
+ * implementer buys nothing but a lost round, and the two checks look at different things by design, so
+ * both lists have to arrive. Deduped by `id` because nothing stops them naming the same criterion.
+ */
+function mergedFailures(...verdicts: (Verdict | undefined)[]): Verdict["failures"] {
+  const byId = new Map<string, Verdict["failures"][number]>();
+  for (const verdict of verdicts) {
+    for (const failure of verdict?.failures ?? []) if (!byId.has(failure.id)) byId.set(failure.id, failure);
+  }
+  return [...byId.values()];
+}
 
 /** `provider/model` for every step; the adapter pins this so subagents match the parent (spec §9.5). */
 const MODEL = process.env.TB_MODEL ?? "kimchi-dev/kimi-k2.7";
@@ -172,12 +219,13 @@ const implement = createAgentStep({
     const task = ctx.getInitData<{ instruction: string }>();
     const design = ctx.getStepResult<Static<typeof planSchema>>("recon/survey");
     const round = ctx.getStepResult<{ remainingSec: number; round: number }>("budget");
-    const lastVerify = ctx.getStepResult<Static<typeof verifySchema>>("verify");
     const remainingSec = round?.remainingSec ?? 0;
     return implementPrompt({
       instruction: task?.instruction ?? "(missing)",
       design,
-      failures: lastVerify?.failures ?? [],
+      // Both of the previous round's checks, not just the first: when the audit is the reason this round
+      // exists, its findings are the ONLY description of what is wrong — `verify` said the task was done.
+      failures: mergedFailures(ctx.getStepResult<Verdict>("verify"), auditVerdict(ctx)),
       continuing: (round?.round ?? 1) > 1,
       stepSec: implementBoxMs(remainingSec) / 1000,
       remainingSec,
@@ -212,6 +260,55 @@ const verify = createAgentStep({
   },
 });
 
+/**
+ * The second opinion, run only behind the branch below.
+ *
+ * Everything about it is chosen to make it disagree for different reasons than `verify` does: a fresh
+ * session, its own prompt, and no acceptance criteria at all (see `auditPrompt`). Two runs of the same
+ * prompt make the same omissions, and the 13 wrong "done" verdicts were unexamined corners rather than
+ * sloppy checking — so a cheaper "verify twice" would have confirmed all 13 of them.
+ */
+const audit = createAgentStep({
+  name: "audit",
+  description: "Second, independent opinion on a verdict of done",
+  output: verifySchema,
+  background: true,
+  maxDurationMs: AUDIT_CAP_MS,
+  // A missing verdict must read as NO OBJECTION rather than as a dissent: the first check already said
+  // done, and an audit that died at its box has said nothing at all. Reading silence as disagreement
+  // would let a timeout reopen the round every time and spin the loop to the deadline.
+  optional: true,
+  retry: { maxRetry: 0 },
+  // Deliberately NOT `resumable`, unlike `implement`: this step's entire value is a reader who has never
+  // seen this machine, this task, or its own earlier opinion of them. A resumed session would inherit
+  // exactly the beliefs the step exists to break.
+  prompt: ({ ctx }) => {
+    const task = ctx.getInitData<{ instruction: string }>();
+    const round = ctx.getStepResult<{ remainingSec: number }>("budget");
+    return auditPrompt({ instruction: task?.instruction ?? "(missing)", stepSec: AUDIT_CAP_MS / 1000, remainingSec: round?.remainingSec ?? 0 });
+  },
+});
+
+const auditRound = createWorkflow({ name: AUDIT_ARM }).then(audit).commit();
+
+/**
+ * Whether to buy a second opinion at all. Both halves have to hold.
+ *
+ * `verify` saying done is the first: there is nothing to second-guess about a verdict that already sends
+ * the loop round again, and the mistake in that direction is nearly free (9 of 42 "not done" verdicts
+ * were wrong, and all nine still scored 1.0 because the run simply kept working).
+ *
+ * Enough clock to ACT on a disagreement is the second, and it is not the same question as whether the
+ * audit itself fits — see `auditIsAffordable`. The reading is taken HERE rather than reused from
+ * `budget`, because `implement` has just spent most of the round: the top-of-round number would happily
+ * authorise an audit whose answer the run can no longer do anything with.
+ */
+const wantsSecondOpinion = (ctx: RunContext): boolean => {
+  if (ctx.getStepResult<Verdict>("verify")?.allPass !== true) return false;
+  const task = ctx.getInitData<{ deadlineIso: string }>();
+  return auditIsAffordable((new Date(task?.deadlineIso ?? Date.now()).getTime() - Date.now()) / 1000);
+};
+
 /** Fresh clock reading AFTER the round, so the loop decides on current time rather than a stale one. */
 const checkpoint = createStep({
   name: "checkpoint",
@@ -226,7 +323,11 @@ const checkpoint = createStep({
     const task = ctx.getInitData<{ deadlineIso: string }>();
     // `undefined` when `verify` itself failed or was time-boxed out (it is `optional`): the safe
     // reading is "not passed", so the loop spends another round rather than declaring victory blind.
-    const result = ctx.getStepResult<Static<typeof verifySchema>>("verify");
+    const result = ctx.getStepResult<Verdict>("verify");
+    // `undefined` on any round that bought no second opinion, and on one whose audit died at its box.
+    // The safe reading here is the OPPOSITE of `verify`'s — silence is no objection, because the first
+    // check has already said done and an audit that never spoke is not evidence against it.
+    const audited = auditVerdict(ctx);
     const opened = ctx.getStepResult<{ round: number; remainingSec: number }>("budget");
     const round = opened?.round ?? 0;
     const remainingSec = (new Date(task?.deadlineIso ?? Date.now()).getTime() - Date.now()) / 1000;
@@ -242,9 +343,19 @@ const checkpoint = createStep({
     // settling. It cannot admit a round it knows will overrun.
     const spendableSec = remainingSec - VERIFY_CAP_MS / 1000 - ROUND_MARGIN_SEC;
     const mustStop = spendableSec < IMPLEMENT_FLOOR_MS / 1000 || round >= ROUND_SAFETY_VALVE;
-    logger.info("round finished", { round, allPass: result?.allPass ?? false, remainingSec: Math.round(remainingSec), spendableSec: Math.round(spendableSec), mustStop });
+    logger.info("round finished", {
+      round,
+      allPass: result?.allPass ?? false,
+      audited: audited?.allPass ?? null,
+      remainingSec: Math.round(remainingSec),
+      spendableSec: Math.round(spendableSec),
+      mustStop,
+    });
     return {
-      allPass: result?.allPass === true,
+      // A round has passed only when both checks are content: the first must say done, and the second
+      // must not have overturned it. This is the whole point of the audit — the run may stop early, but
+      // only when nobody with evidence objects.
+      allPass: result?.allPass === true && audited?.allPass !== false,
       mustStop,
       remainingSec,
       round,
@@ -254,7 +365,16 @@ const checkpoint = createStep({
 
 const reconRound = createWorkflow({ name: "recon-round" }).then(reconClock).then(survey).then(reconCheck).commit();
 
-const solveRound = createWorkflow({ name: "solve-round" }).then(budget).then(implement).then(verify).then(checkpoint).commit();
+const solveRound = createWorkflow({ name: "solve-round" })
+  .then(budget)
+  .then(implement)
+  .then(verify)
+  // The only place the run is allowed to stop early, so it is the only place worth spending a whole
+  // extra subagent on. The arm is skipped on most rounds — a failing check already sends the loop round
+  // again — which is what keeps a step this expensive affordable.
+  .branch([[wantsSecondOpinion, auditRound]], { name: "second-opinion" })
+  .then(checkpoint)
+  .commit();
 
 const report = createStep({
   name: "report",
