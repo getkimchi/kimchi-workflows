@@ -4,3 +4,4 @@ dist/
 .kimchi/
 *.log
 plans/
+__pycache__/
