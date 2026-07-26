@@ -108,6 +108,29 @@ skips correctly. It is also what caught the audit dying at its box every time.
 - **`survey` now costs a median 130s, up from 66s**, and 23-24% of wall — the richer prompt is not
   free. It is at the 20% target rather than over it, and it feeds two steps, so it stays for now.
 
+### Rejected this session: capping the recon loop's total spend
+
+Four tasks in the live run reached `solve` having spent **36-44% of a short budget on reconnaissance**
+— `merge-diff-arc-agi-task` 345s of 855s, `overfull-hbox` 308s of 705s — because all three recon
+passes timed out and the contract came back empty anyway. Three of the four scored 0. It looked like a
+clear net-negative, and the obvious fix was a budget-share guard in `recon-check`.
+
+Then the base rate, over 71 trials with recon logs across all three of today's jobs:
+
+| passes | ended with criteria | trials |
+| --- | --- | --- |
+| 1 | yes | 50 |
+| 2 | yes | 10 |
+| 3 | yes | 5 |
+| 3 | **no** | 6 |
+
+**The loop rescues 15 of the 21 trials that need it — 71%.** The 40%-of-budget cases are the six that
+fail, not the shape of the thing. And a cap tight enough to stop them (~33% of budget) would also have
+cut `qemu-alpine-ssh`, which was rescued on pass three at 306s of 855s: it buys back 60s on six trials
+by giving up five rescues. **No change made.** The lesson is the one that keeps recurring here — the
+worst cases were visible and the base rate was not, and reading only the worst cases had the sign of
+the effect backwards.
+
 ---
 
 ## 1. Settled facts — do not re-litigate these
