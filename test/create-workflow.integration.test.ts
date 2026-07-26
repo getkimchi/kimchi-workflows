@@ -22,7 +22,7 @@ import { createKimiAgentStarter, resolveKimiApiKey } from "./kimi-agent.ts";
  *
  * This is the one test where the generated file must be genuinely loadable, so it writes into THIS
  * repo's `.pi/workflows/` — the same place the command writes in a real project — proving that the
- * `pi-workflows/src/flow` import the generator is told to emit actually resolves.
+ * `@pmateusz/pi-workflows` import the generator is told to emit actually resolves.
  */
 const apiKey = resolveKimiApiKey();
 

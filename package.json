@@ -1,23 +1,41 @@
 {
-  "name": "pi-workflows",
+  "//name": "Scoped because unscoped `pi-workflows` is taken on npm by an unrelated package. The name is not cosmetic: it is the specifier every authored workflow imports, so it also appears in the loader's virtual-module map and in what /workflow create generates.",
+  "name": "@pmateusz/pi-workflows",
   "version": "0.1.0",
-  "private": true,
-  "description": "Host-agnostic workflow engine for the PI coding harness (Phase 1: linear function-step tracer bullet).",
+  "description": "Define arbitrary workflows in TypeScript and run them inside the PI coding harness.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "workflow",
+    "agent",
+    "coding-agent"
+  ],
+  "license": "MIT",
+  "author": "pmateusz",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pmateusz/pi-workflows.git"
+  },
+  "homepage": "https://github.com/pmateusz/pi-workflows#readme",
+  "bugs": "https://github.com/pmateusz/pi-workflows/issues",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
-  "//exports": "The public surface. `pi-workflows` IS the authoring API — that is what a workflow file imports, and the name a user should have to remember. `./flow` names the same module for symmetry with the other layers; the `./src/*` spellings are the original ones, kept so workflows already written against them keep loading. Also what makes SELF-reference work: without an exports map, a workflow file inside this repo could not import the package by name at all.",
+  "//files": "`src` only, and deliberately as TypeScript: every `exports` target is a `.ts` file because PI loads extensions and workflows through jiti, so there is no build output to ship and the source doubles as the types. Tests, benchmarks and the spec stay out of the tarball.",
+  "files": [
+    "src"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "//exports": "The public surface, and the only names anything outside this repo may import. The package root IS the authoring API — that is what a workflow file imports; `./flow` names the same module for symmetry with the other layers. Directory paths (`./src/...`) are deliberately NOT exported: the layout is ours to change. Also what makes SELF-reference work: without an exports map, a workflow file inside this repo could not import the package by name at all.",
   "exports": {
     ".": "./src/flow/index.ts",
     "./flow": "./src/flow/index.ts",
     "./engine": "./src/engine/index.ts",
     "./host": "./src/host/index.ts",
-    "./testing": "./src/testing/index.ts",
-    "./src/flow": "./src/flow/index.ts",
-    "./src/engine": "./src/engine/index.ts",
-    "./src/host": "./src/host/index.ts",
-    "./src/testing": "./src/testing/index.ts"
+    "./testing": "./src/testing/index.ts"
   },
   "//pi": "The PI package manifest (docs/packages.md), which is what makes `pi install <path|git:…>` load the /workflow command. Without it PI records the package in settings and loads NOTHING from it — a package.json with no `pi` key and no conventional `extensions/` directory contributes no resources.",
   "pi": {

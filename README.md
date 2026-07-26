@@ -106,7 +106,7 @@ pi install -l /path/to/pi-workflows    # this project only (.pi/settings.json), 
 A local path is recorded, not copied, so the checkout keeps its own `node_modules` — which it needs, because PI does not supply `jiti`. The equivalent one-off is `pi -e /path/to/pi-workflows/src/host/extension.ts`, and dropping a re-export in `~/.pi/agent/extensions/` or `.pi/extensions/` works too (that location is also what makes `/reload` pick up edits). Registering it by hand stays available for a custom host:
 
 ```ts
-import { piWorkflowsExtension } from "pi-workflows/host";
+import { piWorkflowsExtension } from "@pmateusz/pi-workflows/host";
 piWorkflowsExtension(pi);
 ```
 
@@ -150,9 +150,9 @@ pnpm add file:/path/to/pi-workflows typebox   # types and runtime both resolve; 
   "moduleResolution": "Bundler",
   "allowImportingTsExtensions": true,
   "paths": {
-    "pi-workflows": ["/path/to/pi-workflows/src/flow/index.ts"],
-    "pi-workflows/flow": ["/path/to/pi-workflows/src/flow/index.ts"],
-    "pi-workflows/engine": ["/path/to/pi-workflows/src/engine/index.ts"],
+    "@pmateusz/pi-workflows": ["/path/to/pi-workflows/src/flow/index.ts"],
+    "@pmateusz/pi-workflows/flow": ["/path/to/pi-workflows/src/flow/index.ts"],
+    "@pmateusz/pi-workflows/engine": ["/path/to/pi-workflows/src/engine/index.ts"],
     "typebox": ["/path/to/pi/node_modules/typebox"],
     "typebox/*": ["/path/to/pi/node_modules/typebox/*"]
   }
@@ -181,7 +181,7 @@ A minimal function-step workflow:
 
 ```ts
 import { Type } from "typebox";
-import { createStep, createWorkflow } from "pi-workflows";
+import { createStep, createWorkflow } from "@pmateusz/pi-workflows";
 
 const sayHello = createStep({
   name: "say-hello",
@@ -261,7 +261,7 @@ Function-only and questionnaire examples run with no network; agent examples use
 A workflow's behaviour is pinned by three things: the agents' replies, the answers given to questions, and what its steps do. `src/testing` supplies all three — no PI, no filesystem, no network, and no runner-specific matchers, so it works under Vitest, Jest, or `node:test`.
 
 ```ts
-import { ask, createTestRun, reply } from "pi-workflows/testing";
+import { ask, createTestRun, reply } from "@pmateusz/pi-workflows/testing";
 
 const blocked = await createTestRun(planningWorkflow, {
   agents: {

@@ -18,8 +18,8 @@ import { createTestRun } from "../src/testing/index.ts";
  */
 const SOURCE = `import { basename } from "node:path";
 import { Type } from "typebox";
-import { isValidNodeName } from "pi-workflows/engine";
-import { createStep, createWorkflow } from "pi-workflows";
+import { isValidNodeName } from "@pmateusz/pi-workflows/engine";
+import { createStep, createWorkflow } from "@pmateusz/pi-workflows";
 
 const greet = createStep({
   name: "greet",
@@ -59,19 +59,17 @@ describe("authoring outside this repo", () => {
     const run = await createTestRun(await loadWorkflowFile(workflowFile));
 
     expect(run.status).toBe("completed");
-    // `named` proves `pi-workflows/src/engine` resolved, `file` that node built-ins still do.
+    // `named` proves the engine subpath resolved, `file` that node built-ins still do.
     expect(run.output).toEqual({ greeting: "hello from outside the repo", named: true, file: "greet.workflow.ts" });
   });
 
-  it("still loads the original `pi-workflows/src/*` spelling", async () => {
-    // Workflows written before the package exposed `pi-workflows` / `pi-workflows/flow` must keep
-    // loading; both spellings name the same module object, so neither doubles the engine.
-    const legacy = path.join(workflowsDir(projectRoot), "legacy.workflow.ts");
-    await writeFile(legacy, SOURCE.replace('"pi-workflows/engine"', '"pi-workflows/src/engine"').replace('from "pi-workflows"', 'from "pi-workflows/src/flow"'), "utf8");
+  it("does not answer for the package's internal layout", async () => {
+    // Only the published names resolve. A directory path is not a supported import, and failing here
+    // is the point: it cannot work after a real `npm install` either, since `exports` omits it.
+    const byPath = path.join(workflowsDir(projectRoot), "by-path.workflow.ts");
+    await writeFile(byPath, SOURCE.replace('from "@pmateusz/pi-workflows"', 'from "@pmateusz/pi-workflows/src/flow"'), "utf8");
 
-    const run = await createTestRun(await loadWorkflowFile(legacy));
-
-    expect(run.status).toBe("completed");
+    await expect(loadWorkflowFile(byPath)).rejects.toThrow(/Cannot find module/);
   });
 
   it("negative control: a loader that does not supply the modules cannot load the same file", async () => {

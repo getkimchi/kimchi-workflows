@@ -25,17 +25,20 @@ import type { WorkflowDefinition } from "../flow/types.ts";
  *    module. There is no file on disk to point an alias at, so `require.resolve("typebox")` has
  *    nothing to find and a path-based alias would be unbuildable.
  *  - it guarantees ONE instance. The workflow's `Type.Object(...)` and the engine's `Value.Check(...)`
- *    are then provably the same typebox, and the workflow's `pi-workflows/src/flow` is the very module
+ *    are then provably the same typebox, and the workflow's `@pmateusz/pi-workflows` is the very module
  *    object running the engine — not a second copy that node resolution happened to find.
  *
  * The modules we hand out are whatever OUR imports above resolved to, so under the harness a workflow
  * transitively gets PI's bundled typebox — the same one the engine is validating against.
  *
- * `src/flow` is what authoring needs and `src/engine` covers the rest of what a workflow can legitimately
- * reach for (`RunEvent`, `formatPath`, and the other run-shaped types); both already sit in this
- * process's module graph, so exposing them costs nothing. `src/host` and `src/testing` are deliberately
- * absent: a workflow driving its own host would invert the layering, and a project's tests for its
- * workflows run under its own test runner, never through this loader — those need a real install.
+ * The keys are exactly the package's published names, no more: the bare package (the authoring API),
+ * `/flow` naming that same module, and `/engine` for the run-shaped types a workflow can legitimately
+ * reach for. Both already sit in this process's module graph, so exposing them costs nothing. `/host`
+ * and `/testing` are deliberately absent: a workflow driving its own host would invert the layering,
+ * and a project's tests for its workflows run under its own test runner, never through this loader.
+ *
+ * Nothing here may name a directory (`…/src/flow`). What resolves under this loader must also resolve
+ * after a real `npm install`, and the `exports` map publishes names, not layout.
  *
  * Node built-ins (`node:fs`, `node:path`, …) need no entry here; jiti resolves them natively.
  */
@@ -43,12 +46,9 @@ const workflowModules = {
   typebox,
   "typebox/value": typeboxValue,
   "typebox/compile": typeboxCompile,
-  "pi-workflows": flow,
-  "pi-workflows/flow": flow,
-  "pi-workflows/engine": engine,
-  // The original spellings, still honoured so workflows written against them keep loading.
-  "pi-workflows/src/flow": flow,
-  "pi-workflows/src/engine": engine,
+  "@pmateusz/pi-workflows": flow,
+  "@pmateusz/pi-workflows/flow": flow,
+  "@pmateusz/pi-workflows/engine": engine,
 };
 
 function isWorkflowDefinition(value: unknown): value is WorkflowDefinition {
