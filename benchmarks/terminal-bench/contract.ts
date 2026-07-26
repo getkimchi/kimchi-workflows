@@ -17,22 +17,45 @@ export const criterionSchema = Type.Object({
   statement: Type.String({ description: "What must be true, in one sentence." }),
   check: Type.String({ description: "A single shell command that tests it, non-interactive, exits 0 on success." }),
   expect: Type.String({ description: "What the command's output/exit status must show for this to pass." }),
+  // Separating quoted requirement from inference is the point. A criterion derived from the task reads
+  // exactly like one invented from a guess, and the guessed ones are where runs are lost: a survey once
+  // asserted "16 data rows" for a table its own other criterion enumerated as 15, and nothing downstream
+  // could tell the two kinds of claim apart.
+  source: Type.String({
+    description: "The exact words from the task that require this. Write INFERRED if the task does not say it and you worked it out.",
+  }),
 });
 
 export const planSchema = Type.Object({
   approach: Type.String({ description: "The intended change, in a few sentences." }),
+  requirements: Type.Array(Type.String(), {
+    description: "Every distinct thing the task demands, quoted or closely paraphrased, before you turn any of them into checks.",
+  }),
   criteria: Type.Array(criterionSchema, { description: "Acceptance criteria, each independently checkable." }),
+  // Naming what is uncertain is what lets a later step spend its scepticism where it is warranted,
+  // instead of re-checking the parts that were never in doubt.
+  uncertainties: Type.Array(Type.String(), {
+    description: "Points where the task is ambiguous and you had to choose a reading. Empty if genuinely none.",
+  }),
 });
 
 // No schema for `implement`: it acts on the machine and `verify` reads the machine, so nothing consumes
 // its words. Requiring a shape there only added a way to fail at work that had already landed.
 
 export const verifySchema = Type.Object({
-  allPass: Type.Boolean({ description: "True only if every criterion's check actually passed when you ran it." }),
+  allPass: Type.Boolean({
+    description: "True ONLY if you personally ran checks covering every requirement of the task and saw them all hold. If you did not check something, this is false.",
+  }),
+  // Asked for BEFORE the verdict, because a verifier that must first write down what it did not examine
+  // is much less likely to then claim everything is fine. 13 of 45 "done" verdicts in a full run were
+  // wrong, and the losses were not sloppy checking — they were unexamined corners.
+  unchecked: Type.Array(Type.String(), {
+    description: "Anything required by the task that you did NOT verify, or could not. Empty only if you truly covered everything.",
+  }),
   failures: Type.Array(
     Type.Object({
       id: Type.String(),
-      actual: Type.String({ description: "The real command output/exit status you observed." }),
+      actual: Type.String({ description: "The real command output/exit status you observed. Paste it; do not summarise." }),
       diagnosis: Type.String({ description: "Why it failed, concretely." }),
     }),
     { description: "Empty when everything passes." },
@@ -79,14 +102,24 @@ export const READ_ONLY = [
  * seconds paces itself to produce something in 180 seconds; a step told it has 855 does not.
  */
 export function timeLine(stepSec: number, remainingSec: number): string {
+  // Quote a SOFT deadline below the enforced one. The engine's cap is a hard abort that discards
+  // everything not yet written down, so quoting it exactly leaves no room for ordinary overshoot —
+  // measured, a step aimed at its own number and died a few seconds past it with its answer unsent.
+  // The gap is slack the agent does not know it has, and it converts "killed mid-sentence" into
+  // "delivered something".
+  const soft = Math.max(30, Math.round(stepSec * SOFT_DEADLINE_FRACTION));
   return [
-    `TIME: you have about ${Math.max(0, Math.round(stepSec))}s for THIS step. It is a hard limit — if you`,
-    "overrun it you are stopped where you stand and whatever you have not written down is lost. Aim to",
-    "finish comfortably inside it, and if you are running short, produce your best answer NOW rather than",
-    "a better one you will never get to deliver.",
+    `TIME: aim to be finished with THIS step in about ${soft}s.`,
+    "Treat that as your deadline. There is a little slack past it, but not much, and if you run out you",
+    "are stopped where you stand and everything you have not yet written down is lost — including a",
+    "half-formed answer. So when you are around three quarters of the way through, stop exploring and",
+    "write down the best answer you have. A good answer delivered beats a better one that never arrives.",
     `(The whole run has about ${Math.max(0, Math.round(remainingSec))}s left before this machine is graded.)`,
   ].join("\n");
 }
+
+/** How much of a step's enforced box to quote as its deadline; the remainder absorbs normal overshoot. */
+const SOFT_DEADLINE_FRACTION = 0.75;
 
 export function criteriaBlock(criteria: readonly { id: string; statement: string; check: string; expect: string }[]): string {
   return criteria.map((c) => `  [${c.id}] ${c.statement}\n        check:  ${c.check}\n        expect: ${c.expect}`).join("\n");

@@ -1,8 +1,10 @@
 # Handover — terminal-bench solver
 
 State as of 2026-07-26, written so this can be picked up cold **without re-deriving decisions already
-made**. `LESSONS.md` at the repo root has the transferable engineering lessons; this file is the record
-of what is settled, what was tried and rejected, and what is genuinely still open.
+made**. `LESSONS.md` at the repo root has the transferable engineering lessons; **`FAILURE-MODES.md`
+next to this file records every unwanted behaviour observed live, its cause and what was done** — read
+it before changing a prompt. This file is the record of what is settled, what was tried and rejected,
+and what is genuinely still open.
 
 ---
 
