@@ -87,23 +87,33 @@ Status is derived from the event log — nothing stores a status that can drift 
 
 ---
 
-## Installing the extension
+## Installing
 
 **Requirements:** Node.js ≥ 22 and the PI coding harness (`@earendil-works/pi-coding-agent`).
 
+There are two separate installs, and most people only need the first:
+
+1. **The extension** — gives you the `/workflow` commands. Install once per machine or per project.
+2. **The package as a dependency** — only for type-checking and testing the workflows you write. Running them needs nothing.
+
+### 1. The extension
+
+`package.json` declares `src/host/extension.ts` under the `pi` key, so PI's package machinery installs it directly:
+
 ```bash
-# from the repo root
-pnpm install        # or: npm install
+pi install npm:@pmateusz/pi-workflows        # user-wide (~/.pi/agent/settings.json)
+pi install -l npm:@pmateusz/pi-workflows     # this project only (.pi/settings.json)
 ```
 
-`src/host/extension.ts` default-exports the factory PI expects (`(pi: ExtensionAPI) => void`); it calls `pi.registerCommand("workflow", …)`, adding the `/workflow` command family to your session. `package.json` declares it under the `pi` key, so PI's own package machinery can install it:
+`-l` writes project settings, which makes the project untrusted until you approve it once — pass `-a`, or accept the prompt on the next interactive start. Other routes, all equivalent:
 
 ```bash
-pi install /path/to/pi-workflows       # user-wide (~/.pi/agent/settings.json)
-pi install -l /path/to/pi-workflows    # this project only (.pi/settings.json), then pass -a once to trust it
+pi install git:github.com/pmateusz/pi-workflows   # straight from the repo, no npm
+pi install /path/to/pi-workflows                  # a local checkout, for development
+pi -e /path/to/pi-workflows/src/host/extension.ts # one-off, this run only
 ```
 
-A local path is recorded, not copied, so the checkout keeps its own `node_modules` — which it needs, because PI does not supply `jiti`. The equivalent one-off is `pi -e /path/to/pi-workflows/src/host/extension.ts`, and dropping a re-export in `~/.pi/agent/extensions/` or `.pi/extensions/` works too (that location is also what makes `/reload` pick up edits). Registering it by hand stays available for a custom host:
+A local path is recorded rather than copied, so that checkout keeps its own `node_modules` — which it needs, because PI supplies `typebox` to extensions but not `jiti`. Dropping a re-export into `~/.pi/agent/extensions/` or `.pi/extensions/` also works and is what makes `/reload` pick up edits. For a custom host, register the factory by hand:
 
 ```ts
 import { piWorkflowsExtension } from "@pmateusz/pi-workflows/host";
@@ -112,7 +122,19 @@ piWorkflowsExtension(pi);
 
 > **A package with no `pi` key loads nothing.** PI records it in settings and contributes no resources, silently — no error on startup. After installing, confirm `/workflow` actually exists.
 
-Once registered, the commands are available inside PI:
+### 2. The package (optional)
+
+Only if you want autocomplete, `tsc`, or your own tests over the workflows you author — none of it is needed to *run* them:
+
+```bash
+npm install -D @pmateusz/pi-workflows typebox     # or pnpm add -D
+```
+
+`typebox` comes along because your editor needs its types on disk; at run time PI's own copy is used regardless of what you install. The published package ships built JavaScript with `.d.ts`, so an ordinary `tsconfig.json` type-checks it with no special flags.
+
+### Commands
+
+Once the extension is registered, these are available in any PI session:
 
 | Command | What it does |
 | --- | --- |
@@ -136,30 +158,24 @@ Workflows belong to the project you run PI in, not to this repo: everything keys
 
 A useful side effect: the workflow and the engine share **one** typebox instance — under the harness, PI's bundled copy — so a schema built in the workflow is validated by the very module that built it.
 
-Editors are a separate question, because `tsc` and `biome` resolve from disk rather than through jiti. For autocomplete and type-checking of authored workflows, either install for real:
+Editors are the one thing jiti cannot help with, because `tsc` resolves from disk. Add the package as a dev dependency (step 2 above) and an ordinary `tsconfig.json` type-checks an authored workflow with no special flags:
 
 ```bash
-pnpm add file:/path/to/pi-workflows typebox   # types and runtime both resolve; jiti's modules still win at run time
+npm install -D @pmateusz/pi-workflows typebox
 ```
 
-…or keep the zero-install setup and point the compiler at the two locations:
+Working against a local checkout instead of the registry? `npm install -D file:/path/to/pi-workflows typebox` behaves the same, as long as that checkout has been built (`pnpm build`) — `exports` points at `dist`.
 
-```jsonc
-// <project>/tsconfig.json
-"compilerOptions": {
-  "moduleResolution": "Bundler",
-  "allowImportingTsExtensions": true,
-  "paths": {
-    "@pmateusz/pi-workflows": ["/path/to/pi-workflows/src/flow/index.ts"],
-    "@pmateusz/pi-workflows/flow": ["/path/to/pi-workflows/src/flow/index.ts"],
-    "@pmateusz/pi-workflows/engine": ["/path/to/pi-workflows/src/engine/index.ts"],
-    "typebox": ["/path/to/pi/node_modules/typebox"],
-    "typebox/*": ["/path/to/pi/node_modules/typebox/*"]
-  }
-}
+Biome needs nothing either way: it does no type-aware resolution, and the only two rules that would object to an import it cannot resolve — `noUndeclaredDependencies` and `noUnresolvedImports` — are off in this repo's `biome.json` for that reason.
+
+Testing your workflows is the same story — a dev dependency and any runner:
+
+```ts
+import { createTestRun, reply } from "@pmateusz/pi-workflows/testing";
+
+const run = await createTestRun(myWorkflow, { agents: { draft: [reply({ summary: "…" })] } });
+expect(run.status).toBe("completed");
 ```
-
-Biome needs nothing: it does no type-aware resolution, and the only two rules that would object to an import it cannot resolve — `noUndeclaredDependencies` and `noUnresolvedImports` — are off in this repo's `biome.json` for that reason.
 
 ### `/workflow create`
 
