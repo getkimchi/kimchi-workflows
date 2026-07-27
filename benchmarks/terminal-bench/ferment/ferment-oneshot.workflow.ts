@@ -133,15 +133,19 @@ const MODEL = process.env.TB_MODEL ?? "kimchi-dev/kimi-k2.7";
 // tier the plan chose for it (`FERMENT_WORKER_BUDGETS`, ported verbatim).
 
 /**
- * kimchi's recovery rule for a step that did not land, and the only bound in this file that limits
- * repetition: "use resume_subagent for a bounded direct continuation ... do not raise the limits and
- * retry the same broad task". A bounded continuation is one continuation, so a step gets two attempts.
+ * How many times a refused step may be re-attempted before the loop stops.
  *
- * kimchi reaches the same place by a different route — a flagged gate returns a tool error and the
- * PLANNER decides whether to continue, skip the step or fail it. There is no planner turn here to make
- * that call, so the rule it would have been applying is applied directly.
+ * kimchi has NO cap here — "step-level flags don't feed the phase retry/escalation pipeline, they just
+ * refuse this single call", and the planner re-calls until it passes, or resolves the step explicitly
+ * with skip/fail. Neither of those exists as a turn in this workflow, so some bound is unavoidable; it
+ * borrows `MAX_BLOCK_RETRIES`, the only retry budget kimchi actually defines, rather than inventing a
+ * second number.
+ *
+ * It was 2, chosen when the gate turn was a cold subagent that could never change its mind. Now that
+ * the voter resumes its own session and is shown kimchi's refusal text, a re-call can actually converge,
+ * so the budget is the one kimchi uses for exactly that shape of loop.
  */
-const STEP_MAX_ATTEMPTS = 2;
+const STEP_MAX_ATTEMPTS = MAX_BLOCK_RETRIES;
 
 const intentOf = (ctx: RunContext): string => ctx.getInitData<Task>()?.instruction ?? "(missing)";
 
@@ -171,6 +175,7 @@ const JUDGE_ARM = "judge-round";
 const REFINE_ARM = "refine-phase";
 const TRIAGE_ARM = "verify-triage";
 const REWORK_ARM = "phase-rework-round";
+const GRADE_ARM = "phase-grade-round";
 
 // -- Scoping ----------------------------------------------------------------------------------------
 
@@ -413,6 +418,12 @@ const stepGates = createAgentStep({
   background: true,
   optional: true,
   retry: { maxRetry: 0 },
+  // Resumable, because kimchi's re-call happens INSIDE the voter's own session. Its planner flags,
+  // reads "cannot complete - agent self-flagged … resolve and re-call with 'pass' (or 'omitted' …)",
+  // and votes again holding its own previous verdicts. A cold subagent per attempt re-derives the same
+  // scepticism from nothing and never converges — measured across five runs, 30 of 33 step attempts
+  // refused, with the S gates never once accepting a step they had already flagged.
+  resumable: true,
   prompt: ({ ctx }) => {
     const phase = ctx.getStepResult<PhaseItem>("phase-ctx");
     const item = ctx.getStepResult<StepItem>("step-ctx");
@@ -422,6 +433,7 @@ const stepGates = createAgentStep({
       stepIndex: item?.index ?? 1,
       step: item?.step ?? { description: "(missing)" },
       report: ctx.getStepResult<WorkerReport>("worker"),
+      previousFlags: ctx.getStepResult<StepCheck>("step-check")?.flags,
     });
   },
 });
@@ -664,7 +676,14 @@ const phaseDiff = createStep({
   run: async ({ ctx, abortSignal }) => phaseDiffSince(ctx.getStepResult<{ ref: string }>("phase-start-ref")?.ref ?? "", abortSignal),
 });
 
-type PhaseClose = { accepted: boolean; retry: number; grade: PhaseGrade | undefined; refused: boolean; minimum: string };
+type PhaseClose = {
+  accepted: boolean;
+  retry: number;
+  grade: PhaseGrade | undefined;
+  refused: boolean;
+  minimum: string;
+  flags: { id: string; rationale: string; evidence: string }[];
+};
 
 const phaseCloseSchema = Type.Object({
   accepted: Type.Boolean(),
@@ -672,6 +691,7 @@ const phaseCloseSchema = Type.Object({
   grade: Type.Optional(phaseGradeSchema),
   refused: Type.Boolean(),
   minimum: Type.String(),
+  flags: Type.Array(Type.Object({ id: Type.String(), rationale: Type.String(), evidence: Type.String() })),
 });
 
 /**
@@ -682,19 +702,38 @@ const phaseCloseSchema = Type.Object({
  */
 const phaseClose = createStep({
   name: "phase-close",
-  description: "Does this phase's grade clear the bar, or does it get another rework",
+  description: "Does this phase clear its gates and the grader, or does it get another rework",
   output: phaseCloseSchema,
   run: ({ ctx, logger }) => {
     const priorRetries = ctx.getStepResult<{ retry: number }>("close-clock")?.retry ?? 0;
-    const grade = ctx.getStepResult<PhaseGrade>("phase-grade");
-    const refused = gradeRefuses(grade?.grade, priorRetries);
+    const gates = ctx.getStepResult<PhaseGates>("phase-gates");
+    const grade = ctx.getStepResult<Record<string, PhaseGrade | undefined>>("grading")?.[GRADE_ARM];
+
+    // Two ways a phase is refused, and kimchi runs them in this order (`phases.ts`): a flagged F gate
+    // feeds the retry/escalation pipeline FIRST — unlike a step gate, it is not an immediate refusal but
+    // it does buy a rework — and only a phase with no block flags reaches the grader at all. Then the
+    // grade decides: A/B advance, C/D/F refuse.
+    const flagged = hasBlockingFlag(gates?.gates);
+    const refused = flagged || gradeRefuses(grade?.grade, priorRetries);
     const retry = refused ? priorRetries + 1 : priorRetries;
-    // Exhausting the budget accepts the grade rather than looping: kimchi advances after MAX_BLOCK_RETRIES.
+    // Exhausting the budget accepts rather than looping: kimchi advances after MAX_BLOCK_RETRIES,
+    // because "the agent had its retries; we don't block continuation indefinitely".
     const accepted = !refused || retry > MAX_BLOCK_RETRIES;
-    logger.info("phase closing turn finished", { grade: grade?.grade ?? null, minimum: minimumAcceptableGrade(priorRetries), refused, retry, accepted });
-    return { accepted, retry, grade, refused, minimum: minimumAcceptableGrade(priorRetries) };
+    logger.info("phase closing turn finished", {
+      flagged,
+      grade: grade?.grade ?? null,
+      minimum: minimumAcceptableGrade(priorRetries),
+      refused,
+      retry,
+      accepted,
+    });
+    return { accepted, retry, grade, refused, minimum: minimumAcceptableGrade(priorRetries), flags: flaggedGatesOf(gates) };
   },
 });
+
+/** The F verdicts that blocked, in the shape the rework prompt and `phase-result` read. */
+const flaggedGatesOf = (gates: PhaseGates | undefined): { id: string; rationale: string; evidence: string }[] =>
+  (gates?.gates ?? []).filter((gate) => normalizeVerdict(gate.verdict) === "flag").map((gate) => ({ id: gate.id, rationale: gate.rationale, evidence: gate.evidence }));
 
 /**
  * How many reworks this phase has already had, read at the TOP of a closing turn.
@@ -727,7 +766,8 @@ const phaseRework = createAgentStep({
     return phaseReworkPrompt({
       plan: planOf(ctx),
       phase: item?.phase ?? { name: "(unknown)", goal: "(unknown)" },
-      grade: close?.grade ?? { grade: "F", rationale: "(no grade recorded)", recommendations: [] },
+      grade: close?.grade,
+      flags: close?.flags ?? [],
       minimum: close?.minimum ?? "A",
       retry: close?.retry ?? 1,
       maxRetries: MAX_BLOCK_RETRIES,
@@ -775,7 +815,7 @@ const phaseResult = createStep({
       summary: gates?.summary ?? "(no phase summary)",
       verdicts: (gates?.gates ?? []).map((gate) => `${gate.id}:${gate.verdict}`).join(" ") || "(none)",
       grade: close.grade?.grade ?? "(ungraded — the grader returned nothing)",
-      flagged: hasBlockingFlag(gates?.gates),
+      flagged: close.flags.length > 0,
       stepsDone: steps.filter((step) => step.done).length,
       stepsTotal: steps.length,
     };
@@ -788,12 +828,21 @@ const phaseResult = createStep({
  * agent back with the grader's recommendations and the phase is completed again, up to
  * `MAX_BLOCK_RETRIES` times.
  */
+const gradeRound = createWorkflow({ name: GRADE_ARM }).then(phaseGrade).commit();
+
+/**
+ * kimchi grades a phase only once its gates are clean: "Step 4: no block flags from gates or project
+ * checks. Run the per-phase LLM grader." A flagged phase goes straight to the retry pipeline, so the
+ * grader spawn is never bought for work already known to be blocked.
+ */
+const gradeable = (ctx: RunContext): boolean => !hasBlockingFlag(ctx.getStepResult<PhaseGates>("phase-gates")?.gates);
+
 const phaseClosing = createWorkflow({ name: "closing" })
   .then(closeClock)
   .branch([[needsRework, reworkRound]], { name: "rework" })
   .then(phaseDiff)
   .then(phaseGates)
-  .then(phaseGrade)
+  .branch([[gradeable, gradeRound]], { name: "grading" })
   .then(phaseClose)
   .commit();
 

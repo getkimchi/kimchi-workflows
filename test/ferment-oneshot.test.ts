@@ -137,14 +137,14 @@ describe("ferment-oneshot: the lifecycle", () => {
     expect(run.output).toMatchObject({ shipped: true, stepsDone: 1 });
   });
 
-  it("stops sending a step back after the second attempt, and records it as not done", async () => {
+  it("stops sending a step back once the re-call budget is spent, and records it as not done", async () => {
     const run = await createTestRun(fermentOneshot, {
       input: roomyInput(),
       steps: { ...noGit, verify: verifyOk },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport), reply(completedReport)],
-        "step-gates": [reply(stepFlagged), reply(stepFlagged)],
+        worker: [reply(completedReport), reply(completedReport), reply(completedReport)],
+        "step-gates": [reply(stepFlagged), reply(stepFlagged), reply(stepFlagged)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
@@ -152,7 +152,9 @@ describe("ferment-oneshot: the lifecycle", () => {
     });
 
     expect(run.status).toBe("completed");
-    expect(run.agent("worker").sessions).toBe(2); // not three: the continuation is bounded
+    // MAX_BLOCK_RETRIES attempts, then the loop stops — kimchi has no step-level cap at all, so this
+    // borrows the only retry budget it does define rather than inventing a second one.
+    expect(run.agent("worker").sessions).toBe(3);
     expect(run.output).toMatchObject({ steps: 1, stepsDone: 0 });
   });
 
@@ -188,9 +190,13 @@ describe("ferment-oneshot: the lifecycle", () => {
       steps: { ...noGit, verify: verifyFail },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport), reply(completedReport)],
-        "step-gates": [reply(stepPass), reply(stepPass)],
-        "verify-judge": [reply({ verdict: "fail", reason: "the cli does not run at all" }), reply({ verdict: "fail", reason: "still broken" })],
+        worker: [reply(completedReport), reply(completedReport), reply(completedReport)],
+        "step-gates": [reply(stepPass), reply(stepPass), reply(stepPass)],
+        "verify-judge": [
+          reply({ verdict: "fail", reason: "the cli does not run at all" }),
+          reply({ verdict: "fail", reason: "still broken" }),
+          reply({ verdict: "fail", reason: "still broken" }),
+        ],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
@@ -198,7 +204,7 @@ describe("ferment-oneshot: the lifecycle", () => {
     });
 
     expect(run.status).toBe("completed");
-    expect(run.agent("worker").sessions).toBe(2);
+    expect(run.agent("worker").sessions).toBe(3);
     expect(run.agent("worker").messages[1]).toContain("verification failed (exit 1)");
     expect(run.output).toMatchObject({ stepsDone: 0 });
   });
@@ -367,6 +373,67 @@ describe("ferment-oneshot: the phase grader", () => {
     expect(run.status).toBe("completed");
     expect(run.agent("phase-rework").sessions).toBe(0);
     expect(run.output).toMatchObject({ shipped: true, phases: 1 });
+  });
+});
+
+describe("ferment-oneshot: the gate re-call", () => {
+  it("sends a refused step back to the SAME gate session, with kimchi's refusal text", async () => {
+    const run = await createTestRun(fermentOneshot, {
+      input: roomyInput(),
+      steps: { ...noGit, verify: verifyOk },
+      agents: {
+        plan: [reply(onePhaseOneStep)],
+        worker: [reply(completedReport), reply(completedReport)],
+        "step-gates": [reply(stepFlagged), reply(stepPass)],
+        "phase-gates": [reply(phasePass)],
+        "phase-grade": [reply(gradeA)],
+        ship: [reply(shipPass)],
+      },
+    });
+
+    expect(run.status).toBe("completed");
+    // Two executions, ONE conversation: kimchi's planner re-calls complete_ferment_step inside the
+    // session that flagged, so it can reconsider rather than re-derive the same doubt from nothing.
+    expect(run.agent("step-gates").sessions).toBe(2);
+
+    const recall = run.agent("step-gates").messages[1] as string;
+    expect(recall).toContain("cannot complete - agent self-flagged on 1 step gate(s)");
+    expect(recall).toContain("⛔ Gate S1:");
+    expect(recall).toContain("'omitted' with rationale if a gate truly does not apply");
+    expect(run.output).toMatchObject({ stepsDone: 1 });
+  });
+});
+
+describe("ferment-oneshot: phase-scope flags", () => {
+  it("refuses a flagged phase without buying a grader, and reworks it", async () => {
+    const phaseFlagged = {
+      summary: "steps done but the trail is hollow",
+      gates: [{ id: "F1", verdict: "flag", rationale: "every step verified by grep only", evidence: "S2 was proxy on all four" }, ...gates(["F2", "F3"])],
+    };
+    const run = await createTestRun(fermentOneshot, {
+      input: roomyInput(),
+      steps: { ...noGit, verify: verifyOk },
+      agents: {
+        plan: [reply(onePhaseOneStep)],
+        worker: [reply(completedReport)],
+        "step-gates": [reply(stepPass)],
+        "phase-gates": [reply(phaseFlagged), reply(phasePass)],
+        // Only ONE grade is scripted: the flagged closing turn must not reach the grader at all.
+        "phase-grade": [reply(gradeA)],
+        "phase-rework": [reply(completedReport)],
+        ship: [reply(shipPass)],
+      },
+    });
+
+    expect(run.status).toBe("completed");
+    // kimchi: "no block flags from gates or project checks. Run the per-phase LLM grader" — a flagged
+    // phase goes straight to the retry pipeline, so the grader spawn is never bought for it.
+    expect(run.agent("phase-grade").sessions).toBe(1);
+    expect(run.agent("phase-rework").sessions).toBe(1);
+
+    const rework = run.agent("phase-rework").messages[0] as string;
+    expect(rework).toContain("⛔ Gate F1: every step verified by grep only");
+    expect(run.output).toMatchObject({ shipped: true });
   });
 });
 
@@ -667,9 +734,12 @@ describe("ferment-oneshot: the shape", () => {
     // The planner replans with the judge's answers; a rejected worker continues its own bounded work.
     expect(steps.get("plan")?.resumable).toBe(true);
     expect(steps.get("worker")?.resumable).toBe(true);
+    // The gate voter too: kimchi's re-call happens inside the voter's own session, which is what lets a
+    // refused step converge instead of being re-flagged from scratch by a fresh sceptic.
+    expect(steps.get("step-gates")?.resumable).toBe(true);
     // Every checking step looks with fresh eyes: a resumed gate turn would inherit the belief it exists
     // to test.
-    for (const name of ["judge", "step-gates", "verify-judge", "phase-gates", "ship"]) {
+    for (const name of ["judge", "verify-judge", "phase-gates", "ship"]) {
       expect(steps.get(name)?.resumable, name).not.toBe(true);
     }
   });

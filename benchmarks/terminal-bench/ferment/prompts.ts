@@ -388,8 +388,33 @@ export function stepGatesPrompt(args: {
   stepIndex: number;
   step: PlannedStep;
   report: WorkerReport | undefined;
+  /** The verdicts THIS session flagged last time, when the step was sent back — kimchi's re-call. */
+  previousFlags?: readonly { id: string; rationale: string; evidence: string }[];
 }): string {
-  const { plan, phase, stepIndex, step, report } = args;
+  const { plan, phase, stepIndex, step, report, previousFlags } = args;
+
+  // A re-call, not a fresh vote: this session already flagged and the step was refused. kimchi's
+  // planner sees exactly this text and re-votes — usually passing, or omitting a gate that does not
+  // apply — which is why its steps converge and an earlier version of this port's never did.
+  if (previousFlags && previousFlags.length > 0) {
+    return [
+      gateRefusalText({
+        what: `Step ${stepIndex}: "${step.description}"`,
+        flags: previousFlags,
+        recall: "vote again",
+      }),
+      "",
+      "The worker has since had another attempt at this step. Its report now:",
+      report ? JSON.stringify(report, null, 2) : "(none — the worker returned nothing usable)",
+      "",
+      "Look at the machine again before you vote. If the underlying issue is resolved, vote 'pass'. If a",
+      "gate does not genuinely apply to this step, vote 'omitted' with the rationale that says why —",
+      "flagging a gate that does not apply keeps a finished step from ever completing.",
+      "",
+      renderGateGuidance(STEP_GATES),
+    ].join("\n");
+  }
+
   return [
     "A worker has just finished a ferment step. Decide whether it may be marked done.",
     "",
@@ -413,6 +438,28 @@ export function stepGatesPrompt(args: {
     "",
     "Then write the summary the following steps in this phase will read: what was actually accomplished,",
     "in one or two sentences.",
+  ].join("\n");
+}
+
+/**
+ * kimchi's refusal text when a completion turn self-flags, ported from `gate-validation.ts`'s
+ * `flagLines` plus each turn's `renderFlagError`.
+ *
+ * The wording matters more than it looks. kimchi's voter is the PLANNER — the same agent that wants to
+ * advance — so "agent self-flagged" is literal, and the message tells it the two ways out: fix the
+ * underlying issue, or vote `omitted` when the gate genuinely does not apply. Sending this back into the
+ * SAME gate session (the step is `resumable`) is what makes the port's gate turn behave like kimchi's
+ * re-call rather than like a fresh sceptic who has never seen its own verdict.
+ */
+export function gateRefusalText(args: { what: string; flags: readonly { id: string; rationale: string; evidence: string }[]; recall: string }): string {
+  const { what, flags, recall } = args;
+  const flagLines = flags.map((flag) => `  ⛔ Gate ${flag.id}: ${flag.rationale}\n     evidence: ${flag.evidence}`).join("\n");
+  return [
+    `${what} cannot complete - agent self-flagged on ${flags.length} step gate(s):`,
+    "",
+    flagLines,
+    "",
+    `Resolve the underlying issue and ${recall} with verdicts of 'pass' (or 'omitted' with rationale if a gate truly does not apply).`,
   ].join("\n");
 }
 
@@ -525,21 +572,37 @@ export function phaseGraderPrompt(args: {
 export function phaseReworkPrompt(args: {
   plan: Plan | undefined;
   phase: { name: string; goal: string };
-  grade: PhaseGrade;
+  grade: PhaseGrade | undefined;
+  flags: readonly { id: string; rationale: string; evidence: string }[];
   minimum: string;
   retry: number;
   maxRetries: number;
 }): string {
-  const { plan, phase, grade, minimum, retry, maxRetries } = args;
+  const { plan, phase, grade, flags, minimum, retry, maxRetries } = args;
+
+  // A phase is refused for either reason, and kimchi checks them in this order: a flagged F gate feeds
+  // the retry pipeline before the grader is ever consulted, so a flagged phase has no grade to report.
+  if (flags.length > 0) {
+    return [
+      gateRefusalText({ what: `Phase "${phase.name}"`, flags, recall: "complete the phase again" }),
+      "",
+      `Ferment: ${plan?.title ?? "(untitled)"}`,
+      `Phase goal: ${phase.goal}`,
+      `Retry ${retry}/${maxRetries}.`,
+      "",
+      "Change the machine so the flagged gates hold — the phase is judged again on what it finds.",
+    ].join("\n");
+  }
+
   return [
-    `**Phase "${phase.name}"** cannot complete — the grader assigned grade ${grade.grade}, minimum required is ${minimum} (retry ${retry}/${maxRetries}).`,
+    `**Phase "${phase.name}"** cannot complete — the grader assigned grade ${grade?.grade ?? "?"}, minimum required is ${minimum} (retry ${retry}/${maxRetries}).`,
     "",
     `Ferment: ${plan?.title ?? "(untitled)"}`,
     `Phase goal: ${phase.goal}`,
-    `Grader's rationale: ${grade.rationale}`,
+    `Grader's rationale: ${grade?.rationale ?? "(none)"}`,
     "",
     "Recommendations:",
-    ...grade.recommendations.map((rec, index) => `  ${index + 1}. ${rec}`),
+    ...(grade?.recommendations ?? []).map((rec, index) => `  ${index + 1}. ${rec}`),
     "",
     "Address the recommendations above. Change the machine — the phase is graded again on what it finds,",
     "not on what you say you did.",
