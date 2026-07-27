@@ -17,9 +17,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { runWorkflow } from "../../src/engine/run-workflow.ts";
 import type { AgentRequest, AgentSession } from "../../src/engine/types.ts";
+import type { WorkflowDefinition } from "../../src/flow/index.ts";
 import { createFsStore } from "../../src/host/fs-store.ts";
 import { createHostPort } from "../../src/host/host-port.ts";
 import { createPiAgentBridge } from "../../src/host/pi-agent.ts";
+import fermentOneshot from "./ferment/ferment-oneshot.workflow.ts";
 import tbSolver from "./tb-solver.workflow.ts";
 
 /** Agent-phase budget in seconds (harbor's `[agent] timeout_sec`); the adapter passes it through. */
@@ -33,6 +35,26 @@ const SAFETY_MARGIN_SEC = 45;
 function readTimeoutSec(): number {
   const raw = Number(process.env.TB_AGENT_TIMEOUT_SEC ?? DEFAULT_TIMEOUT_SEC);
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_SEC;
+}
+
+/**
+ * Which solver this run uses, chosen by `TB_WORKFLOW` (`--ae TB_WORKFLOW=ferment` on the harbor side;
+ * agent env is wired into the container's exec environment by the trial).
+ *
+ * Two solvers, one extension, because they are the same experiment run twice: the same instruction, the
+ * same deadline, the same subagent host — only the workflow differs. `tb-solver` is designed from
+ * terminal-bench's own measured failures; `ferment-oneshot` is kimchi's one-shot ferment rendered as a
+ * workflow, so a comparison between them is a comparison of designs rather than of harnesses.
+ */
+const WORKFLOWS: Record<string, WorkflowDefinition> = { solver: tbSolver, ferment: fermentOneshot };
+const DEFAULT_WORKFLOW = "solver";
+
+function selectWorkflow(): WorkflowDefinition {
+  const requested = (process.env.TB_WORKFLOW ?? DEFAULT_WORKFLOW).trim().toLowerCase();
+  const selected = WORKFLOWS[requested];
+  if (selected) return selected;
+  log(`unknown TB_WORKFLOW="${requested}" (known: ${Object.keys(WORKFLOWS).join(", ")}) — falling back to ${DEFAULT_WORKFLOW}`);
+  return WORKFLOWS[DEFAULT_WORKFLOW] as WorkflowDefinition;
 }
 
 /** Progress goes to stderr: harbor captures it per trial, and in `--print` mode `ui.notify` has nowhere to render. */
@@ -66,9 +88,10 @@ async function solve(instruction: string, startAgent: (request: AgentRequest) =>
   try {
     const store = createFsStore(process.env.TB_LOG_DIR ?? cwd);
     const host = createHostPort(store, { startAgent });
+    const workflow = selectWorkflow();
 
-    log(`starting: budget ${budgetSec}s, model ${process.env.TB_MODEL ?? "(workflow default)"}, cwd ${cwd}`);
-    const result = await runWorkflow(tbSolver, { instruction, deadlineIso }, host, { signal: controller.signal });
+    log(`starting: workflow ${workflow.name}, budget ${budgetSec}s, model ${process.env.TB_MODEL ?? "(workflow default)"}, cwd ${cwd}`);
+    const result = await runWorkflow(workflow, { instruction, deadlineIso }, host, { signal: controller.signal });
     log(`run ${result.runId} ${result.status} ${result.status === "completed" ? JSON.stringify(result.output) : (result.error ?? "")}`);
   } catch (err) {
     // Never let a workflow failure surface as a harness crash: the container still holds whatever work
