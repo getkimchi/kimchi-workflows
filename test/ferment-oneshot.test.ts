@@ -971,9 +971,20 @@ describe("ferment-oneshot: the shape", () => {
     expect(agentSteps().get("phase-rework")?.maxDurationMs).toBe(300_000);
 
     for (const [name, step] of agentSteps()) {
-      if (name === "phase-rework") continue;
+      if (name === "phase-rework" || name === "plan") continue;
       expect(step.maxDurationMs, name).toBeUndefined();
     }
+  });
+
+  it("bounds the planner, which is the one turn measured to take the container down", () => {
+    // `write-compressor` hit container exit 137 three runs running. Reproduced solo: the plan subagent
+    // sat flat at ~250MB and idle while the ORCHESTRATOR grew 1.06GB -> 1.89GB in two minutes against a
+    // 2GiB limit, because `pi.exec` buffers a child's entire stdout and the planner had fallen into a
+    // degenerate output loop. A bound gives the engine a signal to abort the child with; without one the
+    // container dies long before the run's own deadline is due.
+    expect(agentSteps().get("plan")?.maxDurationMs).toBe(300_000);
+    // Killing the planner must cost the plan, not the run: `report` still gets to say what happened.
+    expect(agentSteps().get("plan")?.optional).toBe(true);
   });
 });
 
