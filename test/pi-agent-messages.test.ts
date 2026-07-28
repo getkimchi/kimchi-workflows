@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { type AgentMessages, lastAssistantText, lastAssistantUsage, type ModelRegistry, parseNdjsonMessages, resolveModel, seedHistory } from "../src/host/pi-agent-messages.ts";
+import {
+  type AgentMessages,
+  lastAssistantText,
+  lastAssistantTurn,
+  lastAssistantUsage,
+  type ModelRegistry,
+  parseNdjsonMessages,
+  resolveModel,
+  seedHistory,
+} from "../src/host/pi-agent-messages.ts";
 
 // The real PI `AgentMessage` / `Model` types carry many fields these pure readers never touch. We feed
 // them minimal fixtures via one localized assertion each (no `any`); the readers only read the fields
@@ -161,5 +170,46 @@ describe("seedHistory", () => {
 
   it("returns undefined (no-op) for an empty stored conversation, same as undefined", () => {
     expect(seedHistory([], answerTurn)).toBeUndefined();
+  });
+});
+
+/**
+ * A background step needs the final assistant turn and nothing else, and must not pay for the rest of
+ * the conversation to get it. Parsing every message to take the last one grew one run's parent process
+ * from 324MB to 1.91GB while it read 367KB, and the container was killed.
+ */
+describe("lastAssistantTurn", () => {
+  const end = (role: string, text: string, totalTokens: number) =>
+    JSON.stringify({ type: "message_end", message: { role, content: [{ type: "text", text }], usage: { totalTokens } } });
+
+  it("returns the final assistant turn's text and usage", () => {
+    const ndjson = [end("assistant", "first", 1), end("user", "next", 0), end("assistant", "final", 7)].join("\n");
+    expect(lastAssistantTurn(ndjson)).toEqual({ text: "final", usage: { totalTokens: 7 } });
+  });
+
+  it("skips trailing non-assistant and unparseable lines", () => {
+    const ndjson = [end("assistant", "the one", 3), end("user", "after", 0), "{not json", ""].join("\n");
+    expect(lastAssistantTurn(ndjson)).toEqual({ text: "the one", usage: { totalTokens: 3 } });
+  });
+
+  it("agrees with the full parse it replaces, on the same input", () => {
+    const ndjson = [end("assistant", "a", 1), end("assistant", "b", 2)].join("\n");
+    const full = parseNdjsonMessages(ndjson);
+    expect(lastAssistantTurn(ndjson)).toEqual({ text: lastAssistantText(full), usage: lastAssistantUsage(full) });
+  });
+
+  it("is empty when there is no assistant message at all", () => {
+    expect(lastAssistantTurn(end("user", "hello", 0))).toEqual({ text: "", usage: undefined });
+    expect(lastAssistantTurn("")).toEqual({ text: "", usage: undefined });
+  });
+
+  it("does not walk the whole stream: cost tracks the tail, not the conversation", () => {
+    // 20k earlier messages, deliberately malformed so any full parse would have to touch them all.
+    const noise = Array.from(
+      { length: 20_000 },
+      (_, i) => `{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"turn ${i}"}],"usage":{"totalTokens":1}}}`,
+    );
+    const ndjson = [...noise, end("assistant", "last", 9)].join("\n");
+    expect(lastAssistantTurn(ndjson)).toEqual({ text: "last", usage: { totalTokens: 9 } });
   });
 });

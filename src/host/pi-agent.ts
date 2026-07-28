@@ -51,9 +51,11 @@
  * The spawn itself goes through `pi.exec` — the "run a shell command to completion" helper every
  * extension already has — rather than PI's own raw `child_process.spawn` (which streams `message_end`
  * events as they arrive, for a subagent tool's live progress UI). A background workflow step has no
- * such UI: it only ever needs the FINAL structured output, so awaiting the whole process and parsing
- * its complete stdout in one pass (`parseNdjsonMessages`, pi-agent-messages.ts) is simpler and just as
- * correct. The parsing itself is pure and covered offline by captured fixture lines
+ * such UI: it only ever needs the FINAL structured output, so awaiting the whole process is simpler and
+ * just as correct. What it must NOT do is parse the whole stream to get there — reading only the final
+ * assistant turn (`lastAssistantTurn`, pi-agent-messages.ts) is what keeps a long subagent's cost off
+ * this process's heap, and the comment that used to sit here recommending the opposite is why one task
+ * killed its container three runs running. The parsing itself is pure and covered offline by fixtures
  * (test/pi-agent-messages.test.ts) — the process spawn is the one part that genuinely cannot be
  * exercised without a real binary.
  *
@@ -72,7 +74,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import type { ContextEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentRequest, AgentSession, AgentTurn, ConversationMessage } from "../engine/types.ts";
-import { type AgentMessages, lastAssistantText, lastAssistantUsage, type ModelRegistry, parseNdjsonMessages, resolveModel, seedHistory } from "./pi-agent-messages.ts";
+import { type AgentMessages, lastAssistantText, lastAssistantTurn, lastAssistantUsage, type ModelRegistry, resolveModel, seedHistory } from "./pi-agent-messages.ts";
 
 export type AgentStarter = (request: AgentRequest) => AgentSession;
 
@@ -309,8 +311,9 @@ function backgroundSession(pi: ExtensionAPI, modelRegistry: ModelRegistry, reque
         throw new Error(`background subagent step "${request.stepName}" exited with code ${result.code}: ${result.stderr.trim() || "(no stderr)"}`);
       }
 
-      const messages = parseNdjsonMessages(result.stdout);
-      return { text: lastAssistantText(messages), usage: lastAssistantUsage(messages) };
+      // Read only the final assistant turn: parsing the whole conversation to take its last element
+      // is what took the container down on write-compressor (see `lastAssistantTurn`).
+      return lastAssistantTurn(result.stdout);
     },
     getConversation(): readonly ConversationMessage[] {
       return []; // one-shot: never resumed with seeded history (spec §2.2/§10.1 — background can't ask)

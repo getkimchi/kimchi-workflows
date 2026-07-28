@@ -286,26 +286,6 @@ const plan = createAgentStep({
   resumable: ORCHESTRATOR_SESSION,
   optional: true,
   retry: { maxRetry: 0 },
-  // A bound, on the one turn measured to need one — and it repairs a port artifact rather than inventing
-  // scheduling policy, the same argument the gate box carried before the merge removed it.
-  //
-  // `write-compressor` died at container exit 137 three runs running. Reproduced solo and watched live:
-  // the plan SUBAGENT sat flat at ~250MB and idle, while the ORCHESTRATOR grew 1.06GB -> 1.89GB in two
-  // minutes against a 2GiB container and was killed. The parent is the casualty because `pi.exec`
-  // accumulates a child's whole stdout into one string (`stdout += data.toString()`); when the planner
-  // falls into a degenerate output loop, every chunk lands in a buffer nothing releases. kimchi's own
-  // planner cannot fail this way — it is a turn inside a session, not a separate process someone else is
-  // buffering — so the exposure is created by this port's process architecture.
-  //
-  // 300s is ~1.5x the slowest plan turn ever measured here (3.2 min on torch-tensor-parallelism, against
-  // a 44s median), so it costs a healthy plan nothing and fires long before the container is in danger.
-  // The step is `optional`, so a killed planner ends the run at `report` with no plan rather than taking
-  // the container down and scoring 0 with an empty log.
-  //
-  // NOTE this is a MITIGATION, not the fix: the unbounded buffer is in `pi.exec`, which lives in the
-  // harness, not here. `HANDOVER.md` §5.3 lists it as "real, latent, not the OOM cause" — the second half
-  // of that is now disproven, and every other agent step in this workflow still carries the exposure.
-  maxDurationMs: 300_000,
   prompt: ({ ctx }) => {
     const previous = ctx.getStepResult<ScopeCheck>("scope-check");
     return planPrompt({ intent: intentOf(ctx), answers: previous?.answers, questionsAsked: previous?.asked });

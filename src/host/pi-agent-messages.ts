@@ -75,6 +75,40 @@ function isMessageEndEvent(value: unknown): value is { type: "message_end"; mess
 }
 
 /**
+ * The last assistant turn in a subagent's NDJSON stdout, read WITHOUT materialising the rest.
+ *
+ * A background step needs exactly two things from a whole subprocess conversation: the final assistant
+ * text and its usage (`getConversation()` returns `[]` for these — a one-shot subagent is never resumed
+ * with seeded history). Building the full message list to read its last element is therefore pure waste,
+ * and on a long subagent it is ruinous: parsed JS objects run an order of magnitude or more above the
+ * text they came from, so a stream of tens of MB becomes GBs of live objects in one synchronous pass.
+ *
+ * Measured, on the `write-compressor` task that killed its container three runs running: the parent grew
+ * **324MB -> 1.91GB in about two minutes while reading 367KB**, with the subagent already exited. Not a
+ * buffering problem — a parsing one. Scanning backwards for the last assistant message touches a handful
+ * of trailing lines and holds one message, so cost stops tracking conversation length at all.
+ */
+export function lastAssistantTurn(ndjson: string): { text: string; usage?: TokenUsage } {
+  for (let end = ndjson.length; end > 0; ) {
+    const newline = ndjson.lastIndexOf("\n", end - 1);
+    const line = ndjson.slice(newline + 1, end).trim();
+    end = newline;
+    if (!line) continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue; // a partial or non-JSON trailing line, same tolerance parseNdjsonMessages has
+    }
+    if (!isMessageEndEvent(event)) continue;
+    const message = event.message as AgentMessages[number];
+    if (!(message && "role" in message && message.role === "assistant")) continue;
+    return { text: lastAssistantText([message]), usage: lastAssistantUsage([message]) };
+  }
+  return { text: "", usage: undefined };
+}
+
+/**
  * Prepend a resumed session's stored prior conversation onto the messages PI is about to send the
  * model (spec §8.4) — the pure core of pi-agent.ts's `context`-event history seed.
  *
