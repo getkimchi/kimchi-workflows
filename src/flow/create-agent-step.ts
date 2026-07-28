@@ -42,8 +42,14 @@ export interface CreateAgentStepOptions<TInputSchema extends TSchema | undefined
    * parent session's history. Never combine with `asks: true` — `.commit()` rejects it (spec §10.1).
    */
   background?: boolean;
-  /** Continue this step's conversation across executions instead of starting cold (spec §2.2). */
-  resumable?: boolean;
+  /**
+   * Continue this step's conversation across executions instead of starting cold (spec §2.2).
+   *
+   * `true` keys it by the step's own name. A string names a conversation shared with every other step
+   * declaring the same key — one orchestrator session taking turns across several steps. Steps sharing
+   * a key may not overlap; `.commit()` rejects a shared key on an isolated step.
+   */
+  resumable?: boolean | string;
 }
 
 /** Agent step (spec §2.2). Runs the agent loop via the host and validates its structured output. */

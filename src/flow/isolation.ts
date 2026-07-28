@@ -61,11 +61,30 @@ function resolveBody(workflowName: string, body: WorkflowDefinition, isolatedHer
 }
 
 function resolveStep(workflowName: string, step: StepDefinition, isolatedHere: boolean): StepDefinition {
+  if (step.kind === "agent" && typeof step.resumable === "string" && !isValidResumeKey(step.resumable)) {
+    throw new Error(
+      `workflow "${workflowName}": agent step "${step.name}" declares resumable: "${step.resumable}", which is not a valid resume key — a shared key becomes a session filename on the host (src/host/pi-agent.ts), so it may not be empty or contain "/", "#", or "@" (all three are node-path syntax, spec §3)`,
+    );
+  }
   if (!isolatedHere || step.kind !== "agent") return step;
   if (step.asks) {
     throw new Error(
       `workflow "${workflowName}": agent step "${step.name}" declares asks but can overlap with a sibling — inside a .parallel arm, or a .foreach whose concurrency exceeds 1 (spec §2.2) — and an isolated step has no conversation to resume an answer into (spec §10.1); use a questionnaire step instead, or keep this step out of the fan-out`,
     );
   }
+  // A shared resume key is a shared session FILE. Two isolated executions append to it at once and the
+  // conversation interleaves into nonsense — a corruption the author would then have to debug through a
+  // model's confusion rather than an error. Same walk, same reason as `asks` above: overlap and
+  // continuity are the same fact, so they are checked in the same place (spec §2.2).
+  if (typeof step.resumable === "string") {
+    throw new Error(
+      `workflow "${workflowName}": agent step "${step.name}" shares the resume key "${step.resumable}" but can overlap with a sibling — inside a .parallel arm, or a .foreach whose concurrency exceeds 1 (spec §2.2) — and concurrent executions would append to one session file at once; use resumable: true to continue only this step's own conversation, or keep the shared key out of the fan-out`,
+    );
+  }
   return { ...step, isolated: true };
+}
+
+/** A shared key becomes `<key>.jsonl` on the host, so it carries a step name's ban on path syntax (spec §3). */
+function isValidResumeKey(key: string): boolean {
+  return key.length > 0 && !key.includes("/") && !key.includes("#") && !key.includes("@");
 }

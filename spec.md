@@ -89,6 +89,18 @@ step tagging: decision)*
   only, and a background step may not be Q&A-capable — `background` together with
   `asks` is rejected at `.commit()` (§10.1). *(decision)*
 
+  **Continuity is declared, and may be shared.** An isolated step starts cold every
+  execution, which is right for a verifier and wrong for a worker that was interrupted.
+  `resumable: true` asks the host to keep that step's conversation under its own name and
+  resume it next time. A **string** names a conversation shared by every step declaring
+  the same key: they take turns in one context, in workflow order. That is what it takes
+  to express an **orchestrator** — the step that plans work and the step that rules on
+  what came back are one agent carrying its own reasoning between them, not two strangers
+  each briefed with a summary of it. Isolation is the limit: a shared key is a shared
+  session, so `.commit()` rejects one on any step that can overlap, for the same reason
+  two agents cannot share a session mid-turn. A key is node-path syntax-checked like a
+  step name (§3) — the host makes it a filename. *(decision)*
+
 2.3. **Nested-workflow step** — another workflow executed as a step. *(orig. R10;
 tracking in §11)*
 

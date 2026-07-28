@@ -180,8 +180,20 @@ export interface AgentStep extends StepBase {
    * is the difference between resuming and restarting. It deliberately overrides the fresh-session
    * default a retry would otherwise get (spec §9.1): an author asking for continuity means it. Leave it
    * off for anything whose value comes from a clean look at the world, a verifier above all.
+   *
+   * `true` keys the conversation by the step's own name, so each step continues only itself. A STRING
+   * names a conversation SHARED by every step declaring that same key: they take turns in one context,
+   * in the order the workflow runs them. That is what it takes to model an orchestrator — one session
+   * that plans the work, then judges what came back, carrying its own reasoning between the two rather
+   * than being handed a summary of it. Without this, "the agent that planned this step" and "the agent
+   * that rules on it" are strangers however carefully each is briefed.
+   *
+   * A shared key is a shared FILE, so the steps holding one must never overlap: `.commit()` rejects it
+   * on any step tagged `isolated` (`src/flow/isolation.ts`), since two subprocesses appending to one
+   * session would interleave into nonsense. The key is also node-path syntax-checked exactly like a
+   * step name (spec §3) — it becomes a filename on the host side.
    */
-  readonly resumable?: boolean;
+  readonly resumable?: boolean | string;
   /**
    * Static isolation (spec §2.2), framework-set at `.commit()` (`src/flow/isolation.ts`): true when
    * this step sits somewhere that can run concurrently with a sibling — every `.parallel` arm, or a

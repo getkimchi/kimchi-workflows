@@ -104,3 +104,62 @@ describe("the PI host's subagent invocation", () => {
     expect(spawned[1]).not.toContain("--session");
   });
 });
+
+/**
+ * A shared resume key (spec §2.2): several steps naming ONE conversation and taking turns in it. This
+ * is what it takes to model an orchestrator — the step that plans the work and the step that rules on
+ * what came back are the same agent, carrying its own reasoning between them, rather than two
+ * strangers each handed a summary. The key is a shared file, so `.commit()` refuses it wherever two
+ * holders could run at once.
+ */
+describe("a resume key shared by several steps", () => {
+  it("continues one conversation across every step that names it", async () => {
+    const workflow = createWorkflow({ name: "orchestrated" })
+      .then(createAgentStep({ name: "plan", output: okSchema, background: true, resumable: "orchestrator", prompt: () => "plan it" }))
+      .then(createAgentStep({ name: "work", output: okSchema, background: true, resumable: true, prompt: () => "do it" }))
+      .then(createAgentStep({ name: "gates", output: okSchema, background: true, resumable: "orchestrator", prompt: () => "rule on it" }))
+      .commit();
+
+    const agent = recordingAgent([JSON.stringify({ ok: true }), JSON.stringify({ ok: true }), JSON.stringify({ ok: true })]);
+    const { host } = createTestHost({ startAgent: agent.startAgent });
+    const result = await runWorkflow(workflow, undefined, host);
+
+    expect(result.status).toBe("completed");
+    // `plan` and `gates` share one session; `work` keeps its own, keyed by its name.
+    expect(agent.requests.map((r) => r.resumeKey)).toEqual(["orchestrator", "work", "orchestrator"]);
+  });
+
+  it("rejects a shared key on a step that can overlap, rather than letting two writers share one file", () => {
+    const body = createWorkflow({ name: "item" })
+      .then(createAgentStep({ name: "judge", output: okSchema, background: true, resumable: "orchestrator", prompt: () => "rule" }))
+      .commit();
+
+    expect(() =>
+      createWorkflow({ name: "fanned-out" })
+        .foreach(body, () => [{ n: 1 }, { n: 2 }, { n: 3 }], { name: "items", concurrency: 3 })
+        .commit(),
+    ).toThrow(/shares the resume key "orchestrator" but can overlap/);
+  });
+
+  it("still allows a shared key inside a fan-out that runs one item at a time", () => {
+    const body = createWorkflow({ name: "item" })
+      .then(createAgentStep({ name: "judge", output: okSchema, background: true, resumable: "orchestrator", prompt: () => "rule" }))
+      .commit();
+
+    expect(() =>
+      createWorkflow({ name: "sequential-fanout" })
+        .foreach(body, () => [{ n: 1 }, { n: 2 }], { name: "items", concurrency: 1 })
+        .commit(),
+    ).not.toThrow();
+  });
+
+  it("rejects a key carrying node-path syntax, which would escape the sessions directory", () => {
+    for (const key of ["../escape", "a#b", "a@b", ""]) {
+      expect(() =>
+        createWorkflow({ name: "bad-key" })
+          .then(createAgentStep({ name: "step", output: okSchema, background: true, resumable: key, prompt: () => "go" }))
+          .commit(),
+      ).toThrow(/is not a valid resume key/);
+    }
+  });
+});

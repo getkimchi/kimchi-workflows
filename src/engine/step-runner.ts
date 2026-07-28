@@ -43,6 +43,20 @@ function resolveBudgetMs(step: { readonly maxDurationMs?: number | ((args: { ctx
 }
 
 /**
+ * Which conversation this step continues, if any (spec §2.2).
+ *
+ * `resumable: true` means "continue MYSELF", so the key is the step's own name. A string means
+ * "continue THIS conversation", which any number of steps may name to take turns in one context —
+ * the difference between a chain of briefed strangers and a single orchestrator that remembers why it
+ * planned what it planned. `.commit()` has already rejected a shared key wherever two holders could
+ * run at once, so nothing here has to reason about who else might be writing.
+ */
+function resolveResumeKey(step: AgentStep): string | undefined {
+  if (typeof step.resumable === "string") return step.resumable;
+  return step.resumable === true ? step.name : undefined;
+}
+
+/**
  * How an agent step's conversation begins: a `fresh` run builds the prompt from input+context; an
  * `answer` resume (spec §8.4) seeds the session with the blocked conversation and replays the user's
  * structured answers as the next turn. `elapsedMs`/`tokensUsed` (spec §9.4) are this attempt's budget
@@ -286,15 +300,18 @@ async function runAgentSession(
   const maxRepairs = noSteering ? 0 : Math.max(0, step.maxOutputRepairs ?? DEFAULT_MAX_OUTPUT_REPAIRS);
   const steerSchema = step.outputSchema && (step.asks ? buildQaSchema(step.outputSchema) : step.outputSchema);
   const history = entry.kind === "answer" ? entry.conversation : undefined;
-  // `resumeKey` is the step's own name: every execution of THIS step continues the same conversation,
-  // which is what makes a round-two worker pick up where round one was cut off (spec §2.2).
+  // `resumeKey` defaults to the step's own name: every execution of THIS step continues the same
+  // conversation, which is what makes a round-two worker pick up where round one was cut off (spec
+  // §2.2). A step declaring a STRING instead continues the conversation under THAT key, which several
+  // steps may share to take turns in one orchestrator context — `.commit()` has already established
+  // that they cannot overlap, so the file has one writer at a time.
   const session = host.startAgent({
     model,
     history,
     stepName: step.name,
     background: step.background,
     isolated,
-    resumeKey: step.resumable === true ? step.name : undefined,
+    resumeKey: resolveResumeKey(step),
     signal,
   });
 
