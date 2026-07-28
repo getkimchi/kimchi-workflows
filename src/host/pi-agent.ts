@@ -67,6 +67,7 @@
  * literal `"pi"` silently spawns the wrong binary whenever the embedding harness is anything other
  * than vanilla `pi` itself.
  */
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import type { ContextEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -129,12 +130,37 @@ export function inheritedPermissionArgs(argv: readonly string[] = process.argv):
   return PERMISSION_BYPASS_FLAGS.filter((flag) => argv.includes(flag));
 }
 
-/** Where a resumable isolated step's session file lives; the harness creates the file, we own the directory. */
-function resumeSessionPath(resumeKey: string): string {
-  const dir = process.env.PI_WORKFLOW_SESSIONS_DIR ?? path.join(process.cwd(), ".pi", "workflows", "sessions");
+/** The directory holding both resumed sessions and one-shot traces; the harness creates the files, we own the directory. */
+function sessionsDir(...sub: string[]): string {
+  const dir = path.join(process.env.PI_WORKFLOW_SESSIONS_DIR ?? path.join(process.cwd(), ".pi", "workflows", "sessions"), ...sub);
   mkdirSync(dir, { recursive: true });
-  // The key is a step name, which `.commit()` has already cleared of path syntax (spec §3).
-  return path.join(dir, `${resumeKey}.jsonl`);
+  return dir;
+}
+
+/** Where a resumable isolated step's session file lives — the stable name that makes the next execution continue this one. */
+function resumeSessionPath(resumeKey: string): string {
+  // The key is either a step name or an author-declared shared key; `.commit()` has cleared both of
+  // path syntax (spec §3), and has established that no two steps holding a shared key can overlap —
+  // so this path has one writer at a time even when several steps name it.
+  return path.join(sessionsDir(), `${resumeKey}.jsonl`);
+}
+
+/**
+ * Where a NON-resumable execution records what it did — a fresh file per execution, never read back.
+ *
+ * Writing a session and RESUMING one are different things, and only the second would cost this step its
+ * fresh look at the world: the name is unique per execution, so a verifier still starts cold every time
+ * and remembers nothing, exactly as before. What changes is that it leaves a trace. `--no-session` threw
+ * the whole record away, which meant the steps that make up most of a run — every one-shot worker, gate
+ * and judge — could not be asked afterwards what they spent, what they were told, or what they replied.
+ * Per-step token accounting was simply unavailable, and a step that behaved oddly left nothing to read.
+ *
+ * These live under `traces/` rather than beside the keyed sessions so the two namespaces cannot collide:
+ * nothing in here can ever be picked up as a resume target, whatever a step happens to be named.
+ */
+function traceSessionPath(stepName: string): string {
+  const safe = stepName.replace(/[^a-zA-Z0-9._-]/g, "-");
+  return path.join(sessionsDir("traces"), `${safe}-${randomUUID()}.jsonl`);
 }
 
 /**
@@ -232,7 +258,7 @@ export function createPiAgentBridge(pi: ExtensionAPI, invocationResolver: PiInvo
 }
 
 /**
- * A background subagent's session (spec §2.2): one `pi --mode json -p --no-session` subprocess per
+ * A background subagent's session (spec §2.2): one `pi --mode json -p` subprocess per
  * `sendAndAwaitEnd` call (step-runner.ts calls it exactly once — a background step's repair budget is
  * forced to 0, spec §9.2 — but nothing here assumes that; a second call just spawns a second process).
  * Isolated by construction: a fresh CLI invocation gets its own context window and tool loop, with no
@@ -242,11 +268,13 @@ export function createPiAgentBridge(pi: ExtensionAPI, invocationResolver: PiInvo
 function backgroundSession(pi: ExtensionAPI, modelRegistry: ModelRegistry, request: AgentRequest, invocationResolver: PiInvocationResolver): AgentSession {
   return {
     async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
-      // `--session <path>` both writes and RESUMES that file (the CLI's own wording), so a step asking
-      // to continue across executions (`AgentRequest.resumeKey`) simply names the same file each time:
-      // the second run starts with everything the first one had read, tried and learned, instead of
-      // rediscovering it. Everything else stays ephemeral — a fresh, small context per step is what
-      // makes a chain of isolated steps cheap, and a verifier's whole value is not remembering.
+      // `--session <path>` both writes and RESUMES that file (the CLI's own wording). A step asking to
+      // continue across executions (`AgentRequest.resumeKey`) names the same file each time, so the
+      // second run starts with everything the first had read, tried and learned instead of rediscovering
+      // it. Every other execution gets a file of its OWN, named once and never read back: it still starts
+      // cold — a fresh, small context per step is what makes a chain of isolated steps cheap, and a
+      // verifier's whole value is not remembering — but it now leaves a record of what it was told, what
+      // it replied and what it spent. `--no-session` discarded exactly that, for the majority of a run.
       // Permission posture is inherited, not defaulted (see `inheritedPermissionArgs`): a subagent of a
       // run that bypasses permissions must bypass them too, or it re-arms the classifier and spends its
       // budget arguing with a prompt no one is there to answer.
@@ -254,7 +282,8 @@ function backgroundSession(pi: ExtensionAPI, modelRegistry: ModelRegistry, reque
         "--mode",
         "json",
         "-p",
-        ...(request.resumeKey ? ["--session", resumeSessionPath(request.resumeKey)] : ["--no-session"]),
+        "--session",
+        request.resumeKey ? resumeSessionPath(request.resumeKey) : traceSessionPath(request.stepName),
         ...inheritedPermissionArgs(),
       ];
       if (request.model) {

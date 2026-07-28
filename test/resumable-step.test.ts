@@ -76,35 +76,6 @@ describe("resumable isolated steps", () => {
   });
 });
 
-/** The PI host turns that key into a session file the harness writes and resumes; everything else stays ephemeral. */
-describe("the PI host's subagent invocation", () => {
-  it("names a session file for a resumable step and stays ephemeral otherwise", async () => {
-    const { createPiAgentBridge } = await import("../src/host/pi-agent.ts");
-    const spawned: string[][] = [];
-    const pi = {
-      on: () => {},
-      exec: async (_command: string, args: string[]) => {
-        spawned.push(args);
-        return {
-          code: 0,
-          stdout: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "{}" }], usage: { totalTokens: 1 } } }),
-          stderr: "",
-        };
-      },
-    } as never;
-    const start = createPiAgentBridge(pi, (args) => ({ command: "kimchi", args }))({ find: () => undefined } as never);
-
-    await start({ stepName: "worker", background: true, resumeKey: "worker" }).sendAndAwaitEnd("go");
-    await start({ stepName: "looker", background: true }).sendAndAwaitEnd("go");
-
-    expect(spawned[0]).toContain("--session");
-    expect(spawned[0]?.join(" ")).toContain("worker.jsonl");
-    expect(spawned[0]).not.toContain("--no-session");
-    expect(spawned[1]).toContain("--no-session");
-    expect(spawned[1]).not.toContain("--session");
-  });
-});
-
 /**
  * A shared resume key (spec §2.2): several steps naming ONE conversation and taking turns in it. This
  * is what it takes to model an orchestrator — the step that plans the work and the step that rules on
@@ -161,6 +132,64 @@ describe("a resume key shared by several steps", () => {
           .commit(),
       ).toThrow(/is not a valid resume key/);
     }
+  });
+});
+
+/** The PI host turns that key into a session file the harness writes and resumes; everything else stays ephemeral. */
+describe("the PI host's subagent invocation", () => {
+  it("names a session file for a resumable step and stays ephemeral otherwise", async () => {
+    const { createPiAgentBridge } = await import("../src/host/pi-agent.ts");
+    const spawned: string[][] = [];
+    const pi = {
+      on: () => {},
+      exec: async (_command: string, args: string[]) => {
+        spawned.push(args);
+        return {
+          code: 0,
+          stdout: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "{}" }], usage: { totalTokens: 1 } } }),
+          stderr: "",
+        };
+      },
+    } as never;
+    const start = createPiAgentBridge(pi, (args) => ({ command: "kimchi", args }))({ find: () => undefined } as never);
+
+    await start({ stepName: "worker", background: true, resumeKey: "worker" }).sendAndAwaitEnd("go");
+    await start({ stepName: "looker", background: true }).sendAndAwaitEnd("go");
+
+    expect(spawned[0]).toContain("--session");
+    expect(spawned[0]?.join(" ")).toContain("worker.jsonl");
+    expect(spawned[0]).not.toContain("--no-session");
+
+    // A non-resumable step also gets a session — but a fresh one, under traces/, so it still starts cold
+    // while leaving a record of what it was told, replied and spent.
+    expect(spawned[1]).toContain("--session");
+    expect(spawned[1]).not.toContain("--no-session");
+    expect(spawned[1]?.join(" ")).toContain("traces/looker-");
+    expect(spawned[1]?.join(" ")).not.toContain("worker.jsonl");
+  });
+
+  it("gives every non-resumable execution its own trace file, so none of them resumes another", async () => {
+    const { createPiAgentBridge } = await import("../src/host/pi-agent.ts");
+    const spawned: string[][] = [];
+    const pi = {
+      on: () => {},
+      exec: async (_command: string, args: string[]) => {
+        spawned.push(args);
+        return {
+          code: 0,
+          stdout: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "{}" }], usage: { totalTokens: 1 } } }),
+          stderr: "",
+        };
+      },
+    } as never;
+    const start = createPiAgentBridge(pi, (args) => ({ command: "kimchi", args }))({ find: () => undefined } as never);
+
+    await start({ stepName: "verify", background: true }).sendAndAwaitEnd("look");
+    await start({ stepName: "verify", background: true }).sendAndAwaitEnd("look again");
+
+    const paths = spawned.map((args) => args[args.indexOf("--session") + 1]);
+    expect(paths[0]).not.toBe(paths[1]);
+    for (const p of paths) expect(p).toMatch(/traces[/\\]verify-/);
   });
 });
 

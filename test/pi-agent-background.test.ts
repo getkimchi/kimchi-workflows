@@ -49,7 +49,7 @@ const ASSISTANT_LINE = (text: string, totalTokens: number) =>
   JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], usage: { totalTokens } } });
 
 describe("createPiAgentBridge background requests (spec §2.2): a real subprocess, not a throw", () => {
-  it("spawns `pi --mode json -p --no-session <prompt>` and returns the final assistant message + usage", async () => {
+  it("spawns `pi --mode json -p --session <trace> <prompt>` and returns the final assistant message + usage", async () => {
     const { pi, calls } = fakePi(() => ok([ASSISTANT_LINE("hello", 5), ""].join("\n")));
     const startAgent = createPiAgentBridge(pi, fixedResolver)(fakeModelRegistry());
 
@@ -57,7 +57,14 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
     const turn = await session.sendAndAwaitEnd("do the task");
 
     expect(turn).toEqual({ text: "hello", usage: { totalTokens: 5 } });
-    expect(calls).toEqual([{ command: "pi", args: ["--mode", "json", "-p", "--no-session", "do the task"] }]);
+    // The step is not resumable, so its session is a fresh file under traces/ that nothing reads back —
+    // it starts cold as before, but what it spent is now recoverable afterwards.
+    const args = calls[0]?.args ?? [];
+    expect(args.slice(0, 3)).toEqual(["--mode", "json", "-p"]);
+    expect(args[3]).toBe("--session");
+    expect(args[4]).toMatch(/traces[/\\]bg-.*\.jsonl$/);
+    expect(args.at(-1)).toBe("do the task");
+    expect(args).not.toContain("--no-session");
   });
 
   it("passes a resolved --model before the prompt", async () => {
@@ -66,7 +73,9 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
 
     await startAgent({ stepName: "bg", background: true, model: "kimchi-dev/kimi-k2.7" }).sendAndAwaitEnd("go");
 
-    expect(calls[0]?.args).toEqual(["--mode", "json", "-p", "--no-session", "--model", "kimchi-dev/kimi-k2.7", "go"]);
+    const args = calls[0]?.args ?? [];
+    expect(args.slice(-3)).toEqual(["--model", "kimchi-dev/kimi-k2.7", "go"]);
+    expect(args[3]).toBe("--session");
   });
 
   it("rejects an unresolvable model before spawning anything", async () => {
