@@ -48,16 +48,30 @@
  * also why `getConversation()` below returns `[]` rather than any prior turns — there is nothing to
  * seed a resume with, and `.commit()` already rejects `background` + `asks` so one is never needed.
  *
- * The spawn itself goes through `pi.exec` — the "run a shell command to completion" helper every
- * extension already has — rather than PI's own raw `child_process.spawn` (which streams `message_end`
- * events as they arrive, for a subagent tool's live progress UI). A background workflow step has no
- * such UI: it only ever needs the FINAL structured output, so awaiting the whole process is simpler and
- * just as correct. What it must NOT do is parse the whole stream to get there — reading only the final
- * assistant turn (`lastAssistantTurn`, pi-agent-messages.ts) is what keeps a long subagent's cost off
- * this process's heap, and the comment that used to sit here recommending the opposite is why one task
- * killed its container three runs running. The parsing itself is pure and covered offline by fixtures
- * (test/pi-agent-messages.test.ts) — the process spawn is the one part that genuinely cannot be
- * exercised without a real binary.
+ * The spawn itself goes through raw `child_process.spawn`, consuming `message_end` events off stdout as
+ * they arrive — the same shape PI's own subagent tool uses. This comment used to argue the opposite, and
+ * it is worth recording why, because the reasoning was sound and still lost. `pi.exec` — the "run a shell
+ * command to completion" helper every extension already has — buffers the child's whole stdout and hands
+ * back one string; upstream streams because a subagent TOOL has a live progress UI to feed, and a
+ * background workflow step has no such UI, only a final structured output to read. Awaiting the whole
+ * process was therefore simpler and, on the output, just as correct.
+ *
+ * What that argument never priced was the buffer. The parent pays one byte of resident heap for every
+ * byte the child ever prints, for as long as the child runs, whether or not anyone will ever look at it —
+ * and a subagent that greps a large tree prints hundreds of MB. The related waste was measured first and
+ * fixed first (commit 02356e6): PARSING the whole stream to take its last message grew this process
+ * **324MB -> 1.91GB in about two minutes while reading 367KB** on the `write-compressor` task, killing
+ * its container three runs running. That left the buffer as the remaining term with the same shape —
+ * cost tracking how much the child said rather than what this step needs — so it went the same way. It
+ * buys a parent whose peak is one message plus one partial line no matter what the child emits.
+ *
+ * What it costs is the child's lifecycle, which `pi.exec` was quietly handling: killing it on abort, and
+ * — less obviously — not waiting on `close` alone, since a subagent that daemonizes a descendant leaves
+ * the inherited pipe open forever after the process itself is gone. Both are reimplemented, the same way
+ * PI does them, in subagent-process.ts, which now holds this file's whole subprocess half:
+ * `createAssistantTurnReader` (pi-agent-messages.ts) is the pure part, covered offline by fixtures
+ * (test/pi-agent-messages.test.ts), and `SubagentSpawner` is the seam that makes the impure part
+ * testable — the OS process itself is the one thing that genuinely cannot be exercised offline.
  *
  * `resolvePiInvocation` (below) picks WHICH binary that spawn targets — deliberately not a hardcoded
  * literal `"pi"`, since this module stays host-agnostic (no product-specific coupling beyond the
@@ -74,11 +88,12 @@ import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import type { ContextEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentRequest, AgentSession, AgentTurn, ConversationMessage } from "../engine/types.ts";
-import { type AgentMessages, lastAssistantText, lastAssistantTurn, lastAssistantUsage, type ModelRegistry, resolveModel, seedHistory } from "./pi-agent-messages.ts";
+import { type AgentMessages, lastAssistantText, lastAssistantUsage, type ModelRegistry, resolveModel, seedHistory } from "./pi-agent-messages.ts";
+import { runSubagent, type SubagentSpawner, subagentSpawner } from "./subagent-process.ts";
 
 export type AgentStarter = (request: AgentRequest) => AgentSession;
 
-/** What to spawn (`pi.exec`'s first two arguments) for a background subagent, given the CLI args after the binary name. */
+/** What to spawn (the spawner's first two arguments) for a background subagent, given the CLI args after the binary name. */
 export type PiInvocationResolver = (args: readonly string[]) => { command: string; args: readonly string[] };
 
 /**
@@ -169,9 +184,14 @@ function traceSessionPath(stepName: string): string {
  * Create the PI agent bridge. Call once per extension instance (registers one `agent_end` listener),
  * then obtain a per-run `AgentStarter` bound to the command's model registry. `invocationResolver`
  * defaults to {@link resolvePiInvocation}; tests inject a fixed stub instead of depending on the live
- * process's own argv/execPath.
+ * process's own argv/execPath. `spawnSubagent` defaults to {@link subagentSpawner} — a real child
+ * process — and is the seam tests drive a scripted stdout/stderr through.
  */
-export function createPiAgentBridge(pi: ExtensionAPI, invocationResolver: PiInvocationResolver = resolvePiInvocation): (modelRegistry: ModelRegistry) => AgentStarter {
+export function createPiAgentBridge(
+  pi: ExtensionAPI,
+  invocationResolver: PiInvocationResolver = resolvePiInvocation,
+  spawnSubagent: SubagentSpawner = subagentSpawner,
+): (modelRegistry: ModelRegistry) => AgentStarter {
   // The ONE in-session turn currently awaiting the shared `agent_end` listener, if any (see the header
   // comment). `token` is an identity private to the session that started the turn — not the step name,
   // since the SAME step name can legitimately open several sessions across retries/repairs, and dispose()
@@ -203,7 +223,7 @@ export function createPiAgentBridge(pi: ExtensionAPI, invocationResolver: PiInvo
     // `AgentRequest.isolated`'s doc), both run through the same one-shot subprocess path. Neither ever
     // touches `inFlight` — there is no shared listener to correlate a subprocess's own reply with.
     if (request.background || request.isolated) {
-      return backgroundSession(pi, modelRegistry, request, invocationResolver);
+      return backgroundSession(modelRegistry, request, invocationResolver, spawnSubagent);
     }
 
     const token = {}; // this session's own identity — see `inFlight`'s doc above
@@ -267,7 +287,7 @@ export function createPiAgentBridge(pi: ExtensionAPI, invocationResolver: PiInvo
  * access to the parent session's history — `request.history` is always undefined for a background
  * request (see AgentRequest's doc, engine/types.ts) so there is nothing to seed it with anyway.
  */
-function backgroundSession(pi: ExtensionAPI, modelRegistry: ModelRegistry, request: AgentRequest, invocationResolver: PiInvocationResolver): AgentSession {
+function backgroundSession(modelRegistry: ModelRegistry, request: AgentRequest, invocationResolver: PiInvocationResolver, spawnSubagent: SubagentSpawner): AgentSession {
   return {
     async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
       // `--session <path>` both writes and RESUMES that file (the CLI's own wording). A step asking to
@@ -299,21 +319,21 @@ function backgroundSession(pi: ExtensionAPI, modelRegistry: ModelRegistry, reque
       args.push(message);
 
       const invocation = invocationResolver(args);
-      // Hand the attempt's signal to the child (spec §8.8/§9.4). Without it a cancelled run reports
+      // The attempt's signal kills the child (spec §8.8/§9.4). Without that a cancelled run reports
       // itself stopped while this process keeps spending tokens and writing files, a wall-time budget
       // fails the attempt but orphans the process it was supposed to bound, and — with no budget, the
       // default — an unresponsive subagent hangs the run with nothing able to interrupt it.
-      const result = await pi.exec(invocation.command, [...invocation.args], { signal: request.signal });
+      const result = await runSubagent(spawnSubagent, invocation.command, invocation.args, request.signal);
       if (request.signal?.aborted) {
         throw new Error(`background subagent step "${request.stepName}" was aborted`);
       }
       if (result.code !== 0) {
-        throw new Error(`background subagent step "${request.stepName}" exited with code ${result.code}: ${result.stderr.trim() || "(no stderr)"}`);
+        throw new Error(`background subagent step "${request.stepName}" exited with code ${result.code}: ${result.stderrTail.trim() || "(no stderr)"}`);
       }
 
-      // Read only the final assistant turn: parsing the whole conversation to take its last element
-      // is what took the container down on write-compressor (see `lastAssistantTurn`).
-      return lastAssistantTurn(result.stdout);
+      // Already reduced to the final assistant turn while the child was still running — nothing here
+      // ever held its stdout (see the header comment and `createAssistantTurnReader`).
+      return result.turn;
     },
     getConversation(): readonly ConversationMessage[] {
       return []; // one-shot: never resumed with seeded history (spec §2.2/§10.1 — background can't ask)

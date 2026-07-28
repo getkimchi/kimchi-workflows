@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { AgentRequest } from "../src/engine/types.ts";
 import { createAgentStep, createWorkflow } from "../src/flow/index.ts";
+import { assistantLine, scriptedSubagent } from "./fake-subagent.ts";
 import { createTestHost } from "./helpers.ts";
 import { scriptedAgent } from "./scripted-agent.ts";
 
@@ -137,25 +138,18 @@ describe("a resume key shared by several steps", () => {
 
 /** The PI host turns that key into a session file the harness writes and resumes; everything else stays ephemeral. */
 describe("the PI host's subagent invocation", () => {
+  const noopPi = { on: () => {} } as never;
+
   it("names a session file for a resumable step and stays ephemeral otherwise", async () => {
     const { createPiAgentBridge } = await import("../src/host/pi-agent.ts");
-    const spawned: string[][] = [];
-    const pi = {
-      on: () => {},
-      exec: async (_command: string, args: string[]) => {
-        spawned.push(args);
-        return {
-          code: 0,
-          stdout: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "{}" }], usage: { totalTokens: 1 } } }),
-          stderr: "",
-        };
-      },
-    } as never;
-    const start = createPiAgentBridge(pi, (args) => ({ command: "kimchi", args }))({ find: () => undefined } as never);
+    const { spawn, calls } = scriptedSubagent(assistantLine("{}", 1));
+    const start = createPiAgentBridge(noopPi, (args) => ({ command: "kimchi", args }), spawn)({ find: () => undefined } as never);
 
     await start({ stepName: "worker", background: true, resumeKey: "worker" }).sendAndAwaitEnd("go");
     await start({ stepName: "looker", background: true }).sendAndAwaitEnd("go");
 
+    const spawned = calls.map((call) => call.args);
+    expect(calls.map((call) => call.command)).toEqual(["kimchi", "kimchi"]);
     expect(spawned[0]).toContain("--session");
     expect(spawned[0]?.join(" ")).toContain("worker.jsonl");
     expect(spawned[0]).not.toContain("--no-session");
@@ -170,24 +164,13 @@ describe("the PI host's subagent invocation", () => {
 
   it("gives every non-resumable execution its own trace file, so none of them resumes another", async () => {
     const { createPiAgentBridge } = await import("../src/host/pi-agent.ts");
-    const spawned: string[][] = [];
-    const pi = {
-      on: () => {},
-      exec: async (_command: string, args: string[]) => {
-        spawned.push(args);
-        return {
-          code: 0,
-          stdout: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "{}" }], usage: { totalTokens: 1 } } }),
-          stderr: "",
-        };
-      },
-    } as never;
-    const start = createPiAgentBridge(pi, (args) => ({ command: "kimchi", args }))({ find: () => undefined } as never);
+    const { spawn, calls } = scriptedSubagent(assistantLine("{}", 1));
+    const start = createPiAgentBridge(noopPi, (args) => ({ command: "kimchi", args }), spawn)({ find: () => undefined } as never);
 
     await start({ stepName: "verify", background: true }).sendAndAwaitEnd("look");
     await start({ stepName: "verify", background: true }).sendAndAwaitEnd("look again");
 
-    const paths = spawned.map((args) => args[args.indexOf("--session") + 1]);
+    const paths = calls.map((call) => call.args[call.args.indexOf("--session") + 1]);
     expect(paths[0]).not.toBe(paths[1]);
     for (const p of paths) expect(p).toMatch(/traces[/\\]verify-/);
   });
@@ -213,28 +196,17 @@ describe("permission posture is inherited by spawned subagents", () => {
 
   it("puts the inherited flag on the spawned subagent's command line", async () => {
     const { createPiAgentBridge } = await import("../src/host/pi-agent.ts");
-    const spawned: string[][] = [];
-    const pi = {
-      on: () => {},
-      exec: async (_command: string, args: string[]) => {
-        spawned.push(args);
-        return {
-          code: 0,
-          stdout: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "{}" }], usage: { totalTokens: 1 } } }),
-          stderr: "",
-        };
-      },
-    } as never;
+    const { spawn, calls } = scriptedSubagent(assistantLine("{}", 1));
 
     const realArgv = process.argv;
     process.argv = [...realArgv, "--dangerously-skip-permissions"];
     try {
-      const start = createPiAgentBridge(pi, (args) => ({ command: "kimchi", args }))({ find: () => undefined } as never);
+      const start = createPiAgentBridge({ on: () => {} } as never, (args) => ({ command: "kimchi", args }), spawn)({ find: () => undefined } as never);
       await start({ stepName: "worker", background: true }).sendAndAwaitEnd("go");
     } finally {
       process.argv = realArgv;
     }
 
-    expect(spawned[0]).toContain("--dangerously-skip-permissions");
+    expect(calls[0]?.args).toContain("--dangerously-skip-permissions");
   });
 });

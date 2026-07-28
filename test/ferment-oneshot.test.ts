@@ -975,7 +975,6 @@ describe("ferment-oneshot: the shape", () => {
       expect(step.maxDurationMs, name).toBeUndefined();
     }
   });
-
 });
 
 /**

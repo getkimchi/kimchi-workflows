@@ -2,6 +2,7 @@ import type { AgentEndEvent, ExtensionAPI } from "@earendil-works/pi-coding-agen
 import { describe, expect, it } from "vitest";
 import { createPiAgentBridge } from "../src/host/pi-agent.ts";
 import type { ModelRegistry } from "../src/host/pi-agent-messages.ts";
+import { scriptedSubagent } from "./fake-subagent.ts";
 
 /**
  * The bridge's cross-talk safety (spec §2.2), driven directly against a fake PI — no engine, no
@@ -133,15 +134,8 @@ describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent tur
 
   it("background and isolated requests never touch the shared in-session guard (both go through the subprocess path)", async () => {
     const { pi, sentMessages } = fakePi();
-    const calls: { command: string; args: readonly string[] }[] = [];
-    const execPi = {
-      ...pi,
-      exec: async (command: string, args: string[]) => {
-        calls.push({ command, args });
-        return { stdout: "", stderr: "", code: 0, killed: false };
-      },
-    } as unknown as ExtensionAPI;
-    const startAgent = createPiAgentBridge(execPi, (args) => ({ command: "pi", args }))(fakeModelRegistry());
+    const { spawn, calls } = scriptedSubagent("");
+    const startAgent = createPiAgentBridge(pi, (args) => ({ command: "pi", args }), spawn)(fakeModelRegistry());
 
     await startAgent({ stepName: "bg", background: true }).sendAndAwaitEnd("go");
     await startAgent({ stepName: "fan", isolated: true }).sendAndAwaitEnd("go");

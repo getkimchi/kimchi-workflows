@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   type AgentMessages,
+  createAssistantTurnReader,
   lastAssistantText,
-  lastAssistantTurn,
   lastAssistantUsage,
   type ModelRegistry,
   parseNdjsonMessages,
@@ -175,41 +175,77 @@ describe("seedHistory", () => {
 
 /**
  * A background step needs the final assistant turn and nothing else, and must not pay for the rest of
- * the conversation to get it. Parsing every message to take the last one grew one run's parent process
- * from 324MB to 1.91GB while it read 367KB, and the container was killed.
+ * the conversation to get it — neither in parsed objects (parsing every message to take the last one
+ * grew one run's parent process from 324MB to 1.91GB while it read 367KB, and the container was killed)
+ * nor in raw stdout, which is why this reads the stream in pieces instead of taking one string.
+ *
+ * The pure half is covered here, chunked at deliberately awkward boundaries; that the bridge actually
+ * feeds it a live pipe, and retains nothing while doing so, is covered in pi-agent-background.test.ts.
  */
-describe("lastAssistantTurn", () => {
+describe("createAssistantTurnReader", () => {
   const end = (role: string, text: string, totalTokens: number) =>
     JSON.stringify({ type: "message_end", message: { role, content: [{ type: "text", text }], usage: { totalTokens } } });
 
+  /** The whole transcript as one chunk — a short subagent whose output arrived in a single read. */
+  const readAll = (ndjson: string) => {
+    const reader = createAssistantTurnReader();
+    reader.push(ndjson);
+    return reader.end();
+  };
+
+  /** The same transcript delivered `size` characters at a time, so lines straddle chunk boundaries. */
+  const readChunked = (ndjson: string, size: number) => {
+    const reader = createAssistantTurnReader();
+    for (let i = 0; i < ndjson.length; i += size) reader.push(ndjson.slice(i, i + size));
+    return reader.end();
+  };
+
   it("returns the final assistant turn's text and usage", () => {
     const ndjson = [end("assistant", "first", 1), end("user", "next", 0), end("assistant", "final", 7)].join("\n");
-    expect(lastAssistantTurn(ndjson)).toEqual({ text: "final", usage: { totalTokens: 7 } });
+    expect(readAll(ndjson)).toEqual({ text: "final", usage: { totalTokens: 7 } });
   });
 
   it("skips trailing non-assistant and unparseable lines", () => {
     const ndjson = [end("assistant", "the one", 3), end("user", "after", 0), "{not json", ""].join("\n");
-    expect(lastAssistantTurn(ndjson)).toEqual({ text: "the one", usage: { totalTokens: 3 } });
+    expect(readAll(ndjson)).toEqual({ text: "the one", usage: { totalTokens: 3 } });
   });
 
   it("agrees with the full parse it replaces, on the same input", () => {
     const ndjson = [end("assistant", "a", 1), end("assistant", "b", 2)].join("\n");
     const full = parseNdjsonMessages(ndjson);
-    expect(lastAssistantTurn(ndjson)).toEqual({ text: lastAssistantText(full), usage: lastAssistantUsage(full) });
+    expect(readAll(ndjson)).toEqual({ text: lastAssistantText(full), usage: lastAssistantUsage(full) });
   });
 
   it("is empty when there is no assistant message at all", () => {
-    expect(lastAssistantTurn(end("user", "hello", 0))).toEqual({ text: "", usage: undefined });
-    expect(lastAssistantTurn("")).toEqual({ text: "", usage: undefined });
+    expect(readAll(end("user", "hello", 0))).toEqual({ text: "", usage: undefined });
+    expect(readAll("")).toEqual({ text: "", usage: undefined });
   });
 
-  it("does not walk the whole stream: cost tracks the tail, not the conversation", () => {
-    // 20k earlier messages, deliberately malformed so any full parse would have to touch them all.
-    const noise = Array.from(
-      { length: 20_000 },
-      (_, i) => `{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"turn ${i}"}],"usage":{"totalTokens":1}}}`,
-    );
+  it("reads a final line that never got its newline — a killed child stops mid-stream", () => {
+    const reader = createAssistantTurnReader();
+    reader.push(`${end("assistant", "before", 1)}\n`);
+    reader.push(end("assistant", "unterminated", 4)); // no trailing newline, and no more chunks coming
+    expect(reader.end()).toEqual({ text: "unterminated", usage: { totalTokens: 4 } });
+  });
+
+  it("ignores a truncated last line rather than letting it lose the turn before it", () => {
+    const ndjson = `${[end("assistant", "complete", 5), end("user", "next", 0)].join("\n")}\n{"type":"message_end","messa`;
+    expect(readAll(ndjson)).toEqual({ text: "complete", usage: { totalTokens: 5 } });
+  });
+
+  it("gives the same answer however the stream is chopped up, including one character at a time", () => {
+    const ndjson = [end("assistant", "first", 1), end("user", "next", 0), end("assistant", "final ✓ ünïcøde", 7)].join("\n");
+    const expected = { text: "final ✓ ünïcøde", usage: { totalTokens: 7 } };
+    for (const size of [1, 2, 3, 7, 13, 64, 1000]) {
+      expect(readChunked(ndjson, size)).toEqual(expected);
+    }
+  });
+
+  it("keeps only the LAST assistant turn, not a list of the ones before it", () => {
+    // 20k earlier messages: the answer must be the last one whatever came before, and nothing here
+    // grows with the count (see pi-agent-background.test.ts for the measured version of that claim).
+    const noise = Array.from({ length: 20_000 }, (_, i) => end("assistant", `turn ${i}`, i));
     const ndjson = [...noise, end("assistant", "last", 9)].join("\n");
-    expect(lastAssistantTurn(ndjson)).toEqual({ text: "last", usage: { totalTokens: 9 } });
+    expect(readAll(ndjson)).toEqual({ text: "last", usage: { totalTokens: 9 } });
   });
 });

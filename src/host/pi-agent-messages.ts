@@ -74,38 +74,83 @@ function isMessageEndEvent(value: unknown): value is { type: "message_end"; mess
   return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "message_end" && "message" in value;
 }
 
+/** An incremental reader over a subagent's NDJSON stdout — see {@link createAssistantTurnReader}. */
+export interface AssistantTurnReader {
+  /** Feed the next decoded stdout chunk. Complete lines are read and dropped; a partial one is held. */
+  push(chunk: string): void;
+  /** Read whatever partial line is left and return the last assistant turn seen (empty if there was none). */
+  end(): { text: string; usage?: TokenUsage };
+}
+
 /**
- * The last assistant turn in a subagent's NDJSON stdout, read WITHOUT materialising the rest.
+ * Read the last assistant turn out of a subagent's NDJSON stdout AS IT ARRIVES, keeping neither the
+ * stream nor the conversation.
  *
  * A background step needs exactly two things from a whole subprocess conversation: the final assistant
  * text and its usage (`getConversation()` returns `[]` for these — a one-shot subagent is never resumed
- * with seeded history). Building the full message list to read its last element is therefore pure waste,
- * and on a long subagent it is ruinous: parsed JS objects run an order of magnitude or more above the
- * text they came from, so a stream of tens of MB becomes GBs of live objects in one synchronous pass.
+ * with seeded history). Both of the obvious ways to get there cost the parent the child's whole output,
+ * and both were measured doing it:
  *
- * Measured, on the `write-compressor` task that killed its container three runs running: the parent grew
- * **324MB -> 1.91GB in about two minutes while reading 367KB**, with the subagent already exited. Not a
- * buffering problem — a parsing one. Scanning backwards for the last assistant message touches a handful
- * of trailing lines and holds one message, so cost stops tracking conversation length at all.
+ *   1. Parsing every message to take the last one. On the `write-compressor` task that killed its
+ *      container three runs running, the parent grew **324MB -> 1.91GB in about two minutes while
+ *      reading 367KB**, with the subagent already exited — parsed JS objects run an order of magnitude
+ *      or more above the text they came from.
+ *   2. Holding the stdout string whole (what `pi.exec` hands back) and scanning its tail. Cheap in
+ *      objects, but the parent still pays one byte for every byte the child ever printed, and a chatty
+ *      subagent prints hundreds of MB.
+ *
+ * So this reads forwards, one line at a time, and retains only the most recent assistant `message_end`
+ * it has decoded into `{ text, usage }` — the same two fields the caller will ask for. Steady-state cost
+ * is one message's text plus the partial line straddling the current chunk boundary; the transient peak
+ * adds one line and the object `JSON.parse` makes of it, which is unavoidable for anything that must
+ * read that message at all. Nothing here scales with how long the conversation ran.
+ *
+ * Pure (no process/stream access — the caller owns the pipe), so it is unit-testable offline against
+ * captured fixture lines, chunked at arbitrary boundaries. Malformed JSON and unrecognized event types
+ * are skipped rather than failing the read, exactly as `parseNdjsonMessages` above skips them: a real
+ * transcript interleaves `tool_call`/`turn_start`/… lines this reader has no need of, and a killed child
+ * leaves a truncated final line.
  */
-export function lastAssistantTurn(ndjson: string): { text: string; usage?: TokenUsage } {
-  for (let end = ndjson.length; end > 0; ) {
-    const newline = ndjson.lastIndexOf("\n", end - 1);
-    const line = ndjson.slice(newline + 1, end).trim();
-    end = newline;
-    if (!line) continue;
+export function createAssistantTurnReader(): AssistantTurnReader {
+  let pending = ""; // the tail of the last chunk, up to the next newline — never a whole stream
+  let last: { text: string; usage?: TokenUsage } | undefined;
+
+  const readLine = (line: string): void => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
     let event: unknown;
     try {
-      event = JSON.parse(line);
+      event = JSON.parse(trimmed);
     } catch {
-      continue; // a partial or non-JSON trailing line, same tolerance parseNdjsonMessages has
+      return; // a partial or non-JSON line, same tolerance parseNdjsonMessages has
     }
-    if (!isMessageEndEvent(event)) continue;
+    if (!isMessageEndEvent(event)) return;
     const message = event.message as AgentMessages[number];
-    if (!(message && "role" in message && message.role === "assistant")) continue;
-    return { text: lastAssistantText([message]), usage: lastAssistantUsage([message]) };
-  }
-  return { text: "", usage: undefined };
+    if (!(message && "role" in message && message.role === "assistant")) return;
+    // Decode to the two fields we keep and let the parsed message go — replacing the previous last,
+    // never appending to a list.
+    last = { text: lastAssistantText([message]), usage: lastAssistantUsage([message]) };
+  };
+
+  return {
+    push(chunk: string): void {
+      pending += chunk;
+      let start = 0;
+      for (let newline = pending.indexOf("\n"); newline !== -1; newline = pending.indexOf("\n", start)) {
+        readLine(pending.slice(start, newline));
+        start = newline + 1;
+      }
+      if (start > 0) pending = pending.slice(start);
+    },
+    end(): { text: string; usage?: TokenUsage } {
+      if (pending) {
+        const rest = pending;
+        pending = "";
+        readLine(rest);
+      }
+      return last ?? { text: "", usage: undefined };
+    },
+  };
 }
 
 /**
