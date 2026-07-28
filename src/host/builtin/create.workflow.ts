@@ -12,7 +12,7 @@
  *     design         Q&A agent           — interview → propose (or revise) a plan
  *     approve        questionnaire       — approve this plan, or ask for changes
  *   until-valid    loop                — generate the source, load it back, retry on failure
- *   write          function            — write the validated source into .pi/workflows/
+ *   write          function            — write the validated source into the project's workflows dir
  *
  * A block is now legal anywhere in the tree (spec §8.5), so the Approve/Revise cycle is an ordinary
  * `.dountil` loop around a real questionnaire step, rather than a whole interview crammed into one
@@ -27,7 +27,8 @@ import { type Static, Type } from "typebox";
 import { createAgentStep, createQuestionnaireStep, createStep, createWorkflow } from "../../flow/index.ts";
 import type { RunContext } from "../../flow/types.ts";
 import { loadWorkflowFile } from "../load-workflow.ts";
-import { WORKFLOW_SUFFIX, workflowsDir } from "../workflow-catalog.ts";
+import { appName, workflowsDir } from "../project-dir.ts";
+import { WORKFLOW_SUFFIX } from "../workflow-catalog.ts";
 
 /** Initial input: the extension supplies the project root so steps can resolve paths without a cwd assumption. */
 export const createInputSchema = Type.Object({ projectRoot: Type.String() });
@@ -49,7 +50,7 @@ export const specSchema = Type.Object({
 
 const briefSchema = Type.Object({
   goal: Type.String({ title: "Goal", description: "What should this workflow do?", chat: true }),
-  fileName: Type.String({ title: "File name", description: "File to write, e.g. `deploy.workflow.ts` (saved under .pi/workflows/)." }),
+  fileName: Type.String({ title: "File name", description: `File to write, e.g. \`deploy.workflow.ts\` (saved under .${appName()}/workflows/).` }),
 });
 
 /** The Approve/Revise decision (spec §6.6) — a plain questionnaire, since it only ever collects a choice + optional feedback. */
@@ -248,9 +249,10 @@ const generate = createAgentStep({
 });
 
 /**
- * Where the generated workflow will land. A bare name goes to `.pi/workflows/` so the new workflow is
- * immediately discoverable by `/workflow list` and runnable by name; anything containing a separator
- * is a path relative to the project root.
+ * Where the generated workflow will land. A bare name goes to the project's workflows directory
+ * (`.<app>/workflows/`, project-dir.ts) so the new workflow is immediately discoverable by
+ * `/workflow list` and runnable by name; anything containing a separator is a path relative to the
+ * project root.
  */
 function resolveTarget(ctx: RunContext): string {
   const { projectRoot } = ctx.getInitData<{ projectRoot: string }>() ?? { projectRoot: process.cwd() };

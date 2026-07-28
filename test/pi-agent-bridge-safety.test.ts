@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import { createPiAgentBridge } from "../src/host/pi-agent.ts";
 import type { ModelRegistry } from "../src/host/pi-agent-messages.ts";
 import { scriptedSubagent } from "./fake-subagent.ts";
+import { agentRequest, tempSessionsDir } from "./helpers.ts";
+
+/** Where the bridge under test writes its step sessions (the real host binds the harness's own session dir). */
+const sessionsDir = tempSessionsDir();
 
 /**
  * The bridge's cross-talk safety (spec §2.2), driven directly against a fake PI — no engine, no
@@ -63,10 +67,10 @@ function fakeModelRegistry(): ModelRegistry {
 describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent turns can never cross-talk", () => {
   it("a second in-session turn attempted while one is in flight is rejected loudly and specifically, never silently swapped in", async () => {
     const { pi, fireAgentEnd, sentMessages } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
 
-    const stepA = startAgent({ stepName: "step-a" });
-    const stepB = startAgent({ stepName: "step-b" });
+    const stepA = startAgent(agentRequest({ stepName: "step-a" }));
+    const stepB = startAgent(agentRequest({ stepName: "step-b" }));
 
     // Step A starts its in-session turn: goes through to `pi.sendUserMessage`, stays pending.
     const turnA = stepA.sendAndAwaitEnd("prompt from A");
@@ -86,10 +90,10 @@ describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent tur
 
   it("never resolves one step's turn with another step's reply, regardless of send order", async () => {
     const { pi, fireAgentEnd } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
 
-    const stepA = startAgent({ stepName: "step-a" });
-    const stepB = startAgent({ stepName: "step-b" });
+    const stepA = startAgent(agentRequest({ stepName: "step-a" }));
+    const stepB = startAgent(agentRequest({ stepName: "step-b" }));
 
     const turnA = stepA.sendAndAwaitEnd("prompt from A");
     const rejectedTurnB = stepB.sendAndAwaitEnd("prompt from B").catch((err: Error) => err);
@@ -103,14 +107,14 @@ describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent tur
 
   it("after A's turn settles, a fresh in-session turn is accepted normally (the guard is not sticky)", async () => {
     const { pi, fireAgentEnd, sentMessages } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
 
-    const stepA = startAgent({ stepName: "step-a" });
+    const stepA = startAgent(agentRequest({ stepName: "step-a" }));
     const turnA = stepA.sendAndAwaitEnd("prompt from A");
     fireAgentEnd("reply for A");
     await expect(turnA).resolves.toEqual({ text: "reply for A", usage: { totalTokens: 1 } });
 
-    const stepB = startAgent({ stepName: "step-b" });
+    const stepB = startAgent(agentRequest({ stepName: "step-b" }));
     const turnB = stepB.sendAndAwaitEnd("prompt from B");
     fireAgentEnd("reply for B");
     await expect(turnB).resolves.toEqual({ text: "reply for B", usage: { totalTokens: 1 } });
@@ -120,10 +124,10 @@ describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent tur
 
   it("dispose() only clears a session's OWN in-flight turn, never a sibling's", async () => {
     const { pi, fireAgentEnd } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
 
-    const stepA = startAgent({ stepName: "step-a" });
-    const stepB = startAgent({ stepName: "step-b" }); // never starts a turn
+    const stepA = startAgent(agentRequest({ stepName: "step-a" }));
+    const stepB = startAgent(agentRequest({ stepName: "step-b" })); // never starts a turn
 
     const turnA = stepA.sendAndAwaitEnd("prompt from A");
     stepB.dispose(); // must be a no-op w.r.t. A's in-flight turn
@@ -135,10 +139,10 @@ describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent tur
   it("background and isolated requests never touch the shared in-session guard (both go through the subprocess path)", async () => {
     const { pi, sentMessages } = fakePi();
     const { spawn, calls } = scriptedSubagent("");
-    const startAgent = createPiAgentBridge(pi, (args) => ({ command: "pi", args }), spawn)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(pi, (args) => ({ command: "pi", args }), spawn)(fakeModelRegistry(), sessionsDir);
 
-    await startAgent({ stepName: "bg", background: true }).sendAndAwaitEnd("go");
-    await startAgent({ stepName: "fan", isolated: true }).sendAndAwaitEnd("go");
+    await startAgent(agentRequest({ stepName: "bg", background: true })).sendAndAwaitEnd("go");
+    await startAgent(agentRequest({ stepName: "fan", isolated: true })).sendAndAwaitEnd("go");
 
     expect(calls).toHaveLength(2); // both routed to the subprocess path
     expect(sentMessages).toEqual([]); // neither ever called `pi.sendUserMessage`
@@ -159,9 +163,9 @@ describe("createPiAgentBridge history seeding (spec §8.4): an answer-resume's s
 
   it("prepends the resumed session's history onto every outgoing `context` call, across repeated turns in that session", async () => {
     const { pi, fireContext, fireAgentEnd } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
 
-    const resumed = startAgent({ stepName: "plan", history });
+    const resumed = startAgent(agentRequest({ stepName: "plan", history }));
 
     const turnA = resumed.sendAndAwaitEnd("answered: Redis");
     expect(fireContext([{ role: "user", content: "answered: Redis" }])).toEqual({
@@ -182,9 +186,9 @@ describe("createPiAgentBridge history seeding (spec §8.4): an answer-resume's s
 
   it("leaves a fresh (no-history) session's `context` calls untouched — no regression to the common in-process path", async () => {
     const { pi, fireContext, fireAgentEnd } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
 
-    const fresh = startAgent({ stepName: "plan" }); // no `history` — the ordinary fresh-run request
+    const fresh = startAgent(agentRequest({ stepName: "plan" })); // no `history` — the ordinary fresh-run request
     const turn = fresh.sendAndAwaitEnd("fresh prompt");
 
     expect(fireContext([{ role: "user", content: "fresh prompt" }])).toBeUndefined();
@@ -195,15 +199,15 @@ describe("createPiAgentBridge history seeding (spec §8.4): an answer-resume's s
 
   it("stops seeding once the session disposes, so a later fresh session is never contaminated by a stale seed", async () => {
     const { pi, fireContext, fireAgentEnd } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
 
-    const resumed = startAgent({ stepName: "plan", history });
+    const resumed = startAgent(agentRequest({ stepName: "plan", history }));
     const turnA = resumed.sendAndAwaitEnd("answered: Redis");
     fireAgentEnd("planning with Redis");
     await turnA;
     resumed.dispose();
 
-    const next = startAgent({ stepName: "plan" }); // a later, unrelated fresh session
+    const next = startAgent(agentRequest({ stepName: "plan" })); // a later, unrelated fresh session
     const turnB = next.sendAndAwaitEnd("next prompt");
     expect(fireContext([{ role: "user", content: "next prompt" }])).toBeUndefined(); // no leftover seed
     fireAgentEnd("reply");
@@ -212,10 +216,10 @@ describe("createPiAgentBridge history seeding (spec §8.4): an answer-resume's s
 
   it("dispose() only clears a session's OWN history seed, never a sibling's (mirrors the in-flight guard)", async () => {
     const { pi, fireContext, fireAgentEnd } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
 
-    const resumed = startAgent({ stepName: "plan", history });
-    const other = startAgent({ stepName: "other" }); // never starts a turn, has no history of its own
+    const resumed = startAgent(agentRequest({ stepName: "plan", history }));
+    const other = startAgent(agentRequest({ stepName: "other" })); // never starts a turn, has no history of its own
     other.dispose(); // must be a no-op w.r.t. `resumed`'s active seed
 
     const turn = resumed.sendAndAwaitEnd("answered: Redis");

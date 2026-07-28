@@ -4,7 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import createWorkflowWorkflow from "../src/host/builtin/create.workflow.ts";
 import { loadWorkflowFile } from "../src/host/load-workflow.ts";
-import { workflowsDir } from "../src/host/workflow-catalog.ts";
+import { workflowsDir } from "../src/host/project-dir.ts";
 import { ask, createTestRun, reply } from "../src/testing/index.ts";
 
 /**
@@ -36,7 +36,7 @@ const clarify = ask({ questions: [{ key: "detail", header: "Detail", question: "
 const projectRoot = () => mkdtemp(path.join(tmpdir(), "pi-create-"));
 
 describe("/workflow create meta-workflow", () => {
-  it("interviews, revises on request, approves, and writes the approved workflow into .pi/workflows/ (spec §6.6)", async () => {
+  it("interviews, revises on request, approves, and writes the approved workflow into the project's workflows dir (spec §6.6)", async () => {
     const root = await projectRoot();
 
     // 1. The opening form (deterministic, no LLM).

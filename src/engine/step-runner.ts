@@ -122,10 +122,10 @@ export async function runAgentStep(
   let carry = entry.kind === "answer" ? { elapsedMs: entry.elapsedMs ?? 0, tokensUsed: entry.tokensUsed ?? 0 } : undefined;
   const carryOverMs = carry?.elapsedMs ?? 0;
 
-  const attempt = (sig: AbortSignal): Promise<AttemptResult> => {
+  const attempt = (sig: AbortSignal, attemptNumber: number): Promise<AttemptResult> => {
     const startingTokens = carry?.tokensUsed ?? 0;
     carry = undefined;
-    return runAgentSession(step, input, host, ctx, state, sig, path, entry, startingTokens);
+    return runAgentSession(step, input, host, ctx, state, sig, path, entry, attemptNumber, startingTokens);
   };
 
   // An unsteerable step gets one repeat by default (spec §9.1/§9.2). A steerable step's first invalid
@@ -149,7 +149,9 @@ async function retryLoop(
   state: RunState,
   runSignal: AbortSignal,
   path: string,
-  attempt: (signal: AbortSignal) => Promise<AttemptResult>,
+  // The 1-based attempt number travels INTO the attempt (rather than staying a loop-local counter)
+  // because a host that persists a session names the file after it — see `AgentRequest.attempt`.
+  attempt: (signal: AbortSignal, attemptNumber: number) => Promise<AttemptResult>,
   budgetMs: number | undefined,
   carryOverMs = 0,
   defaultMaxRetry = 0,
@@ -163,7 +165,7 @@ async function retryLoop(
 
     // The budget carry (spec §9.4) applies only to this loop's FIRST attempt — the one continuing an
     // interrupted block. A subsequent retry (n > 1) is a fresh attempt and gets a clean budget.
-    const result = await withTimeBudget(step, budgetMs, host, runSignal, attempt, n === 1 ? carryOverMs : 0);
+    const result = await withTimeBudget(step, budgetMs, host, runSignal, (sig) => attempt(sig, n), n === 1 ? carryOverMs : 0);
     if (result.kind === "cancelled") return { kind: "cancelled" };
     if (result.kind === "ok") return { kind: "ok", output: result.output };
     if (result.kind === "blocked") {
@@ -283,6 +285,7 @@ async function runAgentSession(
   signal: AbortSignal,
   path: string,
   entry: AgentEntry,
+  attempt: number,
   startingTokens = 0,
 ): Promise<AttemptResult> {
   const model = step.model ?? state.defaultModel; // step → workflow default; host applies the session default when undefined (spec §9.5)
@@ -309,6 +312,13 @@ async function runAgentSession(
     model,
     history,
     stepName: step.name,
+    // Run/execution identity (spec §8.5): everything a host needs to give this session a durable name
+    // of its own — see `AgentRequest.runId`. All four are already here; none of them changes what the
+    // engine does with the session.
+    runId: state.runId,
+    workflowName: state.workflowName,
+    path,
+    attempt,
     background: step.background,
     isolated,
     resumeKey: resolveResumeKey(step),

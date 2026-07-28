@@ -15,7 +15,7 @@ import type { WorkflowDefinition } from "../flow/types.ts";
  *
  * A workflow file is loaded from the *project's* directory, and Node resolves its bare imports from
  * there — not from wherever this engine happens to live. So `import { Type } from "typebox"` in
- * `<project>/.pi/workflows/foo.workflow.ts` fails unless that project has its own `node_modules`,
+ * `<project>/.<app>/workflows/foo.workflow.ts` fails unless that project has its own `node_modules`,
  * which is a strange thing to demand of a repo whose only crime is wanting a workflow.
  *
  * PI solves the identical problem for extensions the same way (its loader maps `typebox` & friends to

@@ -1,6 +1,6 @@
 import type { RunEvent } from "../engine/types.ts";
 import { summarizeRun } from "./summarize-run.ts";
-import type { RunMeta, RunStore, RunSummary } from "./types.ts";
+import type { RunStore, RunSummary } from "./types.ts";
 
 /**
  * An in-memory store, plus the whole log as one ordered sequence.
@@ -20,7 +20,6 @@ export interface MemoryStore extends RunStore {
  */
 export function createMemoryStore(): MemoryStore {
   const eventsByRun = new Map<string, RunEvent[]>();
-  const metaByRun = new Map<string, RunMeta>();
   const log: RunEvent[] = [];
 
   return {
@@ -39,15 +38,8 @@ export function createMemoryStore(): MemoryStore {
     async loadEvents(runId: string): Promise<RunEvent[]> {
       return [...(eventsByRun.get(runId) ?? [])];
     },
-    async saveMeta(runId: string, meta: RunMeta): Promise<void> {
-      metaByRun.set(runId, meta);
-    },
-    async loadMeta(runId: string): Promise<RunMeta | undefined> {
-      return metaByRun.get(runId);
-    },
     async delete(runId: string): Promise<void> {
       eventsByRun.delete(runId);
-      metaByRun.delete(runId);
       // Keep the flat log consistent with the per-run view: a deleted run leaves no trace (spec §6.5).
       for (let i = log.length - 1; i >= 0; i--) {
         if (log[i]?.runId === runId) log.splice(i, 1);

@@ -4,14 +4,14 @@ import path from "node:path";
 import { createJiti } from "jiti";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadWorkflowFile } from "../src/host/load-workflow.ts";
-import { workflowsDir } from "../src/host/workflow-catalog.ts";
+import { workflowsDir } from "../src/host/project-dir.ts";
 import { createTestRun } from "../src/testing/index.ts";
 
 /**
  * Authoring a workflow OUTSIDE this repo, in a project that has installed nothing.
  *
  * This is the case the engine exists to serve and the one the repo could not previously reach: a
- * project whose only workflow-related asset is a `.pi/workflows/*.workflow.ts` file. Its bare imports
+ * project whose only workflow-related asset is a `.<app>/workflows/*.workflow.ts` file. Its bare imports
  * resolve from ITS directory, so before `loadWorkflowFile` supplied the modules itself, this failed on
  * `Cannot find module 'typebox'` — see the negative control below, which proves the temp project
  * really is dependency-free and that these tests are not passing by accident.

@@ -21,6 +21,7 @@ import type { WorkflowDefinition } from "../../src/flow/index.ts";
 import { createFsStore } from "../../src/host/fs-store.ts";
 import { createHostPort } from "../../src/host/host-port.ts";
 import { createPiAgentBridge } from "../../src/host/pi-agent.ts";
+import { runArtifactsDir } from "../../src/host/project-dir.ts";
 import fermentOneshot from "./ferment/ferment-oneshot.workflow.ts";
 import tbSolver from "./tb-solver.workflow.ts";
 
@@ -71,7 +72,7 @@ function log(message: string): void {
  * little before the harness's and aborts the run itself, which the engine propagates into every
  * in-flight subagent (`AgentRequest.signal`), leaving the machine in a settled state.
  */
-async function solve(instruction: string, startAgent: (request: AgentRequest) => AgentSession, cwd: string): Promise<void> {
+async function solve(instruction: string, startAgent: (request: AgentRequest) => AgentSession, cwd: string, runDir: string): Promise<void> {
   const budgetSec = Math.max(30, readTimeoutSec() - SAFETY_MARGIN_SEC);
   const deadlineIso = new Date(Date.now() + budgetSec * 1000).toISOString();
 
@@ -86,7 +87,7 @@ async function solve(instruction: string, startAgent: (request: AgentRequest) =>
   process.once("SIGINT", onSignal);
 
   try {
-    const store = createFsStore(process.env.TB_LOG_DIR ?? cwd);
+    const store = createFsStore(runDir);
     const host = createHostPort(store, { startAgent });
     const workflow = selectWorkflow();
 
@@ -117,7 +118,12 @@ export default function terminalBenchAgent(pi: ExtensionAPI): void {
 
     running = true;
     try {
-      await solve(instruction, bindAgentStarter(ctx.modelRegistry), ctx.cwd);
+      // One directory for everything this run writes — its event log and every step session (spec
+      // §8.9/§2.2). `ctx` is where the harness's session directory becomes knowable, so it is resolved
+      // here and bound into both the store and the agent starter. `TB_LOG_DIR` still overrides it
+      // outright, so a trial can park the whole record somewhere harbor collects.
+      const runDir = process.env.TB_LOG_DIR ?? runArtifactsDir(ctx.cwd, ctx.sessionManager.getSessionDir());
+      await solve(instruction, bindAgentStarter(ctx.modelRegistry, runDir), ctx.cwd, runDir);
     } finally {
       running = false;
     }

@@ -15,30 +15,37 @@ import type { RunLock } from "../run-lock.ts";
 import { summarizeRun } from "../summarize-run.ts";
 import type { RunStore } from "../types.ts";
 import { askOf, handleAttendedQuestionnaire, pendingAsk } from "./attended.ts";
-import { type CommandCtx, describe, notifier, notifyResult, rejectIfBusy, runGuarded, type StartAgent } from "./context.ts";
+import { type CommandCtx, describe, notifier, notifyResult, rejectIfBusy, resolveRunRef, runGuarded, type StartAgent } from "./context.ts";
 
-export async function handleResume(ctx: CommandCtx, store: RunStore, guard: RunLock, startAgent: StartAgent, runId: string): Promise<void> {
+export async function handleResume(ctx: CommandCtx, store: RunStore, guard: RunLock, startAgent: StartAgent, runRef: string): Promise<void> {
   if (rejectIfBusy(ctx, guard, "resuming")) return;
 
-  const meta = await store.loadMeta(runId);
-  if (!meta) return void ctx.ui.notify(`workflow: no run "${runId}" to resume.`, "error");
+  const runId = await resolveRunRef(ctx, store, runRef, "resume");
+  if (!runId) return; // unknown or ambiguous — already notified
 
-  const workflow = await loadWorkflowFile(meta.workflowFilePath).catch((err: unknown) => {
-    ctx.ui.notify(`workflow: failed to reload "${meta.workflowFilePath}" for resume: ${describe(err)}`, "error");
-    return undefined;
-  });
-  if (!workflow) return;
-
+  // The log FIRST, and the workflow file out of it: provenance is a `run-meta` event now (spec §8.9),
+  // not a sidecar, so there is nothing else to consult. A log with no `run-meta` is one this build
+  // cannot resume — pre-slug runs are inert by design (no migration), and saying so plainly beats
+  // guessing at a path.
   const events = await store.loadEvents(runId);
   const status = summarizeRun(events)?.status;
   if (!status) return void ctx.ui.notify(`workflow: run "${runId}" has no recorded events.`, "error");
+
+  const workflowFilePath = events.find((event) => event.type === "run-meta")?.workflowFilePath;
+  if (!workflowFilePath) return void ctx.ui.notify(`workflow: run ${runId} does not record which workflow file it was launched from; it cannot be resumed.`, "error");
+
+  const workflow = await loadWorkflowFile(workflowFilePath).catch((err: unknown) => {
+    ctx.ui.notify(`workflow: failed to reload "${workflowFilePath}" for resume: ${describe(err)}`, "error");
+    return undefined;
+  });
+  if (!workflow) return;
 
   // Pure routing (spec §5.2): blocked → answer path; crashed/cancelled → re-run; completed → error.
   const action = resumeAction(status);
   if (action.kind === "error") return void ctx.ui.notify(`workflow: cannot resume run ${runId}: ${action.reason}.`, "warning");
 
   if (action.kind === "answer") {
-    await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, meta.workflowFilePath, startAgent, runId, pendingAsk(events));
+    await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, workflowFilePath, startAgent, runId, pendingAsk(events));
     return;
   }
 
@@ -50,7 +57,7 @@ export async function handleResume(ctx: CommandCtx, store: RunStore, guard: RunL
   if (!result) return; // guard was busy (race) — already notified
 
   if (result.status === "blocked") {
-    await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, meta.workflowFilePath, startAgent, runId, askOf(result));
+    await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, workflowFilePath, startAgent, runId, askOf(result));
   } else {
     notifyResult(ctx, workflow.name, result);
   }

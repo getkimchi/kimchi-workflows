@@ -375,8 +375,11 @@ The file is shown because two workflows may declare the same name, which `run` t
 rejects as ambiguous; such rows are flagged. Files that fail to load are reported
 rather than omitted. *(decision)*
 
-6.8. **Workflow catalog.** A project's workflows live in `<project>/.pi/workflows/`
-as `*.workflow.ts`, alongside the run store (§8.9); discovery filters on the suffix.
+6.8. **Workflow catalog.** A project's workflows live in
+`<project>/.<app>/workflows/` as `*.workflow.ts`, where `<app>` is the running
+harness's own name (§8.9); discovery filters on the suffix. The directory holds
+authored sources and the execution lock (§7.2) — never a run's own records, which
+live with the harness's sessions (§8.9).
 
 Discovery imports every candidate to read its declared name, so workflow modules
 must have no import-time side effects. Because that executes project code,
@@ -392,9 +395,13 @@ until deleted (§6.5). A `blocked` run does **not** block new work. Concurrency
 *within* a run (§3.4/§3.5) is unaffected by this rule: it bounds runs, not steps.
 *(decision)*
 
-7.2. **The guard is a lock in the run store**, not a status read — a status can be
+7.2. **The guard is a lock in the project**, not a status read — a status can be
 stale, a lock cannot lie about who holds it. An executing run holds
-`.pi/workflows/run.lock` recording `{ runId, pid, host, startedAt }`. `/workflow run`
+`<project>/.<app>/workflows/.run.lock` recording `{ runId, pid, host, startedAt }`.
+It sits with the authored sources (§6.8) rather than with a run's own records
+(§8.9), because "one executing run" is a fact about the *project* and must hold
+whatever session directory a given invocation happens to write to; it is
+dot-prefixed so the authoring directory still lists only workflow sources. `/workflow run`
 and `/workflow resume` acquire it and are rejected while it is held, naming the run
 that holds it. Acquisition is **atomic** (exclusive create), so two contenders racing
 for a free or reclaimable lock cannot both win. This is what makes the rule hold across concurrent PI sessions on the
@@ -507,14 +514,31 @@ Already-applied side effects (files, commits, PRs, commands) are **not** rolled 
 The run is recoverable — `resume` continues from the last checkpoint (§5.5).
 *(decision)*
 
-8.9. **Run store (per project).** Runs and their event logs persist in a
-**per-project** store under `<project>/.pi/workflows/`, keyed by `run-id`,
-independent of any single session — so `list` / `resume` / `delete` work across
-sessions and harness restarts. Each run records its workflow `name`/`id` and **file
-path** (§1.5) so `resume` can reload the definition (§8.7). The store also holds the
-execution lock (§7.2). Because discovery filters on the `*.workflow.ts` suffix
-(§6.8), definitions and run records share the directory without colliding. `delete`
-(§6.5) removes a stopped run from this store. *(decision)*
+8.9. **Run store.** Runs and their event logs persist keyed by `run-id`, independent
+of any single session — so `list` / `resume` / `delete` work across sessions and
+harness restarts. A run is **one file**, `<run-id>.events.jsonl`: its workflow `name`
+and **file path** (§1.5) are recorded as an event *in that log* rather than in a
+sidecar, so a log is self-describing wherever it is read and `resume` can reload the
+definition (§8.7) from it alone. `delete` (§6.5) removes it.
+
+The store lives in the **harness's own session directory**, one level down in
+`workflow/`, alongside the step session files a run spawns (§2.2) — most of what a
+run writes *is* a session, and one location for all of it honours a relocated session
+directory for free. The subdirectory is load-bearing: the harness enumerates sessions
+non-recursively, so a child directory is invisible to "continue my last session" and
+to the session pickers, which a fan-out depositing one file per item would otherwise
+flood. When the harness has no session directory at all (an ephemeral, session-less
+invocation), the store falls back to `<project>/.<app>/workflows/runs/`, with no
+subdirectory — nothing enumerates a project directory. `<app>` is the running
+harness's own name, read from it rather than hardcoded, so a product other than `pi`
+keeps its own project directory (`.kimchi/…`) instead of being given one.
+
+A `run-id` is **readable and retypeable**: `workflow-<workflow-name>-<8 hex>`, minted
+against the store so a name shared by many runs cannot collide. It is the single
+identity — the log's filename, the tag inside every step session filename, and the
+argument `resume` / `cancel` / `delete` take, which they accept in full, as the bare
+hash, or as any unambiguous prefix; several matches are refused with the candidates
+named rather than resolved by guessing. *(decision)*
 
 ## 9. Retry, failure & budgets
 

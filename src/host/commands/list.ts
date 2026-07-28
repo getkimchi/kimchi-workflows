@@ -6,8 +6,9 @@
  * talk to the user and are unit-testable with a notify spy.
  */
 import path from "node:path";
+import { workflowsDir } from "../project-dir.ts";
 import type { RunStore } from "../types.ts";
-import { discoverWorkflows, workflowsDir } from "../workflow-catalog.ts";
+import { discoverWorkflows } from "../workflow-catalog.ts";
 import type { NotifyCtx } from "./context.ts";
 
 /** `/workflow run list` — the recorded runs (spec §6.3). */

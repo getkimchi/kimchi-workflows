@@ -7,6 +7,7 @@
  */
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRequest, AgentSession, RunResult } from "../../engine/types.ts";
+import { matchRunId } from "../naming.ts";
 import type { BeginResult, RunLock } from "../run-lock.ts";
 import type { RunStore } from "../types.ts";
 
@@ -79,6 +80,29 @@ export function rejectIfBusy(ctx: NotifyCtx, guard: RunLock, verb: string): bool
   if (!guard.active) return false;
   ctx.ui.notify(`workflow: run ${guard.active.runId} is already active; cancel it or wait before ${verb} another.`, "warning");
   return true;
+}
+
+/**
+ * Turn a `resume`/`cancel`/`delete` argument into a run-id, or notify why it cannot be one and return
+ * `undefined` (spec §6.2/§6.4/§6.5).
+ *
+ * Run-ids are slugs now (naming.ts), which are readable but long, so what the user types is matched the
+ * way the harness matches its own session ids: exact first, then the short hash, then any unique prefix.
+ * Several matches are reported WITH the candidates rather than resolved by picking one — two of these
+ * three commands destroy state. `verb` completes "no run … to <verb>", so callers read as the user does.
+ */
+export async function resolveRunRef(ctx: NotifyCtx, store: Pick<RunStore, "list">, arg: string, verb: string): Promise<string | undefined> {
+  const match = matchRunId(
+    (await store.list()).map((run) => run.runId),
+    arg,
+  );
+  if (match.kind === "ok") return match.runId;
+  if (match.kind === "ambiguous") {
+    ctx.ui.notify(`workflow: "${arg}" matches ${match.candidates.length} runs (${match.candidates.join(", ")}); use a longer prefix or the full run-id.`, "warning");
+    return undefined;
+  }
+  ctx.ui.notify(`workflow: no run "${arg}" to ${verb}.`, "error");
+  return undefined;
 }
 
 /** Report a run's terminal (or blocked) outcome to the user (spec §5.1). */

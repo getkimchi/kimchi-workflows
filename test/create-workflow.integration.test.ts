@@ -11,7 +11,7 @@ import type { WorkflowDefinition } from "../src/flow/types.ts";
 import { forEachNode } from "../src/flow/types.ts";
 import createWorkflowWorkflow from "../src/host/builtin/create.workflow.ts";
 import { loadWorkflowFile } from "../src/host/load-workflow.ts";
-import { workflowsDir } from "../src/host/workflow-catalog.ts";
+import { workflowsDir } from "../src/host/project-dir.ts";
 import { createTestRun, raw, reply } from "../src/testing/index.ts";
 import { createTestHost } from "./helpers.ts";
 import { createKimiAgentStarter, resolveKimiApiKey } from "./kimi-agent.ts";
@@ -21,7 +21,7 @@ import { createKimiAgentStarter, resolveKimiApiKey } from "./kimi-agent.ts";
  * models, with the interview answered programmatically.
  *
  * This is the one test where the generated file must be genuinely loadable, so it writes into THIS
- * repo's `.pi/workflows/` — the same place the command writes in a real project — proving that the
+ * repo's own workflows directory — the same place the command writes in a real project — proving that the
  * `@pmateusz/pi-workflows` import the generator is told to emit actually resolves.
  */
 const apiKey = resolveKimiApiKey();

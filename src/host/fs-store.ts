@@ -1,17 +1,29 @@
-import { appendFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import type { RunEvent } from "../engine/types.ts";
 import { summarizeRun } from "./summarize-run.ts";
-import type { RunMeta, RunStore, RunSummary } from "./types.ts";
+import type { RunStore, RunSummary } from "./types.ts";
+
+/** What marks a file in the artifacts directory as a run's event log rather than one of its step sessions. */
+export const RUN_LOG_SUFFIX = ".events.jsonl";
 
 /**
- * Filesystem `RunStore` (spec §8.7): append-only JSONL under `<projectRoot>/.pi/workflows/`,
- * one file per run (`<run-id>.jsonl`) plus a `<run-id>.meta.json` sidecar, so runs are
- * independently keyed and listable/resumable across sessions and process restarts.
+ * Filesystem `RunStore` (spec §8.9): append-only JSONL, one file per run, so runs are independently
+ * keyed and listable/resumable across sessions and process restarts.
+ *
+ * `dir` is the already-resolved run-artifacts directory (project-dir.ts's `runArtifactsDir`), not a
+ * project root: WHERE a run's artifacts belong is one decision, made once, by whoever holds the
+ * harness context — this file only owns the format.
+ *
+ * That directory also holds every step SESSION file this run spawns (spec §2.2), which is why the log
+ * carries the `.events.jsonl` suffix and why `list()` filters on it: a bare `.jsonl` scan would try to
+ * read each step session as a run log. In the other direction nothing needs doing — the log is not a
+ * session file and the harness's own reader returns `null` for anything whose first line is not
+ * `{"type":"session"}`, with every enumerator dropping nulls. There is no `.meta.json` sidecar any
+ * more: `workflowFilePath` is a `run-meta` event in the log itself (engine/types.ts), so a run is
+ * exactly one file and `delete` is exactly one unlink.
  */
-export function createFsStore(projectRoot: string): RunStore {
-  const dir = path.join(projectRoot, ".pi", "workflows");
-
+export function createFsStore(dir: string): RunStore {
   // Serialize all appends through a single tail promise so writes land in call order regardless
   // of whether the caller awaits them. The engine emits `step-log` events fire-and-forget (`void
   // host.emit(...)`); without this queue such a write could reorder against a later awaited event
@@ -24,8 +36,7 @@ export function createFsStore(projectRoot: string): RunStore {
     await mkdir(dir, { recursive: true });
   }
 
-  const logFilePath = (runId: string) => path.join(dir, `${runId}.jsonl`);
-  const metaFilePath = (runId: string) => path.join(dir, `${runId}.meta.json`);
+  const logFilePath = (runId: string) => path.join(dir, `${runId}${RUN_LOG_SUFFIX}`);
 
   /**
    * Read a run's log, tolerating one truncated line at the END and nothing else.
@@ -66,23 +77,15 @@ export function createFsStore(projectRoot: string): RunStore {
     async loadEvents(runId: string): Promise<RunEvent[]> {
       return readEvents(logFilePath(runId));
     },
-    async saveMeta(runId: string, meta: RunMeta): Promise<void> {
-      await ensureDir();
-      await writeFile(metaFilePath(runId), `${JSON.stringify(meta, null, 2)}\n`, "utf8");
-    },
-    async loadMeta(runId: string): Promise<RunMeta | undefined> {
-      const content = await readFile(metaFilePath(runId), "utf8").catch(() => undefined);
-      return content === undefined ? undefined : (JSON.parse(content) as RunMeta);
-    },
     async delete(runId: string): Promise<void> {
-      await Promise.all([rm(logFilePath(runId), { force: true }), rm(metaFilePath(runId), { force: true })]);
+      await rm(logFilePath(runId), { force: true });
     },
     async list(): Promise<RunSummary[]> {
       await ensureDir();
       const entries = await readdir(dir).catch(() => [] as string[]);
       const summaries: RunSummary[] = [];
       for (const entry of entries) {
-        if (!entry.endsWith(".jsonl")) continue;
+        if (!entry.endsWith(RUN_LOG_SUFFIX)) continue;
         const summary = summarizeRun(await readEvents(path.join(dir, entry)));
         if (summary) summaries.push(summary);
       }

@@ -8,9 +8,9 @@ import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { RunResult } from "../src/engine/types.ts";
 import { createQuestionnaireStep, createStep, createWorkflow } from "../src/flow/index.ts";
 import { handleCancel, handleDelete, handleListRuns, handleListWorkflows, runGuarded } from "../src/host/commands/index.ts";
+import { workflowsDir } from "../src/host/project-dir.ts";
 import { summarizeRun } from "../src/host/summarize-run.ts";
 import type { RunStore, RunSummary } from "../src/host/types.ts";
-import { workflowsDir } from "../src/host/workflow-catalog.ts";
 import { createFakeRunLock, createTestHost } from "./helpers.ts";
 
 type NoteType = "info" | "warning" | "error" | undefined;

@@ -1,20 +1,22 @@
 /**
  * Workflow catalog: discover the workflows a project defines, and resolve a command argument to one.
  *
- * Authored workflows live in `<projectRoot>/.pi/workflows/` as `*.workflow.ts`, following the PI
- * convention for project resources (`.pi/extensions/`, `.pi/skills/`, `.pi/prompts/`). The run store
- * writes into the same directory as `<run-id>.jsonl` / `<run-id>.meta.json` (see fs-store.ts), so
- * discovery filters on the `.workflow.ts` suffix and the two never collide.
+ * Authored workflows live in `<projectRoot>/.<app>/workflows/` as `*.workflow.ts` (project-dir.ts
+ * derives `<app>`), following the harness convention for project resources (`extensions/`, `skills/`,
+ * `prompts/` under the same directory). This is now a SOURCE directory and nothing else: run logs and
+ * step sessions moved to the harness's session directory (project-dir.ts's `runArtifactsDir`), and the
+ * only non-source file left here is the dot-prefixed run lock.
  *
  * Discovery *imports* every candidate to read its declared name, which executes project code — the
- * same trust boundary `.pi/extensions/` sits behind. Workflow modules must therefore be free of
- * import-time side effects: build the definition, export it, do nothing else.
+ * same trust boundary the harness's own `extensions/` sits behind. Workflow modules must therefore be
+ * free of import-time side effects: build the definition, export it, do nothing else.
  */
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import type { WorkflowDefinition } from "../flow/types.ts";
 import { loadWorkflowFile } from "./load-workflow.ts";
+import { workflowsDir } from "./project-dir.ts";
 
 /** The file suffix that marks a workflow module inside the workflows directory. */
 export const WORKFLOW_SUFFIX = ".workflow.ts";
@@ -35,11 +37,6 @@ export interface BrokenWorkflow {
 export interface WorkflowCatalog {
   readonly entries: readonly WorkflowEntry[];
   readonly broken: readonly BrokenWorkflow[];
-}
-
-/** The directory a project's authored workflows live in. */
-export function workflowsDir(projectRoot: string): string {
-  return path.join(projectRoot, ".pi", "workflows");
 }
 
 /**

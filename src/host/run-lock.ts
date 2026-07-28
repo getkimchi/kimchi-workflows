@@ -1,8 +1,13 @@
 /**
- * The per-project execution lock (spec §7.2/§7.3): `<projectRoot>/.pi/workflows/run.lock`, holding
+ * The per-project execution lock (spec §7.2/§7.3): `<projectRoot>/.<app>/workflows/.run.lock`, holding
  * `{ runId, pid, host, startedAt }`. Replaces the old in-process-only guard (run-guard.ts) — the lock
  * lives in the filesystem, so it holds across concurrent PI sessions on the same project, not just
  * within one process.
+ *
+ * It stays in the AUTHORING directory (not with the run artifacts) because that directory is what
+ * "this project" means — one lock per project, whatever session dir the current invocation happens to
+ * be writing to. Dot-prefixed so `ls` on the directory an author works in shows only their own
+ * `*.workflow.ts` sources.
  *
  * Host-layer only: the engine (src/engine) never imports this. If the engine ever needs to know
  * about the lock it goes through `HostPort`, per the project's ground rules.
@@ -11,6 +16,7 @@ import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { hostname as osHostname } from "node:os";
 import path from "node:path";
 import type { RunEvent } from "../engine/types.ts";
+import { workflowsDir } from "./project-dir.ts";
 import type { RunStore } from "./types.ts";
 
 /** The lock file's contents while held (spec §7.2). */
@@ -50,7 +56,7 @@ function isPidAlive(pid: number): boolean {
 }
 
 function lockFilePath(projectRoot: string): string {
-  return path.join(projectRoot, ".pi", "workflows", "run.lock");
+  return path.join(workflowsDir(projectRoot), ".run.lock");
 }
 
 /**

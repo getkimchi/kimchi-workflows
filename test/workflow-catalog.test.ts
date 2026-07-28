@@ -2,7 +2,8 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { discoverWorkflows, resolveWorkflow, workflowsDir } from "../src/host/workflow-catalog.ts";
+import { workflowsDir } from "../src/host/project-dir.ts";
+import { discoverWorkflows, resolveWorkflow } from "../src/host/workflow-catalog.ts";
 
 /**
  * Discovery reads real files through the real loader, so these tests build throwaway projects on
@@ -24,7 +25,7 @@ function workflowSource(name: string, description?: string): string {
   ].join("\n");
 }
 
-/** Build a project whose `.pi/workflows/` holds the given files. */
+/** Build a project whose workflows directory (`.<app>/workflows/`) holds the given files. */
 async function project(files: Record<string, string>): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "pi-catalog-"));
   const dir = workflowsDir(root);
@@ -55,11 +56,13 @@ describe("discoverWorkflows", () => {
     expect(entries[0]?.filePath).toBe(path.join(workflowsDir(root), "alpha.workflow.ts"));
   });
 
-  it("ignores run-store files and anything without the .workflow.ts suffix", async () => {
+  // The directory is a SOURCE directory now — run logs and step sessions live with the harness's
+  // sessions (project-dir.ts) — but discovery still filters, so the lock and an author's own helpers
+  // and notes are never imported.
+  it("ignores the run lock and anything without the .workflow.ts suffix", async () => {
     const root = await project({
       "real.workflow.ts": workflowSource("real"),
-      "3f2a-1c4b.jsonl": '{"type":"run-started"}\n',
-      "3f2a-1c4b.meta.json": '{"workflowName":"real"}',
+      ".run.lock": '{"runId":"workflow-real-1a2b3c4d"}',
       "helper.ts": "export const notAWorkflow = 1;",
       "notes.md": "# scratch",
     });
@@ -101,7 +104,7 @@ describe("resolveWorkflow", () => {
   it("resolves a path relative to the project root", async () => {
     const root = await project({ "deploy.workflow.ts": workflowSource("deploy") });
 
-    const resolved = await resolveWorkflow(root, ".pi/workflows/deploy.workflow.ts");
+    const resolved = await resolveWorkflow(root, path.relative(root, path.join(workflowsDir(root), "deploy.workflow.ts")));
 
     expect(resolved.ok).toBe(true);
     if (resolved.ok) expect(resolved.workflow.name).toBe("deploy");
@@ -122,7 +125,7 @@ describe("resolveWorkflow", () => {
   it("reports why a named path failed to load", async () => {
     const root = await project({ "bad.workflow.ts": "throw new Error('boom at import');" });
 
-    const resolved = await resolveWorkflow(root, ".pi/workflows/bad.workflow.ts");
+    const resolved = await resolveWorkflow(root, path.relative(root, path.join(workflowsDir(root), "bad.workflow.ts")));
 
     expect(resolved.ok).toBe(false);
     if (!resolved.ok) expect(resolved.error).toMatch(/failed to load/);

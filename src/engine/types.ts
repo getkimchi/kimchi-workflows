@@ -20,6 +20,15 @@ export type RetryReason = "thrown-error" | "invalid-output" | "budget-exceeded";
  * migration, by design) — `parsePath` fails loudly rather than mis-parsing it.
  */
 export type RunEvent =
+  // Host-written provenance (spec §8.9), appended by the ADAPTER at run start — never by the engine,
+  // which stays file-unaware and could not name a `workflowFilePath` if it wanted to. It replaces the
+  // `<run-id>.meta.json` sidecar: one file per run, self-describing wherever it is read, and a
+  // `/workflow resume` that needs nothing but the log to reload the definition (spec §8.5). Kept
+  // separate from `run-started` for exactly that reason — that event is the ENGINE's, and folding a
+  // file path into it would put the filesystem inside the engine's vocabulary. Every consumer of the
+  // log already ignores it: `deriveStepStates` has a `default: break`, `deriveRunStatus` filters by
+  // type, and `summarizeRun` keys off `run-started`.
+  | { type: "run-meta"; runId: string; workflowFilePath: string; at: string }
   | { type: "run-started"; runId: string; workflowName: string; input: unknown; at: string }
   // A resume (spec §8) continuing an existing run: appended to the same log instead of a second
   // `run-started`. `fromPath` is the node path execution resumes at (absent if nothing remained).
@@ -119,6 +128,20 @@ export interface AgentRequest {
   readonly history?: readonly ConversationMessage[];
   /** The step this session belongs to. Lets a host attribute cost/telemetry — and lets a test double script replies per step. */
   readonly stepName: string;
+  /**
+   * Which run, and which execution within it, this session belongs to (spec §8.5/§8.9).
+   *
+   * The engine needs none of it — it is passed because a host that PERSISTS a session has to name the
+   * file, and only these four make a name that is both unique and readable: two executions of one step
+   * differ by `attempt`, two items of a `.foreach` differ by `path` (the full dynamic node path, indices
+   * included — `stepName` alone is the same string for all of them), and two runs of one workflow differ
+   * by `runId`. A host that keeps nothing (the test double, an in-memory host) simply ignores them.
+   */
+  readonly runId: string;
+  readonly workflowName: string;
+  readonly path: string;
+  /** 1-based retry attempt (spec §9.1) this session was opened for; an answer-continuation stays on the attempt it resumes. */
+  readonly attempt: number;
   /**
    * True for a `background` agent step (spec §2.2): the host must run this as an isolated PI subagent
    * — its own context window and tool loop, no access to the parent session's history — rather than

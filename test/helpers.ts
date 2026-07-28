@@ -1,4 +1,7 @@
-import type { HostPort, RunEvent } from "../src/engine/types.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import type { AgentRequest, HostPort, RunEvent } from "../src/engine/types.ts";
 import { createHostPort, type HostPortOptions } from "../src/host/host-port.ts";
 import { createMemoryStore } from "../src/host/memory-store.ts";
 import type { BeginResult, RunLock } from "../src/host/run-lock.ts";
@@ -35,6 +38,20 @@ export function createTestHost(options: HostPortOptions = {}): TestHost {
     ...options,
   });
   return { host, store, sleepCalls, events: store.events };
+}
+
+/**
+ * An `AgentRequest` carrying the run/execution identity (spec §8.5) a host needs to NAME this session's
+ * file — `runId`/`workflowName`/`path`/`attempt`. A test driving the bridge directly is almost always
+ * asserting something else, so it supplies only the fields it cares about and this fills the rest in.
+ */
+export function agentRequest(request: Partial<AgentRequest> & { stepName: string }): AgentRequest {
+  return { runId: "workflow-test-1a2b3c4d", workflowName: "test", path: request.stepName, attempt: 1, ...request };
+}
+
+/** A throwaway directory to bind a bridge's step sessions to; in the real host it is the harness's own session dir. */
+export function tempSessionsDir(): string {
+  return mkdtempSync(path.join(tmpdir(), "pi-workflows-sessions-"));
 }
 
 /**

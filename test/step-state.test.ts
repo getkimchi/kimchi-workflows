@@ -301,3 +301,29 @@ describe("currentStepName (spec §6.3)", () => {
     expect(status && currentStepName(status, deriveStepStates(events))).toBeUndefined();
   });
 });
+
+/**
+ * `run-meta` is the ADAPTER's own event (spec §8.9): provenance the engine never emits and no
+ * derivation may notice. It sits first in every log written by `/workflow run`, so a fold that treated
+ * it as a step or as a terminal event would mis-report every run in the project.
+ */
+describe("run-meta is inert to every derivation", () => {
+  const meta: RunEvent = { type: "run-meta", runId, workflowFilePath: "/abs/deploy.workflow.ts", at };
+
+  it("adds no step state and changes no status", () => {
+    const events: RunEvent[] = [
+      meta,
+      started,
+      { type: "step-started", runId, path: "s", input: undefined, at },
+      { type: "step-completed", runId, path: "s", output: {}, at },
+      { type: "run-completed", runId, output: {}, at },
+    ];
+    expect([...deriveStepStates(events).keys()]).toEqual(["s"]);
+    expect(deriveRunStatus(events)).toBe("completed");
+    expect(pendingQuestionCount(deriveStepStates(events))).toBe(0);
+  });
+
+  it("does not make a log with no run-started look like a run", () => {
+    expect(deriveRunStatus([meta])).toBeUndefined();
+  });
+});

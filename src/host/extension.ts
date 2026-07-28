@@ -10,6 +10,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { handleCancel, handleCreate, handleDelete, handleListRuns, handleListWorkflows, handleResume, handleRun } from "./commands/index.ts";
 import { createFsStore } from "./fs-store.ts";
 import { createPiAgentBridge } from "./pi-agent.ts";
+import { runArtifactsDir } from "./project-dir.ts";
 import { createRunLock } from "./run-lock.ts";
 
 export default function piWorkflowsExtension(pi: ExtensionAPI): void {
@@ -20,8 +21,13 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     description: "Create, run, list, resume, cancel, and delete PI workflows",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
-      const store = createFsStore(ctx.cwd);
-      const startAgent = bindAgentStarter(ctx.modelRegistry);
+      // Resolved per invocation, not at load: the session directory is a property of the CONTEXT (it
+      // moves with `--session-dir`, and is empty under `--no-session`), and `ctx` does not exist when
+      // this extension is loaded. Everything a run writes — its event log and every step session — lands
+      // in this one directory (project-dir.ts).
+      const runDir = runArtifactsDir(ctx.cwd, ctx.sessionManager.getSessionDir());
+      const store = createFsStore(runDir);
+      const startAgent = bindAgentStarter(ctx.modelRegistry, runDir);
 
       switch (sub) {
         case "run": {

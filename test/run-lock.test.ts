@@ -21,8 +21,14 @@ function fixedClock(iso: string): () => Date {
   return () => new Date(iso);
 }
 
+/**
+ * The lock's real location, spelled out rather than imported: `.pi` is the DEFAULT app name (no
+ * `piConfig.name` in the harness this suite runs against, project-dir.ts), and `.run.lock` is
+ * dot-prefixed so the directory an author works in lists only their own `*.workflow.ts` sources.
+ * Deriving it from the same helper the lock uses would assert nothing.
+ */
 function lockFilePath(projectRoot: string): string {
-  return path.join(projectRoot, ".pi", "workflows", "run.lock");
+  return path.join(projectRoot, ".pi", "workflows", ".run.lock");
 }
 
 async function readLockFile(projectRoot: string): Promise<LockInfo> {

@@ -1,11 +1,15 @@
+import path from "node:path";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { runWorkflow } from "../src/engine/run-workflow.ts";
 import type { AgentRequest } from "../src/engine/types.ts";
 import { createAgentStep, createWorkflow } from "../src/flow/index.ts";
 import { assistantLine, scriptedSubagent } from "./fake-subagent.ts";
-import { createTestHost } from "./helpers.ts";
+import { agentRequest, createTestHost, tempSessionsDir } from "./helpers.ts";
 import { scriptedAgent } from "./scripted-agent.ts";
+
+/** Where the bridge under test writes its step sessions (the real host binds the harness's own session dir). */
+const sessionsDir = tempSessionsDir();
 
 const okSchema = Type.Object({ ok: Type.Boolean() });
 
@@ -136,43 +140,61 @@ describe("a resume key shared by several steps", () => {
   });
 });
 
-/** The PI host turns that key into a session file the harness writes and resumes; everything else stays ephemeral. */
+/**
+ * The PI host turns that key into a session file the harness writes and resumes; everything else gets a
+ * file of its own. Both live in the ONE run-artifacts directory the bridge is bound to (project-dir.ts),
+ * kept apart by the `-key-`/`-run-` infix rather than by a subdirectory (naming.ts).
+ */
 describe("the PI host's subagent invocation", () => {
   const noopPi = { on: () => {} } as never;
+  const sessionArg = (args: readonly string[]) => args[args.indexOf("--session") + 1] ?? "";
 
-  it("names a session file for a resumable step and stays ephemeral otherwise", async () => {
+  it("names a keyed session file for a resumable step and a per-execution trace otherwise", async () => {
     const { createPiAgentBridge } = await import("../src/host/pi-agent.ts");
     const { spawn, calls } = scriptedSubagent(assistantLine("{}", 1));
-    const start = createPiAgentBridge(noopPi, (args) => ({ command: "kimchi", args }), spawn)({ find: () => undefined } as never);
+    const start = createPiAgentBridge(noopPi, (args) => ({ command: "kimchi", args }), spawn)({ find: () => undefined } as never, sessionsDir);
 
-    await start({ stepName: "worker", background: true, resumeKey: "worker" }).sendAndAwaitEnd("go");
-    await start({ stepName: "looker", background: true }).sendAndAwaitEnd("go");
+    await start(
+      agentRequest({ stepName: "worker", workflowName: "round", runId: "workflow-round-1a2b3c4d", path: "loop#2/worker", resumeKey: "worker", background: true }),
+    ).sendAndAwaitEnd("go");
+    await start(agentRequest({ stepName: "looker", workflowName: "round", runId: "workflow-round-1a2b3c4d", path: "loop#2/looker", background: true })).sendAndAwaitEnd("go");
 
     const spawned = calls.map((call) => call.args);
     expect(calls.map((call) => call.command)).toEqual(["kimchi", "kimchi"]);
-    expect(spawned[0]).toContain("--session");
-    expect(spawned[0]?.join(" ")).toContain("worker.jsonl");
-    expect(spawned[0]).not.toContain("--no-session");
 
-    // A non-resumable step also gets a session — but a fresh one, under traces/, so it still starts cold
-    // while leaving a record of what it was told, replied and spent.
+    // Keyed: no run component at all, so the NEXT run of this workflow continues this conversation.
+    expect(spawned[0]).toContain("--session");
+    expect(spawned[0]).not.toContain("--no-session");
+    expect(path.basename(sessionArg(spawned[0] ?? []))).toBe("workflow-round-key-worker.jsonl");
+
+    // Trace: run + full node path + attempt, so nothing can ever resume it by accident.
     expect(spawned[1]).toContain("--session");
     expect(spawned[1]).not.toContain("--no-session");
-    expect(spawned[1]?.join(" ")).toContain("traces/looker-");
-    expect(spawned[1]?.join(" ")).not.toContain("worker.jsonl");
+    expect(path.basename(sessionArg(spawned[1] ?? []))).toBe("workflow-round-run-1a2b3c4d-loop-2.looker-a1.jsonl");
+    // Both sit in the bound directory — one flat namespace, no `traces/` subdir any more.
+    expect(path.dirname(sessionArg(spawned[1] ?? []))).toBe(sessionsDir);
+
+    // And the spawned session is named, so it reads as something if it is ever opened in a picker.
+    expect(spawned[1]?.[spawned[1].indexOf("--name") + 1]).toBe("round/loop#2/looker #1a2b3c4d");
   });
 
   it("gives every non-resumable execution its own trace file, so none of them resumes another", async () => {
     const { createPiAgentBridge } = await import("../src/host/pi-agent.ts");
     const { spawn, calls } = scriptedSubagent(assistantLine("{}", 1));
-    const start = createPiAgentBridge(noopPi, (args) => ({ command: "kimchi", args }), spawn)({ find: () => undefined } as never);
+    const start = createPiAgentBridge(noopPi, (args) => ({ command: "kimchi", args }), spawn)({ find: () => undefined } as never, sessionsDir);
 
-    await start({ stepName: "verify", background: true }).sendAndAwaitEnd("look");
-    await start({ stepName: "verify", background: true }).sendAndAwaitEnd("look again");
+    // Same step, same run: two ITEMS of a fan-out, then a retry of the second — each a file of its own.
+    await start(agentRequest({ stepName: "verify", path: "items@0/verify", background: true })).sendAndAwaitEnd("look");
+    await start(agentRequest({ stepName: "verify", path: "items@1/verify", background: true })).sendAndAwaitEnd("look again");
+    await start(agentRequest({ stepName: "verify", path: "items@1/verify", attempt: 2, background: true })).sendAndAwaitEnd("look once more");
 
-    const paths = calls.map((call) => call.args[call.args.indexOf("--session") + 1]);
-    expect(paths[0]).not.toBe(paths[1]);
-    for (const p of paths) expect(p).toMatch(/traces[/\\]verify-/);
+    const paths = calls.map((call) => path.basename(sessionArg(call.args)));
+    expect(new Set(paths).size).toBe(3);
+    expect(paths).toEqual([
+      "workflow-test-run-1a2b3c4d-items-0.verify-a1.jsonl",
+      "workflow-test-run-1a2b3c4d-items-1.verify-a1.jsonl",
+      "workflow-test-run-1a2b3c4d-items-1.verify-a2.jsonl",
+    ]);
   });
 });
 
@@ -201,8 +223,8 @@ describe("permission posture is inherited by spawned subagents", () => {
     const realArgv = process.argv;
     process.argv = [...realArgv, "--dangerously-skip-permissions"];
     try {
-      const start = createPiAgentBridge({ on: () => {} } as never, (args) => ({ command: "kimchi", args }), spawn)({ find: () => undefined } as never);
-      await start({ stepName: "worker", background: true }).sendAndAwaitEnd("go");
+      const start = createPiAgentBridge({ on: () => {} } as never, (args) => ({ command: "kimchi", args }), spawn)({ find: () => undefined } as never, sessionsDir);
+      await start(agentRequest({ stepName: "worker", background: true })).sendAndAwaitEnd("go");
     } finally {
       process.argv = realArgv;
     }

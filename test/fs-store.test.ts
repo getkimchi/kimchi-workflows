@@ -9,41 +9,42 @@ import { createStep, createWorkflow } from "../src/flow/index.ts";
 import { createFsStore } from "../src/host/fs-store.ts";
 import { createHostPort } from "../src/host/host-port.ts";
 
-describe("filesystem run store (spec §8.7)", () => {
-  let projectRoot: string;
+describe("filesystem run store (spec §8.9)", () => {
+  // The already-resolved run-artifacts directory (project-dir.ts decides where it is; this file only
+  // owns the format), which in a real run also holds the step session files this store must ignore.
+  let runDir: string;
 
   beforeEach(async () => {
-    projectRoot = await mkdtemp(path.join(tmpdir(), "pi-workflows-"));
+    runDir = await mkdtemp(path.join(tmpdir(), "pi-workflows-"));
   });
 
   afterEach(async () => {
-    await rm(projectRoot, { recursive: true, force: true });
+    await rm(runDir, { recursive: true, force: true });
   });
 
-  it("persists an append-only JSONL event log under .pi/workflows/<run-id>.jsonl", async () => {
-    const store = createFsStore(projectRoot);
+  it("persists an append-only JSONL event log as <run-id>.events.jsonl", async () => {
+    const store = createFsStore(runDir);
     const host = createHostPort(store);
 
     const result = await runWorkflow(helloWorkflow, undefined, host);
     expect(result.status).toBe("completed");
 
-    const workflowsDir = path.join(projectRoot, ".pi", "workflows");
-    const files = await readdir(workflowsDir);
-    expect(files).toEqual([`${result.runId}.jsonl`]);
+    const files = await readdir(runDir);
+    expect(files).toEqual([`${result.runId}.events.jsonl`]);
 
-    const content = await readFile(path.join(workflowsDir, files[0] ?? ""), "utf8");
+    const content = await readFile(path.join(runDir, files[0] ?? ""), "utf8");
     const lines = content.trim().split("\n");
     const parsedTypes = lines.map((line) => (JSON.parse(line) as { type: string }).type);
     expect(parsedTypes).toEqual(["run-started", "step-started", "step-completed", "run-completed"]);
   });
 
   it("list() reconstructs run summaries from disk, independent of the writing process", async () => {
-    const writerStore = createFsStore(projectRoot);
+    const writerStore = createFsStore(runDir);
     const writerHost = createHostPort(writerStore);
     const result = await runWorkflow(helloWorkflow, undefined, writerHost);
 
     // A fresh store instance over the same directory — simulates a new process reading the log.
-    const readerStore = createFsStore(projectRoot);
+    const readerStore = createFsStore(runDir);
     const runs = await readerStore.list();
 
     expect(runs).toHaveLength(1);
@@ -51,8 +52,31 @@ describe("filesystem run store (spec §8.7)", () => {
   });
 
   it("list() returns an empty array when no runs have been recorded", async () => {
-    const store = createFsStore(projectRoot);
+    const store = createFsStore(runDir);
     expect(await store.list()).toEqual([]);
+  });
+
+  // Run logs and step session files share one directory now (project-dir.ts), so the `.events.jsonl`
+  // suffix is what tells them apart. A bare `.jsonl` scan would parse every step session as a run log.
+  it("list() ignores the step session files sitting in the same directory", async () => {
+    const store = createFsStore(runDir);
+    const result = await runWorkflow(helloWorkflow, undefined, createHostPort(store));
+
+    await writeFile(path.join(runDir, "workflow-hello-run-1a2b3c4d-verify-a1.jsonl"), '{"type":"session","id":"s1"}\n', "utf8");
+    await writeFile(path.join(runDir, "workflow-hello-key-worker.jsonl"), '{"type":"session","id":"s2"}\n', "utf8");
+
+    expect((await store.list()).map((run) => run.runId)).toEqual([result.runId]);
+  });
+
+  it("delete() removes the run's log and nothing else in the directory", async () => {
+    const store = createFsStore(runDir);
+    const result = await runWorkflow(helloWorkflow, undefined, createHostPort(store));
+    await writeFile(path.join(runDir, "workflow-hello-key-worker.jsonl"), '{"type":"session","id":"s2"}\n', "utf8");
+
+    await store.delete(result.runId);
+
+    expect(await store.loadEvents(result.runId)).toEqual([]);
+    expect(await readdir(runDir)).toEqual(["workflow-hello-key-worker.jsonl"]);
   });
 
   it("preserves on-disk event order even for a fire-and-forget logger.info write", async () => {
@@ -68,12 +92,11 @@ describe("filesystem run store (spec §8.7)", () => {
     });
     const workflow = createWorkflow({ name: "logging" }).then(logging).commit();
 
-    const store = createFsStore(projectRoot);
+    const store = createFsStore(runDir);
     const result = await runWorkflow(workflow, undefined, createHostPort(store));
     expect(result.status).toBe("completed");
 
-    const workflowsDir = path.join(projectRoot, ".pi", "workflows");
-    const types = await readEventTypes(workflowsDir, result.runId);
+    const types = await readEventTypes(runDir, result.runId);
     expect(types).toEqual(["run-started", "step-started", "step-log", "step-completed", "run-completed"]);
   });
 
@@ -82,7 +105,7 @@ describe("filesystem run store (spec §8.7)", () => {
     // followed by a single awaited one. Without the queue, concurrent `appendFile` calls to the
     // same file interleave and land out of order (verified); the queue guarantees FIFO, and
     // awaiting the final append flushes all prior writes.
-    const store = createFsStore(projectRoot);
+    const store = createFsStore(runDir);
     const runId = "concurrent-run";
     const count = 30;
 
@@ -99,7 +122,7 @@ describe("filesystem run store (spec §8.7)", () => {
     }
     await lastAppend;
 
-    const content = await readFile(path.join(projectRoot, ".pi", "workflows", `${runId}.jsonl`), "utf8");
+    const content = await readFile(path.join(runDir, `${runId}.events.jsonl`), "utf8");
     const messages = content
       .trim()
       .split("\n")
@@ -112,9 +135,9 @@ describe("filesystem run store (spec §8.7)", () => {
   // append never completed, so the run must still load — and `run list`, which reads every log, must
   // not be taken down by one of them.
   it("loads a log whose last line was truncated by a killed process", async () => {
-    const store = createFsStore(projectRoot);
+    const store = createFsStore(runDir);
     const result = await runWorkflow(helloWorkflow, undefined, createHostPort(store));
-    const logPath = path.join(projectRoot, ".pi", "workflows", `${result.runId}.jsonl`);
+    const logPath = path.join(runDir, `${result.runId}.events.jsonl`);
 
     const intact = await readFile(logPath, "utf8");
     await writeFile(logPath, `${intact}{"type":"step-star`, "utf8");
@@ -125,9 +148,9 @@ describe("filesystem run store (spec §8.7)", () => {
   });
 
   it("refuses a log corrupted in the middle rather than silently dropping the event", async () => {
-    const store = createFsStore(projectRoot);
+    const store = createFsStore(runDir);
     const result = await runWorkflow(helloWorkflow, undefined, createHostPort(store));
-    const logPath = path.join(projectRoot, ".pi", "workflows", `${result.runId}.jsonl`);
+    const logPath = path.join(runDir, `${result.runId}.events.jsonl`);
 
     const lines = (await readFile(logPath, "utf8")).trim().split("\n");
     lines.splice(1, 0, "{ truncated mid-file");
@@ -137,8 +160,8 @@ describe("filesystem run store (spec §8.7)", () => {
   });
 });
 
-async function readEventTypes(workflowsDir: string, runId: string): Promise<string[]> {
-  const content = await readFile(path.join(workflowsDir, `${runId}.jsonl`), "utf8");
+async function readEventTypes(dir: string, runId: string): Promise<string[]> {
+  const content = await readFile(path.join(dir, `${runId}.events.jsonl`), "utf8");
   return content
     .trim()
     .split("\n")

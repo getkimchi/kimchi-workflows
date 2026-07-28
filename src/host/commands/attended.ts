@@ -59,7 +59,7 @@ export async function handleAttendedQuestionnaire(
     }
 
     const targetPath = ask.path; // answer the block we just showed, not whatever the engine would default to
-    // The run may have been stopped while the prompt was open (another session, spec §8.7); the
+    // The run may have been stopped while the prompt was open (another session, spec §8.9); the
     // engine refuses such an answer rather than undoing the cancellation, and we report it plainly.
     let result: Awaited<ReturnType<typeof runGuarded>>;
     try {

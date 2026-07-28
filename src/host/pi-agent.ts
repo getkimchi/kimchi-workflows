@@ -83,11 +83,11 @@
  * literal `"pi"` silently spawns the wrong binary whenever the embedding harness is anything other
  * than vanilla `pi` itself.
  */
-import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import type { ContextEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentRequest, AgentSession, AgentTurn, ConversationMessage } from "../engine/types.ts";
+import { resumeSessionFile, stepSessionName, traceSessionFile } from "./naming.ts";
 import { type AgentMessages, lastAssistantText, lastAssistantUsage, type ModelRegistry, resolveModel, seedHistory } from "./pi-agent-messages.ts";
 import { runSubagent, type SubagentSpawner, subagentSpawner } from "./subagent-process.ts";
 
@@ -147,51 +147,49 @@ export function inheritedPermissionArgs(argv: readonly string[] = process.argv):
   return PERMISSION_BYPASS_FLAGS.filter((flag) => argv.includes(flag));
 }
 
-/** The directory holding both resumed sessions and one-shot traces; the harness creates the files, we own the directory. */
-function sessionsDir(...sub: string[]): string {
-  const dir = path.join(process.env.PI_WORKFLOW_SESSIONS_DIR ?? path.join(process.cwd(), ".pi", "workflows", "sessions"), ...sub);
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-/** Where a resumable isolated step's session file lives — the stable name that makes the next execution continue this one. */
-function resumeSessionPath(resumeKey: string): string {
-  // The key is either a step name or an author-declared shared key; `.commit()` has cleared both of
-  // path syntax (spec §3), and has established that no two steps holding a shared key can overlap —
-  // so this path has one writer at a time even when several steps name it.
-  return path.join(sessionsDir(), `${resumeKey}.jsonl`);
-}
-
 /**
- * Where a NON-resumable execution records what it did — a fresh file per execution, never read back.
+ * Where this step's session file goes, and what it is called (naming.ts owns the names).
  *
- * Writing a session and RESUMING one are different things, and only the second would cost this step its
- * fresh look at the world: the name is unique per execution, so a verifier still starts cold every time
- * and remembers nothing, exactly as before. What changes is that it leaves a trace. `--no-session` threw
- * the whole record away, which meant the steps that make up most of a run — every one-shot worker, gate
- * and judge — could not be asked afterwards what they spent, what they were told, or what they replied.
- * Per-step token accounting was simply unavailable, and a step that behaved oddly left nothing to read.
+ * `dir` is the run-artifacts directory the bridge was BOUND to — the harness's own session directory
+ * plus our `workflow/` subdir (project-dir.ts). A step session is a genuine harness session file, so it
+ * belongs with the user's sessions rather than in a private corner of the project; the subdir is what
+ * keeps it out of `--continue` and the session pickers.
  *
- * These live under `traces/` rather than beside the keyed sessions so the two namespaces cannot collide:
- * nothing in here can ever be picked up as a resume target, whatever a step happens to be named.
+ * Two shapes, structurally disjoint by their `-key-`/`-run-` infix:
+ *  - a `resumeKey` step names the SAME file every execution, which is what makes the next execution
+ *    continue this one (spec §2.2). `.commit()` has cleared the key of path syntax (spec §3) and
+ *    established that no two steps holding a shared key can overlap, so the file has one writer at a time.
+ *  - everything else gets a file of its OWN, named once and never read back: it still starts cold — a
+ *    fresh, small context per step is what makes a chain of isolated steps cheap, and a verifier's whole
+ *    value is not remembering — but it now leaves a record. `--no-session` threw exactly that away for
+ *    the majority of a run, so per-step token accounting was unavailable and a step that behaved oddly
+ *    left nothing to read.
  */
-function traceSessionPath(stepName: string): string {
-  const safe = stepName.replace(/[^a-zA-Z0-9._-]/g, "-");
-  return path.join(sessionsDir("traces"), `${safe}-${randomUUID()}.jsonl`);
+function sessionPath(dir: string, request: AgentRequest): string {
+  mkdirSync(dir, { recursive: true });
+  const file = request.resumeKey
+    ? resumeSessionFile(request.workflowName, request.resumeKey)
+    : traceSessionFile(request.workflowName, request.runId, request.path, request.attempt);
+  return path.join(dir, file);
 }
 
 /**
  * Create the PI agent bridge. Call once per extension instance (registers one `agent_end` listener),
- * then obtain a per-run `AgentStarter` bound to the command's model registry. `invocationResolver`
- * defaults to {@link resolvePiInvocation}; tests inject a fixed stub instead of depending on the live
- * process's own argv/execPath. `spawnSubagent` defaults to {@link subagentSpawner} — a real child
- * process — and is the seam tests drive a scripted stdout/stderr through.
+ * then obtain a per-invocation `AgentStarter` bound to the command's model registry AND to the
+ * directory that invocation's sessions belong in. The directory arrives at BIND time, not here: this
+ * runs at extension LOAD, when no `ctx` — and therefore no session directory — exists yet, while every
+ * `ExtensionCommandContext`/`ExtensionContext` the harness hands a handler carries one.
+ *
+ * `invocationResolver` defaults to {@link resolvePiInvocation}; tests inject a fixed stub instead of
+ * depending on the live process's own argv/execPath. `spawnSubagent` defaults to
+ * {@link subagentSpawner} — a real child process — and is the seam tests drive a scripted
+ * stdout/stderr through.
  */
 export function createPiAgentBridge(
   pi: ExtensionAPI,
   invocationResolver: PiInvocationResolver = resolvePiInvocation,
   spawnSubagent: SubagentSpawner = subagentSpawner,
-): (modelRegistry: ModelRegistry) => AgentStarter {
+): (modelRegistry: ModelRegistry, sessionsDir: string) => AgentStarter {
   // The ONE in-session turn currently awaiting the shared `agent_end` listener, if any (see the header
   // comment). `token` is an identity private to the session that started the turn — not the step name,
   // since the SAME step name can legitimately open several sessions across retries/repairs, and dispose()
@@ -217,13 +215,13 @@ export function createPiAgentBridge(
     return seeded ? { messages: seeded } : undefined;
   });
 
-  return (modelRegistry) => (request) => {
+  return (modelRegistry, sessionsDir) => (request) => {
     // Isolation (spec §2.2/§12.2): a `background` step, and now also any step the ENGINE decided is
     // statically isolated (can overlap with a sibling — `.parallel`/`.foreach(concurrency>1)`, see
     // `AgentRequest.isolated`'s doc), both run through the same one-shot subprocess path. Neither ever
     // touches `inFlight` — there is no shared listener to correlate a subprocess's own reply with.
     if (request.background || request.isolated) {
-      return backgroundSession(modelRegistry, request, invocationResolver, spawnSubagent);
+      return backgroundSession(modelRegistry, request, invocationResolver, spawnSubagent, sessionsDir);
     }
 
     const token = {}; // this session's own identity — see `inFlight`'s doc above
@@ -287,16 +285,24 @@ export function createPiAgentBridge(
  * access to the parent session's history — `request.history` is always undefined for a background
  * request (see AgentRequest's doc, engine/types.ts) so there is nothing to seed it with anyway.
  */
-function backgroundSession(modelRegistry: ModelRegistry, request: AgentRequest, invocationResolver: PiInvocationResolver, spawnSubagent: SubagentSpawner): AgentSession {
+function backgroundSession(
+  modelRegistry: ModelRegistry,
+  request: AgentRequest,
+  invocationResolver: PiInvocationResolver,
+  spawnSubagent: SubagentSpawner,
+  sessionsDir: string,
+): AgentSession {
   return {
     async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
-      // `--session <path>` both writes and RESUMES that file (the CLI's own wording). A step asking to
-      // continue across executions (`AgentRequest.resumeKey`) names the same file each time, so the
-      // second run starts with everything the first had read, tried and learned instead of rediscovering
-      // it. Every other execution gets a file of its OWN, named once and never read back: it still starts
-      // cold — a fresh, small context per step is what makes a chain of isolated steps cheap, and a
-      // verifier's whole value is not remembering — but it now leaves a record of what it was told, what
-      // it replied and what it spent. `--no-session` discarded exactly that, for the majority of a run.
+      // `--session <path>` both writes and RESUMES that file (the CLI's own wording), and stays a PATH
+      // rather than the `--session-id` this file now owns a stable id for: `--session-id` sends the CLI
+      // through `findLocalSessionByExactId` → `SessionManager.list`, which parses EVERY session in the
+      // project before it can start — on every single subagent spawn, of which a fan-out step makes many.
+      // The path form short-circuits on any argument containing `/` or ending `.jsonl`. Owning the path
+      // also means owning the whole filename (the id form prefixes a `<timestamp>_`), which is what makes
+      // `workflow-` a true prefix of everything a run writes. See {@link sessionPath} for the two shapes.
+      // `--name` costs nothing and makes the file legible if anyone ever opens it in a picker; the HOST
+      // session's name is deliberately left alone — that one belongs to the user, not to us.
       // Permission posture is inherited, not defaulted (see `inheritedPermissionArgs`): a subagent of a
       // run that bypasses permissions must bypass them too, or it re-arms the classifier and spends its
       // budget arguing with a prompt no one is there to answer.
@@ -305,7 +311,9 @@ function backgroundSession(modelRegistry: ModelRegistry, request: AgentRequest, 
         "json",
         "-p",
         "--session",
-        request.resumeKey ? resumeSessionPath(request.resumeKey) : traceSessionPath(request.stepName),
+        sessionPath(sessionsDir, request),
+        "--name",
+        stepSessionName(request.workflowName, request.path, request.runId),
         ...inheritedPermissionArgs(),
       ];
       if (request.model) {

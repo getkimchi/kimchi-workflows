@@ -1,3 +1,4 @@
+import path from "node:path";
 import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -6,6 +7,10 @@ import { createPiAgentBridge, resolvePiInvocation } from "../src/host/pi-agent.t
 import type { ModelRegistry } from "../src/host/pi-agent-messages.ts";
 import { type SubagentSpawner, subagentSpawner } from "../src/host/subagent-process.ts";
 import { assistantLine, fakeSubagentSpawner, scriptedSubagent } from "./fake-subagent.ts";
+import { agentRequest, tempSessionsDir } from "./helpers.ts";
+
+/** Where the bridge under test writes its step sessions (the real host binds the harness's own session dir). */
+const sessionsDir = tempSessionsDir();
 
 /**
  * A background subagent (spec §2.2) spawns a second `pi`-family process — the one real isolation
@@ -28,30 +33,33 @@ function fakeModelRegistry(hit?: { id: string }): ModelRegistry {
 }
 
 describe("createPiAgentBridge background requests (spec §2.2): a real subprocess, not a throw", () => {
-  it("spawns `pi --mode json -p --session <trace> <prompt>` and returns the final assistant message + usage", async () => {
+  it("spawns `pi --mode json -p --session <trace> --name <label> <prompt>` and returns the final assistant message + usage", async () => {
     const { spawn, calls } = scriptedSubagent([assistantLine("hello", 5), ""].join("\n"));
-    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir);
 
-    const session = startAgent({ stepName: "bg", background: true });
+    const session = startAgent(agentRequest({ stepName: "bg", background: true }));
     const turn = await session.sendAndAwaitEnd("do the task");
 
     expect(turn).toEqual({ text: "hello", usage: { totalTokens: 5 } });
     expect(calls[0]?.command).toBe("pi");
-    // The step is not resumable, so its session is a fresh file under traces/ that nothing reads back —
-    // it starts cold as before, but what it spent is now recoverable afterwards.
+    // The step is not resumable, so its session is a per-execution trace nothing reads back — it starts
+    // cold as before, but what it spent is now recoverable afterwards. `--session` takes a PATH, never
+    // `--session-id`: that form parses every session in the project before it can start, on every spawn.
     const args = calls[0]?.args ?? [];
     expect(args.slice(0, 3)).toEqual(["--mode", "json", "-p"]);
     expect(args[3]).toBe("--session");
-    expect(args[4]).toMatch(/traces[/\\]bg-.*\.jsonl$/);
+    expect(args[4]).toBe(path.join(sessionsDir, "workflow-test-run-1a2b3c4d-bg-a1.jsonl"));
+    expect(args.slice(5, 7)).toEqual(["--name", "test/bg #1a2b3c4d"]);
     expect(args.at(-1)).toBe("do the task");
     expect(args).not.toContain("--no-session");
+    expect(args).not.toContain("--session-id");
   });
 
   it("passes a resolved --model before the prompt", async () => {
     const { spawn, calls } = scriptedSubagent(assistantLine("ok", 1));
-    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry({ id: "kimchi-dev/kimi-k2.7" }));
+    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry({ id: "kimchi-dev/kimi-k2.7" }), sessionsDir);
 
-    await startAgent({ stepName: "bg", background: true, model: "kimchi-dev/kimi-k2.7" }).sendAndAwaitEnd("go");
+    await startAgent(agentRequest({ stepName: "bg", background: true, model: "kimchi-dev/kimi-k2.7" })).sendAndAwaitEnd("go");
 
     const args = calls[0]?.args ?? [];
     expect(args.slice(-3)).toEqual(["--model", "kimchi-dev/kimi-k2.7", "go"]);
@@ -60,23 +68,23 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
 
   it("rejects an unresolvable model before spawning anything", async () => {
     const { spawn, calls } = scriptedSubagent("");
-    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir);
 
-    await expect(startAgent({ stepName: "bg", background: true, model: "nope/nope" }).sendAndAwaitEnd("go")).rejects.toThrow(/unknown model "nope\/nope"/);
+    await expect(startAgent(agentRequest({ stepName: "bg", background: true, model: "nope/nope" })).sendAndAwaitEnd("go")).rejects.toThrow(/unknown model "nope\/nope"/);
     expect(calls).toEqual([]); // never spawned
   });
 
   it("throws naming the exit code and stderr when the subprocess fails", async () => {
     const { spawn } = scriptedSubagent("", { stderr: "boom", code: 1 });
-    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir);
 
-    await expect(startAgent({ stepName: "bg", background: true }).sendAndAwaitEnd("go")).rejects.toThrow(/exited with code 1.*boom/s);
+    await expect(startAgent(agentRequest({ stepName: "bg", background: true })).sendAndAwaitEnd("go")).rejects.toThrow(/exited with code 1.*boom/s);
   });
 
   it("getConversation() is always empty — a background step is one-shot and never resumed with history", async () => {
     const { spawn } = scriptedSubagent(assistantLine("hi", 1));
-    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry());
-    const session = startAgent({ stepName: "bg", background: true });
+    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir);
+    const session = startAgent(agentRequest({ stepName: "bg", background: true }));
 
     await session.sendAndAwaitEnd("go");
 
@@ -85,9 +93,9 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
 
   it("does not throw for an ordinary (non-background) request", () => {
     const { spawn } = scriptedSubagent("");
-    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir);
 
-    expect(() => startAgent({ stepName: "fg" })).not.toThrow();
+    expect(() => startAgent(agentRequest({ stepName: "fg" }))).not.toThrow();
   });
 
   it("reads the last assistant turn out of a stdout split at arbitrary chunk boundaries", async () => {
@@ -101,9 +109,9 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
       child.write(ndjson.slice(cut));
       void child.exit(0);
     });
-    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir);
 
-    await expect(startAgent({ stepName: "bg", background: true }).sendAndAwaitEnd("go")).resolves.toEqual({ text: "final answer", usage: { totalTokens: 42 } });
+    await expect(startAgent(agentRequest({ stepName: "bg", background: true })).sendAndAwaitEnd("go")).resolves.toEqual({ text: "final answer", usage: { totalTokens: 42 } });
   });
 
   it("completes when the subagent exits but a descendant it left behind still holds stdout open", async () => {
@@ -115,9 +123,9 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
       child.write(`${assistantLine("server started, here is the answer", 8)}\n`);
       child.exitLeakingStdout(0);
     });
-    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir);
 
-    await expect(startAgent({ stepName: "bg", background: true }).sendAndAwaitEnd("go")).resolves.toEqual({
+    await expect(startAgent(agentRequest({ stepName: "bg", background: true })).sendAndAwaitEnd("go")).resolves.toEqual({
       text: "server started, here is the answer",
       usage: { totalTokens: 8 },
     });
@@ -138,9 +146,9 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
         if (at >= ndjson.length) clearInterval(tick);
       }, 25);
     });
-    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir);
 
-    await expect(startAgent({ stepName: "bg", background: true }).sendAndAwaitEnd("go")).resolves.toEqual({ text: "the last word", usage: { totalTokens: 12 } });
+    await expect(startAgent(agentRequest({ stepName: "bg", background: true })).sendAndAwaitEnd("go")).resolves.toEqual({ text: "the last word", usage: { totalTokens: 12 } });
   });
 
   // Spec §8.8/§9.4: the child must be killable. Without this the engine's cancel and wall-time budget
@@ -154,9 +162,9 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
       child.write(assistantLine("partial work", 3)); // the child was mid-run when the run was cancelled
       controller.abort();
     });
-    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir);
 
-    await expect(startAgent({ stepName: "bg", background: true, signal: controller.signal }).sendAndAwaitEnd("go")).rejects.toThrow(/aborted/);
+    await expect(startAgent(agentRequest({ stepName: "bg", background: true, signal: controller.signal })).sendAndAwaitEnd("go")).rejects.toThrow(/aborted/);
     expect(calls[0]?.child.signalsReceived).toEqual(["SIGTERM"]); // the process itself was told to stop
   });
 
@@ -165,9 +173,9 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
     controller.abort();
     const { spawn, calls } = fakeSubagentSpawner(); // a child that would otherwise never say anything
 
-    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir);
 
-    await expect(startAgent({ stepName: "bg", background: true, signal: controller.signal }).sendAndAwaitEnd("go")).rejects.toThrow(/aborted/);
+    await expect(startAgent(agentRequest({ stepName: "bg", background: true, signal: controller.signal })).sendAndAwaitEnd("go")).rejects.toThrow(/aborted/);
     expect(calls[0]?.child.signalsReceived).toEqual(["SIGTERM"]);
   });
 
@@ -179,9 +187,9 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
       const controller = new AbortController();
       controller.abort();
       const { spawn, calls } = fakeSubagentSpawner(() => {}, { ignores: ["SIGTERM"] }); // wedged or trapping the signal
-      const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry());
+      const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir);
 
-      const turn = startAgent({ stepName: "bg", background: true, signal: controller.signal }).sendAndAwaitEnd("go");
+      const turn = startAgent(agentRequest({ stepName: "bg", background: true, signal: controller.signal })).sendAndAwaitEnd("go");
       const settled = turn.then(() => new Error("test bug: an aborted turn must not resolve")).catch((err: Error) => err);
       expect(calls[0]?.child.signalsReceived).toEqual(["SIGTERM"]); // asked nicely, ignored
 
@@ -202,9 +210,9 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
       child.writeStderr("Error: no API key available for kimchi-dev/kimi-k2.7\n");
       void child.exit(2);
     });
-    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir);
 
-    const error = await startAgent({ stepName: "bg", background: true })
+    const error = await startAgent(agentRequest({ stepName: "bg", background: true }))
       .sendAndAwaitEnd("go")
       .then(() => new Error("test bug: the subagent exited 2 and should have thrown"))
       .catch((err: Error) => err);
@@ -243,11 +251,11 @@ describe("a long-running subagent costs the parent a bounded amount of memory", 
       await child.stream(transcript());
       await child.exit(0);
     });
-    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir);
 
     gc();
     const before = process.memoryUsage().heapUsed;
-    const turn = await startAgent({ stepName: "bg", background: true }).sendAndAwaitEnd("go");
+    const turn = await startAgent(agentRequest({ stepName: "bg", background: true })).sendAndAwaitEnd("go");
     gc();
     const retained = process.memoryUsage().heapUsed - before;
 
@@ -286,7 +294,7 @@ describe.skipIf(process.platform === "win32")("against a real OS process", () =>
       pid = (child as unknown as { pid: number }).pid;
       return child;
     };
-    const startAgent = createPiAgentBridge(noopPi, () => ({ command: "/bin/sh", args: ["-c", script] }), spawner)(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(noopPi, () => ({ command: "/bin/sh", args: ["-c", script] }), spawner)(fakeModelRegistry(), sessionsDir);
     return { startAgent, pid: () => pid };
   }
 
@@ -294,7 +302,7 @@ describe.skipIf(process.platform === "win32")("against a real OS process", () =>
     const controller = new AbortController();
     const { startAgent, pid } = shellBridge("echo started; exec sleep 300");
 
-    const settled = startAgent({ stepName: "bg", background: true, signal: controller.signal })
+    const settled = startAgent(agentRequest({ stepName: "bg", background: true, signal: controller.signal }))
       .sendAndAwaitEnd("go")
       .then(() => new Error("test bug: an aborted turn must not resolve"))
       .catch((err: Error) => err);
@@ -314,14 +322,14 @@ describe.skipIf(process.platform === "win32")("against a real OS process", () =>
     const { startAgent } = shellBridge(`printf '%s\\n' '${assistantLine("answered", 4)}'; sleep 3 & exit 0`);
 
     const began = Date.now();
-    await expect(startAgent({ stepName: "bg", background: true }).sendAndAwaitEnd("go")).resolves.toEqual({ text: "answered", usage: { totalTokens: 4 } });
+    await expect(startAgent(agentRequest({ stepName: "bg", background: true })).sendAndAwaitEnd("go")).resolves.toEqual({ text: "answered", usage: { totalTokens: 4 } });
     expect(Date.now() - began).toBeLessThan(2000);
   }, 20_000);
 
   it("reports a spawn that never produced a process, rather than waiting on one", async () => {
-    const startAgent = createPiAgentBridge(noopPi, () => ({ command: "/definitely/not/a/binary", args: [] }))(fakeModelRegistry());
+    const startAgent = createPiAgentBridge(noopPi, () => ({ command: "/definitely/not/a/binary", args: [] }))(fakeModelRegistry(), sessionsDir);
 
-    await expect(startAgent({ stepName: "bg", background: true }).sendAndAwaitEnd("go")).rejects.toThrow(/ENOENT/);
+    await expect(startAgent(agentRequest({ stepName: "bg", background: true })).sendAndAwaitEnd("go")).rejects.toThrow(/ENOENT/);
   }, 20_000);
 });
 

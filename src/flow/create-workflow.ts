@@ -24,7 +24,7 @@ export const DEFAULT_MAX_CONCURRENCY = 4;
 export const DEFAULT_FOREACH_CONCURRENCY = 1;
 
 export interface CreateWorkflowOptions<TInputSchema extends TSchema | undefined = undefined> {
-  /** Unique workflow name/id — used by `/workflow list` and the run store (spec §1.5, §8.7). */
+  /** Unique workflow name/id — used by `/workflow list` and the run store (spec §1.5, §8.9). */
   name: string;
   description?: string;
   /** Optional top-level input schema (spec §3.9). Phase 1 does not wire CLI input; reserved for later phases. */
