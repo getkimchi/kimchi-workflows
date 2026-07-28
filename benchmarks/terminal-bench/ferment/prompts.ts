@@ -15,11 +15,21 @@
  *  - `judgeSystemPrompt` / `judgePrompt` — src/extensions/ferment/ask-user.ts (`ASK_USER_FORM_SYSTEM`,
  *    `buildAskJudgeFormUserMsg`).
  *  - `refinePrompt` — engine.ts's `refine` action prose + `RefineParams`.
- *  - `workerPrompt` — src/extensions/ferment/tools/steps.ts (`planFirstPreamble`, the limits hint) and
- *    worker-prompt.ts (`buildWorkerContext`).
- *  - `stepGatesPrompt` / `phaseGatesPrompt` / `shipPrompt` — the three completion tools' descriptions,
- *    plus the gate registry's own question/guidance text (see contract.ts).
+ *  - `stepTurnPrompt` — one prompt from what is one kimchi TURN: `start_ferment_step`'s result
+ *    (`planFirstPreamble`, the direct-execution branch, the limits hint) plus `buildWorkerContext`
+ *    (worker-prompt.ts) plus `complete_ferment_step`'s description and the S gates.
+ *  - `phaseGatesPrompt` / `shipPrompt` — the two remaining completion tools' descriptions, plus the gate
+ *    registry's own question/guidance text (see contract.ts).
  *  - `verifyTriagePrompt` — judge.ts (`STEP_VERIFICATION_SYSTEM`), verbatim.
+ *
+ * **Nothing here is invented any more, and two things that were have been removed.** `stepEvidenceBlock`
+ * pasted a gathered step diff into a gate turn, and `landingInstruction` told a dispatched worker to stop
+ * working at 75% of its box and file its report while it still could. Both were real repairs to a real
+ * cost, and both were repairing a shape kimchi does not have: a subagent per step, ruled on afterwards by
+ * a turn that had not watched it. Six live one-shot runs say kimchi dispatches nobody — 31 of 31
+ * `complete_ferment_step` calls with `worker_agent_id` absent, 108 `bash` / 16 `write` / 13 `edit` calls
+ * made by the orchestrator itself, 0 agent spawns — so the worker is gone and both props went with it.
+ * A turn that does its own work has no report to land and no diff to be handed.
  */
 import type { Static } from "typebox";
 import {
@@ -34,12 +44,11 @@ import {
   renderGateGuidance,
   SHIP_GATES,
   STEP_GATES,
-  type workerReportSchema,
 } from "./contract.ts";
+import type { DiffEvidence } from "./verify.ts";
 
 type Plan = Static<typeof planSchema>;
 type JudgeAnswers = Static<typeof judgeAnswersSchema>;
-type WorkerReport = Static<typeof workerReportSchema>;
 
 /** Verbatim from kimchi's src/shared/planning/shared-planning-process.ts. */
 export const SHARED_PLANNING_PROCESS = `Follow five steps IN ORDER. Do NOT get stuck on any step.
@@ -217,11 +226,11 @@ ${SHARED_PLANNING_PROCESS}
    - phases: the smallest useful ordered plan — usually 1–3 phases with 1–4 steps each; every step must have a description and, where possible, a verify bash command
    - gates: exactly ${PLAN_GATES.join(", ")} — each with id, verdict, rationale, evidence
 
-2. **For each phase**, each step is handed to its own worker with an explicit budget_tier chosen from
+2. **For each phase**, each step becomes ONE turn that does the work with bash/edit/write and then
+   answers the step-scope gates on what it did — so give every step an explicit budget_tier chosen from
    the scoped work shape: narrow for verification or one small edit; standard (normal implementation
-   default); complex for multi-file builds or iterative debugging. The worker submits a structured
-   report, the step-scope gates are voted on what it left behind, and the step's verify command is run.
-   A flagged gate or a failed verification does not advance the step.
+   default); complex for multi-file builds or iterative debugging. After the gates, the step's verify
+   command is run for real. A flagged gate or a failed verification does not advance the step.
 
 3. **When all phases are done**, the ferment-scope gates decide whether it ships, against the ${PLAN_GATES[2]}
    checklist you declare here.
@@ -236,7 +245,7 @@ ${renderGateGuidance(PLAN_GATES)}
 
 This step PLANS; it does not implement. Use read-only research tools only — read, grep, find, ls, and
 non-mutating shell commands. Do not edit, create, delete, move, or install anything: the work belongs to
-the workers, and anything done here is work nobody verifies.${answered}`;
+the steps, and anything done here is work no gate ever sees.${answered}`;
 }
 
 /** Verbatim from kimchi's `ASK_USER_FORM_SYSTEM` (src/extensions/ferment/ask-user.ts). */
@@ -285,9 +294,9 @@ export function refinePrompt(args: { intent: string; plan: Plan | undefined; pha
     `Goal: ${plan?.goal ?? intent}`,
     plan?.success_criteria?.length ? `Criteria: ${plan.success_criteria.join("; ")}` : "",
     "",
-    "Each step needs a description a worker can act on having seen nothing else, and a verify bash",
-    "command that exits 0 on success wherever one is possible. Steps run in the order you give them; a",
-    "step's budget_tier selects the worker limits it gets.",
+    "Each step needs a description that can be acted on without anything else being spelled out, and a",
+    "verify bash command that exits 0 on success wherever one is possible. Steps run in the order you",
+    "give them; a step's budget_tier says what shape of work it is.",
     "",
     "This step PLANS; it does not implement. Read-only commands only.",
   ]
@@ -296,15 +305,38 @@ export function refinePrompt(args: { intent: string; plan: Plan | undefined; pha
 }
 
 /**
- * The worker, i.e. what `start_ferment_step` hands the subagent.
+ * ONE step, ONE turn: do the work, then answer for it — kimchi's `start_ferment_step` result and its
+ * `complete_ferment_step` description, addressed to the single agent that receives both.
  *
- * kimchi assembles this from three pieces and tells the planner to paste them into the `Agent` call: the
- * "plan first" preamble, the worker-context block (`buildWorkerContext`), and the selected limits. All
- * three are here; what is dropped is the part addressed to the planner (task_ref, "set all three limits
- * exactly on the Agent call", "call submit_agent_report before its final answer" — the report is this
- * step's declared output, so the engine collects it either way).
+ * ## Why this is one prompt and not two
+ *
+ * This port used to dispatch a worker subagent per step and have a separate turn rule on its report.
+ * kimchi's one-shot ferment dispatches nobody. `start_ferment_step` offers both branches in so many
+ * words — "Either spawn a subagent … or execute the step directly using bash/edit/write. … If you
+ * executed directly, call complete_ferment_step with just the summary and gates (worker_agent_id is
+ * optional)" — and six live native runs take the second one every time: 31 of 31 completions with
+ * `worker_agent_id` absent, and the orchestrator session itself spending 108 `bash`, 16 `write` and 13
+ * `edit` calls with zero agent spawns.
+ *
+ * That is why the S gates are written the way they are. "Read **your own** summary", "Classify **your
+ * own** verify command honestly", "would make **your** work fail" — the second person is not a register,
+ * it is the actual arrangement. The agent answering S1 is the agent whose edits S1 is about, and it wants
+ * the step to land, which is what makes an honest flag mean something.
+ *
+ * ## What it is handed, and what it is not
+ *
+ * Handed: the plan, the phase, this step, what earlier steps left behind (kimchi's `Prior:` line), the
+ * tier as advice, and the step's start ref. That last one is exactly what kimchi gives its orchestrator —
+ * `stepStartRefs` "captured at start_ferment_step, consumed at complete_ferment_step for diff evidence"
+ * (runtime-state-store.ts:11), surfaced as a SHA in derived state (derive-state.ts:150). A gathered diff
+ * used to be pasted in here; it is not any more, because the agent reading this made the edits itself and
+ * one `git diff <ref>` is cheaper than 12KB of context in a session that accumulates the whole run.
+ *
+ * Not handed, on a re-entry: any of the above again. The step is `resumable` on the orchestrator's own
+ * session, so a re-entry is the same conversation continuing — it says only what CHANGED, which is what
+ * a kimchi tool error says.
  */
-export function workerPrompt(args: {
+export function stepTurnPrompt(args: {
   plan: Plan | undefined;
   phaseIndex: number;
   phaseCount: number;
@@ -314,16 +346,62 @@ export function workerPrompt(args: {
   step: PlannedStep;
   tier: BudgetTier;
   priorSteps: readonly { index: number; description: string; summary: string }[];
-  attempt: number;
+  /** The commit this step started from, so `git diff <ref>` is one call away — kimchi's `stepStartRef`. */
+  startRef?: string;
+  /**
+   * Why this step was not accepted last time, when it wasn't. Two shapes, and kimchi distinguishes them:
+   * a flagged gate is a refusal of the completion CALL, raised before anything was recorded; anything
+   * else — a verification the triage judge called real, a turn that produced nothing — is the step
+   * itself coming back. Both land in the same session, which is the point.
+   */
   previous?: {
-    report: WorkerReport | undefined;
-    flags: readonly { id: string; rationale: string; evidence: string }[];
-    verify?: { exitCode: number; stdout: string; stderr: string };
     reason: string;
+    flags: readonly { id: string; rationale: string; evidence: string }[];
+    verify?: { command: string; exitCode: number; stdout: string; stderr: string };
   };
 }): string {
-  const { plan, phaseIndex, phaseCount, phase, stepIndex, stepCount, step, tier, priorSteps, attempt, previous } = args;
+  const { plan, phaseIndex, phaseCount, phase, stepIndex, stepCount, step, tier, priorSteps, startRef, previous } = args;
   const limits = FERMENT_WORKER_BUDGETS[tier];
+
+  // kimchi's refusal for a self-flagged completion, and it means here exactly what it means there: this
+  // one call is refused, nothing was recorded, and the agent that flagged has to resolve the underlying
+  // issue and call again (tools/steps.ts:427). It is the SAME session, still holding the work it did, so
+  // "resolve it yourself" is an instruction it can actually carry out.
+  if (previous && previous.flags.length > 0) {
+    return [
+      gateRefusalText({ what: `Step ${stepIndex}: "${step.description}"`, flags: previous.flags, recall: "complete the step again" }),
+      "",
+      "You did this work and you flagged it, in this conversation. Nothing else has moved: no other agent",
+      "ran, and the machine is exactly as you left it. So resolving what you flagged is your own turn, and",
+      "it is the only way this step can still land.",
+      "",
+      "Do one of these, then answer the gates again:",
+      "  - fix the underlying issue with your tools, then vote 'pass' citing what you changed;",
+      "  - look again, and vote 'pass' if the machine does not actually have the problem you named;",
+      "  - vote 'omitted' with a rationale, when the gate genuinely does not apply to this step.",
+      "",
+      "Flagging a gate that does not apply keeps finished work from ever being recorded.",
+      "",
+      renderGateGuidance(STEP_GATES),
+    ].join("\n");
+  }
+
+  // The step itself coming back: the verification ran and failed, or the turn produced nothing. kimchi's
+  // rule for a continuation is the one it gives for an exhausted worker, and it survives the merge intact
+  // because it was never about the box — "do not raise the limits and retry the same broad task".
+  if (previous) {
+    const ran = previous.verify;
+    return [
+      "THIS STEP WAS NOT ACCEPTED, AND THIS IS A BOUNDED CONTINUATION OF YOUR OWN EARLIER ATTEMPT.",
+      `Reason: ${previous.reason}`,
+      ...(ran ? [`  $ ${ran.command}`, `  exit ${ran.exitCode}`, `  stdout: ${clip(ran.stdout)}`, `  stderr: ${clip(ran.stderr)}`] : []),
+      "",
+      "Fix the underlying cause and finish the remaining work — do not widen the task, and do not start over.",
+      "Then answer the three step-scope gates again, on what the step now leaves behind.",
+      "",
+      renderGateGuidance(STEP_GATES),
+    ].join("\n");
+  }
 
   const prior =
     priorSteps.length > 0 ? `Prior: ${priorSteps.map((s) => (s.summary ? `✓${s.index} "${s.description}" — ${s.summary}` : `✓${s.index} "${s.description}"`)).join("; ")}` : "";
@@ -335,7 +413,7 @@ export function workerPrompt(args: {
     `Step ${stepIndex}/${stepCount}: ${step.description}`,
     step.verify ? `verify: ${step.verify}` : "",
     "",
-    "Write no reports, notes, or scratch files: return decision-ready findings in your report instead. Do NOT create ad-hoc project-root scratch folders unless the task explicitly asked for a product artifact.",
+    "Write no reports, notes, or scratch files: return decision-ready findings in your summary instead. Do NOT create ad-hoc project-root scratch folders unless the task explicitly asked for a product artifact.",
     plan?.goal ? `\nGoal: ${plan.goal}` : "",
     plan?.success_criteria?.length ? `Criteria: ${plan.success_criteria.join("; ")}` : "",
     phase.constraints?.length ? `Constraints: ${phase.constraints.join("; ")}` : "",
@@ -354,102 +432,45 @@ export function workerPrompt(args: {
     .filter((line) => line !== "")
     .join("\n");
 
-  // kimchi's recovery rule for an exhausted worker, applied to this step's second attempt: continue the
-  // same bounded work, do not restart it broader. The session is resumed, so the conversation above is
-  // this worker's own.
-  const retry =
-    attempt > 1 && previous
-      ? [
-          "",
-          "THIS STEP WAS NOT ACCEPTED, AND THIS IS A BOUNDED CONTINUATION OF YOUR OWN EARLIER ATTEMPT.",
-          `Reason: ${previous.reason}`,
-          ...previous.flags.map((flag) => `  [${flag.id}] ${flag.rationale} — evidence: ${flag.evidence}`),
-          previous.verify ? `  verify exited ${previous.verify.exitCode}\n  stdout: ${clip(previous.verify.stdout)}\n  stderr: ${clip(previous.verify.stderr)}` : "",
-          previous.report?.remaining_steps?.length ? `  you reported still outstanding: ${previous.report.remaining_steps.join("; ")}` : "",
-          "Fix the underlying cause and finish the remaining work — do not widen the task, and do not start over.",
-        ]
-          .filter((line) => line !== "")
-          .join("\n")
-      : "";
+  // kimchi's `stepStartRef`, and the whole of what a step turn is given about its own diff. S1 asks for
+  // the diff line behind every claim; naming the ref makes that one command instead of an archaeology.
+  const ref = startRef
+    ? `This step starts at git ref ${startRef}. \`git diff ${startRef}\` is exactly what it changed — S1 wants the line behind each claim, and that is where to cite it from.`
+    : "This working directory is not a git repository (or git could not read it), so there is no diff to cite. Say so in your S1 evidence and cite what you can show instead.";
 
   return `${planFirst}
 
 ${context}
 
-Selected worker budget: budget_tier=${tier}, max_turns=${limits.maxTurns}, max_duration=${limits.maxDuration}s, token_budget=${limits.tokenBudget}.
+Selected worker budget: budget_tier=${tier}, max_turns=${limits.maxTurns}, max_duration=${limits.maxDuration}s, token_budget=${limits.tokenBudget}. Select the tier from the scoped work shape; never infer it from description keywords.
 
-Do this step's work, then run its verification yourself and fix what fails. A "completed" report must use remaining_steps: []; use "partial" if work remains, and "blocked" if something stopped you, naming at least one blocker.${retry}`;
-}
+Execute this step directly, using bash/edit/write. Do its work, then run its verification yourself and fix what fails.
 
-/** kimchi's `complete_ferment_step` description + the step-scope gate guidance. */
-export function stepGatesPrompt(args: {
-  plan: Plan | undefined;
-  phase: { name: string; goal: string };
-  stepIndex: number;
-  step: PlannedStep;
-  report: WorkerReport | undefined;
-  /** The verdicts THIS session flagged last time, when the step was sent back — kimchi's re-call. */
-  previousFlags?: readonly { id: string; rationale: string; evidence: string }[];
-}): string {
-  const { plan, phase, stepIndex, step, report, previousFlags } = args;
+${ref}
 
-  // A re-call, not a fresh vote: this session already flagged and the step was refused. kimchi's
-  // planner sees exactly this text and re-votes — usually passing, or omitting a gate that does not
-  // apply — which is why its steps converge and an earlier version of this port's never did.
-  if (previousFlags && previousFlags.length > 0) {
-    return [
-      gateRefusalText({
-        what: `Step ${stepIndex}: "${step.description}"`,
-        flags: previousFlags,
-        recall: "vote again",
-      }),
-      "",
-      "The worker has since had another attempt at this step. Its report now:",
-      report ? JSON.stringify(report, null, 2) : "(none — the worker returned nothing usable)",
-      "",
-      "Look at the machine again before you vote. If the underlying issue is resolved, vote 'pass'. If a",
-      "gate does not genuinely apply to this step, vote 'omitted' with the rationale that says why —",
-      "flagging a gate that does not apply keeps a finished step from ever completing.",
-      "",
-      renderGateGuidance(STEP_GATES),
-    ].join("\n");
-  }
+Then answer for what you did. You must produce verdicts for the three step-scope gates below, on your own work — a "flag" verdict refuses this completion and comes straight back to you to resolve.
 
-  return [
-    "A worker has just finished a ferment step. Decide whether it may be marked done.",
-    "",
-    `Ferment: ${plan?.title ?? "(untitled)"}`,
-    `Goal: ${plan?.goal ?? "(none specified)"}`,
-    `Phase: ${phase.name} — ${phase.goal}`,
-    `Step ${stepIndex}: "${step.description}"`,
-    step.verify ? `Verification command (it will be run for real after this): ${step.verify}` : "Verification command: none",
-    "",
-    "The worker's own report:",
-    report ? JSON.stringify(report, null, 2) : "(none — the worker returned nothing usable)",
-    "",
-    // Forced by the medium, not editorial: in kimchi this turn is the planner, which already holds the
-    // diff and the worker's transcript. A fresh agent holds neither, and S1 ("does the summary describe
-    // work present in the diff?") is unanswerable without looking.
-    "The diff and the machine are not in your context — read them before voting. Do not fix anything.",
-    "",
-    'You must produce verdicts for the three step-scope gates below. A "flag" verdict blocks step completion.',
-    "",
-    renderGateGuidance(STEP_GATES),
-    "",
-    "Then write the summary the following steps in this phase will read: what was actually accomplished,",
-    "in one or two sentences.",
-  ].join("\n");
+${renderGateGuidance(STEP_GATES)}
+
+And write the summary the following steps in this phase will read: what was actually accomplished, in one or two sentences.`;
 }
 
 /**
  * kimchi's refusal text when a completion turn self-flags, ported from `gate-validation.ts`'s
  * `flagLines` plus each turn's `renderFlagError`.
  *
- * The wording matters more than it looks. kimchi's voter is the PLANNER — the same agent that wants to
- * advance — so "agent self-flagged" is literal, and the message tells it the two ways out: fix the
- * underlying issue, or vote `omitted` when the gate genuinely does not apply. Sending this back into the
- * SAME gate session (the step is `resumable`) is what makes the port's gate turn behave like kimchi's
- * re-call rather than like a fresh sceptic who has never seen its own verdict.
+ * The wording matters more than it looks. kimchi's voter is the ORCHESTRATOR — the agent that did the
+ * work and wants to advance — so "agent self-flagged" is literal, and the message tells it the two ways
+ * out: fix the underlying issue, or vote `omitted` when the gate genuinely does not apply. Sending this
+ * back into the SAME session (the step turn is `resumable` on the orchestrator's key) is what makes the
+ * re-call kimchi's: an agent reconsidering its own verdict on its own work, with the tools to act on it.
+ *
+ * What it refuses is ALSO exact, and this port used to get it wrong: kimchi refuses ONE tool call — "the
+ * agent has to fix the underlying issue and re-call" (tools/steps.ts:427) — not the work behind it. The
+ * only thing that runs again is this turn.
+ *
+ * `recall` is the one substitution the medium forces: kimchi says "re-call complete_ferment_step", and
+ * there is no tool here to re-call. The caller names the equivalent act ("complete the step again").
  */
 export function gateRefusalText(args: { what: string; flags: readonly { id: string; rationale: string; evidence: string }[]; recall: string }): string {
   const { what, flags, recall } = args;
@@ -530,7 +551,7 @@ export function phaseGraderPrompt(args: {
   phaseSummary: string;
   stepSummaries: string;
   gateVerdicts: readonly { id: string; verdict: string; rationale: string }[];
-  diff: { available: boolean; filesChanged: string; diffSnippet: string };
+  diff: DiffEvidence;
   cwd: string;
 }): string {
   const { plan, phase, phaseSummary, stepSummaries, gateVerdicts, diff, cwd } = args;
@@ -555,6 +576,14 @@ export function phaseGraderPrompt(args: {
     parts.push("--- PHASE DIFF ---");
     parts.push(`Files changed:\n${diff.filesChanged || "(none recorded)"}`);
     if (diff.diffSnippet) parts.push(`\nDiff snippet:\n\`\`\`diff\n${diff.diffSnippet}\n\`\`\``);
+    // A byte cap read as an absence of work is a phase refused for the wrong reason, so the snippet says
+    // how much of itself is missing. The grader has tools and is told to verify independently; this tells
+    // it where it must.
+    if (diff.elidedBytes > 0) {
+      parts.push(
+        `\n(This snippet is truncated: ${diff.elidedBytes} bytes were elided from the middle. Work you cannot see here may still exist — check it rather than grading it absent.)`,
+      );
+    }
   } else {
     parts.push("");
     parts.push("(No diff available — use your tools to inspect files directly.)");

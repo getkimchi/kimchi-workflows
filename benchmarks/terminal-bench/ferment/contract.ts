@@ -27,7 +27,30 @@ import { type Static, Type } from "typebox";
 
 // -- Gates ------------------------------------------------------------------------------------------
 
-/** Ported verbatim from kimchi's `gate-registry.ts`: the question and the guidance are prompt text. */
+/**
+ * Ported verbatim from kimchi's `gate-registry.ts`: the question and the guidance are prompt text.
+ *
+ * **Verbatim includes the PERSON, and that is not a stylistic detail.** kimchi writes every gate in the
+ * second person — "Read your own summary", "Classify your own verify command honestly", "would make your
+ * work fail", "List anything you couldn't do". It is talking to the ORCHESTRATOR: the one long-running
+ * ferment session that wrote the plan, DID this step's work, and is about to record its summary. That
+ * agent owns the work and wants it to land; the gates are the honesty check it runs on itself before
+ * advancing. Six live one-shot runs settle who that is — all 31 `complete_ferment_step` calls omitted
+ * `worker_agent_id`, and the orchestrator session spent 108 `bash`, 16 `write` and 13 `edit` calls with
+ * zero agent spawns. "Your own summary" is literal: it wrote the summary because it did the work.
+ *
+ * This port had rewritten the S gates (and F3) into the third person — "Read the step's summary", "the
+ * verify command", "this work", "anything that could not be done". Same questions, different addressee:
+ * an outside assessor asked whether SOMEONE ELSE'S work is sound. It behaves accordingly. Measured over
+ * one live run: S3 flagged 21 times against 15 passes — it refused more often than it passed, on correct
+ * work, once flagging a successful `pip install` because "a network outage would cause pip install to
+ * fail and there is no offline fallback". Native kimchi over the same tasks: 32 steps, 1 retry, 6/6.
+ *
+ * The words are the mechanism. Do not paraphrase them.
+ *
+ * The only substitution left is a tool name with no counterpart here: kimchi's P3/F3 name the
+ * `complete_ferment` tool, and this workflow's equivalent is the ship check (`ship`).
+ */
 export const GATE_REGISTRY = {
   P1: {
     id: "P1",
@@ -62,8 +85,8 @@ export const GATE_REGISTRY = {
     id: "S1",
     question: "Does the summary describe work present in the diff?",
     guidance: [
-      "Read the step's summary. For each concrete claim (file path, function name, behavior), cite the diff line that proves it.",
-      "If it claims a file that was not touched, or a function not in the diff — flag this gate.",
+      "Read your own summary. For each concrete claim (file path, function name, behavior), cite the diff line that proves it.",
+      "If you claim a file you didn't touch, or a function not in the diff — flag this gate.",
       "Empty diff with a non-trivial summary is always a flag.",
       "'omitted' is only valid for steps with no code change (e.g. research, planning).",
     ].join("\n"),
@@ -72,14 +95,14 @@ export const GATE_REGISTRY = {
     id: "S2",
     question: "What did the verify command actually exercise?",
     guidance: [
-      "Classify the verify command honestly:",
+      "Classify your own verify command honestly:",
       "  - smoke:   runs the artifact end-to-end (function call, CLI invocation, request/response)",
       "  - test:    executes a real test that asserts behavior",
       "  - syntactic: type-check, compile-check, lint — proves shape, not behavior",
       "  - proxy:   greps output, checks file existence, counts lines — proves nothing about correctness",
       "  - sentinel: touches a file or echoes a string — pure ceremony, no signal",
       "Put that classification in rationale/evidence. The verdict itself should still be pass, flag, or omitted.",
-      "Return 'flag' if the verify is proxy or sentinel for a step that claims semantic work.",
+      "Return 'flag' if your verify is proxy or sentinel for a step that claims semantic work.",
       "Return 'omitted' for steps with no verification command (your S1 evidence carries the weight).",
     ].join("\n"),
   },
@@ -87,9 +110,9 @@ export const GATE_REGISTRY = {
     id: "S3",
     question: "What edge case would break this step?",
     guidance: [
-      "Name one concrete input or condition that would make this work fail.",
+      "Name one concrete input or condition that would make your work fail.",
       "Empty input, malformed input, concurrent access, missing dependency, network failure — pick the most likely.",
-      "Then state whether the work handles it. If not, that's a 'flag' — you've identified a known gap.",
+      "Then state whether your work handles it. If not, that's a 'flag' — you've identified a known gap.",
       "'omitted' is only valid for steps with no externally-driven behavior (pure config edits, doc-only changes).",
     ].join("\n"),
   },
@@ -116,7 +139,7 @@ export const GATE_REGISTRY = {
     id: "F3",
     question: "What was left undone or deferred in this phase?",
     guidance: [
-      "List anything that could not be done, was skipped, or was deferred — by step or by intent.",
+      "List anything you couldn't do, skipped, or deferred — by step or by intent.",
       "Be explicit. 'Nothing deferred' is a valid verdict only if it's actually true.",
       "Deferred items will be read by C2 at ship time. Hiding them here makes the ship gate fail later.",
       "Return 'pass' when nothing is deferred; 'flag' when items are deferred without explicit acceptance.",
@@ -236,7 +259,9 @@ export function hasBlockingFlag(gates: readonly { verdict: string }[] | undefine
  *
  * The tier moves EARLIER rather than away: there is no per-step planner turn here to choose it at
  * dispatch time (that turn is exactly the orchestration the engine replaces), so the plan carries it and
- * the engine spends it. The wording is kimchi's own, including "never infer it from description keywords".
+ * the step turn's prompt states it. The wording is kimchi's own, including "never infer it from
+ * description keywords" — and so is its force: it describes the work's shape, and nothing enforces it
+ * (see {@link FERMENT_WORKER_BUDGETS}).
  */
 const stepSchema = Type.Object({
   description: Type.String(),
@@ -329,7 +354,9 @@ export type StepItem = Static<typeof stepItemSchema>;
 
 /** What running a step's verify command produced — kimchi's `StepResult`, minus the persistence fields. */
 export const verifyResultSchema = Type.Object({
-  ran: Type.Boolean({ description: "False when the step declared no verification command." }),
+  ran: Type.Boolean({
+    description: "False when the command never ran: the step declared none, or the completion self-flagged and kimchi refuses such a call before it reaches verification.",
+  }),
   command: Type.String(),
   exitCode: Type.Number(),
   stdout: Type.String(),
@@ -339,7 +366,14 @@ export type VerifyResult = Static<typeof verifyResultSchema>;
 
 // -- Per-turn outputs -------------------------------------------------------------------------------
 
-/** kimchi's `submit_agent_report` parameters, unchanged — the worker's final structured report. */
+/**
+ * kimchi's `submit_agent_report` parameters, unchanged — a dispatched worker's final structured report.
+ *
+ * One reader is left: the phase rework, which is the only turn in this workflow still handed to an agent
+ * of its own. A step no longer produces one, because a step is no longer dispatched — the orchestrator
+ * does the work and answers {@link stepGatesSchema} for it, which is the payload kimchi's own one-shot
+ * runs produce.
+ */
 export const workerReportSchema = Type.Object({
   status: Type.Union([Type.Literal("completed"), Type.Literal("partial"), Type.Literal("blocked")], {
     description: 'A completed report must use remaining_steps: []. Use "partial" if work remains, "blocked" if something stopped you.',
@@ -353,7 +387,22 @@ export const workerReportSchema = Type.Object({
   notes: Type.Optional(Type.String()),
 });
 
-/** kimchi's `CompleteStepParams`, minus the ids and the `worker_agent_id` the engine's data flow replaces. */
+/**
+ * kimchi's `CompleteStepParams`, minus the ids and the `worker_agent_id` that turns out never to be set.
+ *
+ * `worker_agent_id` is worth a paragraph, because it settles WHO does a step and who answers for it. It
+ * is OPTIONAL — "Omit when the orchestrator executed the step directly (no subagent was spawned)" — and
+ * `validateLinkedWorker` (tools/steps.ts:146) skips its checks outright "when worker_agent_id is omitted,
+ * the orchestrator executed the step directly". `start_ferment_step` offers the choice in so many words:
+ * "Either spawn a subagent … or execute the step directly using bash/edit/write. … If you executed
+ * directly, call complete_ferment_step with just the summary and gates".
+ *
+ * One-shot ferment takes the second branch, always. Across six live native runs every one of the 31
+ * `complete_ferment_step` calls omitted `worker_agent_id`, and the orchestrator session itself made 108
+ * `bash`, 16 `write` and 13 `edit` calls and spawned no agent at all. So this payload is written by the
+ * agent that did the work, about the work it just did — which is why the registry's second person reads
+ * as it does, and why the port's step turn is one agent rather than a worker plus a reviewer.
+ */
 export const stepGatesSchema = Type.Object({
   summary: Type.String({ description: "Short summary of what this step accomplished, for the steps that follow it." }),
   gates: gateArray(STEP_GATES, STEP_VERDICTS),
@@ -435,12 +484,21 @@ export const verifyTriageSchema = Type.Object({
 // -- Budgets ----------------------------------------------------------------------------------------
 
 /**
- * kimchi's `FERMENT_WORKER_BUDGETS`, verbatim (src/extensions/agents/worker-budget-policy.ts). The
- * planner picks a tier per step exactly as `start_ferment_step` makes it do; here the tier sets the
- * worker step's `maxDurationMs` and `maxTokens` instead of being pasted into an `Agent` tool call.
+ * kimchi's `FERMENT_WORKER_BUDGETS`, verbatim (src/extensions/agents/worker-budget-policy.ts).
  *
- * `cumulativeTokenBudget` has no counterpart: it bounded a worker plus its resumptions, and a resumed
- * attempt here is a fresh execution of the same step with its own budget.
+ * **These numbers are ADVICE here, not boxes, and that is what kimchi does with them too.** Its
+ * `limitsHint` is appended to every `start_ferment_step` result regardless of which branch the
+ * orchestrator takes, and on the branch it actually takes — executing the step itself — there is no
+ * `Agent` call for "set all three execution limits exactly on the Agent call" to apply to. The tier
+ * describes the shape of the work ("narrow for verification or one small edit … complex for multi-file
+ * builds"), and the only thing that ever stops the turn is the run's own deadline. So the tier is
+ * rendered into the step turn's prompt exactly as kimchi renders it, and nothing enforces it.
+ *
+ * An earlier version of this port DID enforce it, as `maxDurationMs` on a dispatched worker step, and
+ * grew a tier ladder to escalate a worker killed at its cap. Both are gone with the worker: there is no
+ * separate process to box when the orchestrator does the work in its own session.
+ *
+ * `cumulativeTokenBudget` has no counterpart either: it bounded a worker plus its resumptions.
  */
 export const FERMENT_WORKER_BUDGETS = {
   narrow: { maxTurns: 10, maxDuration: 180, tokenBudget: 50_000 },

@@ -4,14 +4,14 @@
  * This is the ALTERNATIVE to `tb-solver.workflow.ts`, and it is a different bet. `tb-solver` was
  * designed from measured terminal-bench failures and owes kimchi nothing. This one owes kimchi
  * everything: it is a 1:1 rendering of what `kimchi --ferment-oneshot` does — the same planning process,
- * the same P/S/F/C gate registry, the same worker budget tiers, the same judge standing in for the user,
- * the same verification triage — with exactly one thing removed.
+ * the same P/S/F/C gate registry, the same budget tiers, the same judge standing in for the user, the
+ * same verification triage — with exactly one thing removed.
  *
  * ## What is removed, and why it is the whole point
  *
  * In kimchi the ferment lifecycle runs inside ONE session. The model is holding the plan, the phase, the
- * step, the worker's report and the gate verdicts at once, and after every tool call it has to choose to
- * keep going. When it doesn't, the extension makes it: `maybeInjectFermentStopNudge` re-sends the next
+ * step it is in the middle of doing and the gate verdicts it is about to give, all at once, and after
+ * every tool call it has to choose to keep going. When it doesn't, the extension makes it: `maybeInjectFermentStopNudge` re-sends the next
  * action when a turn ends early, `scheduleNextFermentAction` renders "call start_ferment_step now" with
  * the ids filled in, `maybeInjectScopingProgressNudge` counts exploration turns, the lifecycle
  * obligation guard catches text-only stops, and the one-shot envelope carries a "## Turn discipline"
@@ -33,11 +33,44 @@
  *    rather than silently ignored: a `.foreach` above concurrency 1 requires non-overlapping side
  *    effects (spec §3.4/§8.3), which two agents editing one container's filesystem cannot promise.
  *  - **`budget_tier` moves into the plan.** kimchi picks it per step at `start_ferment_step`; that turn
- *    is orchestration, so the tier is chosen once, at plan time, in the planner's own words.
+ *    is orchestration, so the tier is chosen once, at plan time, in the planner's own words. It is
+ *    ADVICE in the prompt at both ends — see "Budgets".
  *  - **Structured output replaces tool calls.** A gate payload that was a `complete_ferment_step`
  *    argument is now the step's output schema; the engine validates and steers on it (spec §9.2).
  *  - **Every agent step is `optional`.** In kimchi a failing turn is a tool error the session survives;
  *    here the equivalent is a step whose failure does not take the run down with it.
+ *
+ * ## The worker that was here, and why it is gone
+ *
+ * Until now this file dispatched a `worker` subagent per step and had a separate turn rule on its report.
+ * **kimchi's one-shot ferment dispatches nobody.** `start_ferment_step` offers both branches in so many
+ * words — "Either spawn a subagent … or execute the step directly using bash/edit/write. … If you
+ * executed directly, call complete_ferment_step with just the summary and gates (worker_agent_id is
+ * optional)" — and six live native runs take the second one every time: all 31 `complete_ferment_step`
+ * calls with `worker_agent_id` absent, and the orchestrator session itself spending 108 `bash`, 16
+ * `write` and 13 `edit` calls, with zero agent spawns.
+ *
+ * So a step is ONE agent turn on the orchestrator's own session: it does the work with its tools and then
+ * answers S1/S2/S3 about that work. The gate registry's second person stops being a courtesy and becomes
+ * a fact — "Read **your own** summary" is addressed to the agent that wrote it because it did the work.
+ *
+ * Three pieces of machinery went with the worker, and all three were sound repairs to a shape kimchi does
+ * not have. They are recorded here rather than quietly deleted, because each was added on measurement:
+ *
+ *  - the **tier box** (`maxDurationMs` from `FERMENT_WORKER_BUDGETS`), the **landing instruction** ("STOP
+ *    WORKING AT Ns AND WRITE YOUR REPORT") and the **kill-and-escalate** ladder (`tierForAttempt`,
+ *    `escalateTier`, `worker-landing`). All three existed because a dispatched subagent killed at its cap
+ *    returns NOTHING — 46.0 min of one 6-task run went that way, 6 of 11 workers on a single task. There
+ *    is no separate process to kill when the orchestrator does the work in its own session, so there is
+ *    nothing to box, nothing to land inside, and nothing to escalate;
+ *  - the **gate box** (`STEP_GATE_MAX_MS = 180s`), added because a gate turn that was a tool call in
+ *    kimchi had become a subagent here and one had run 1472s against a p75 of 57s. The turn it was boxing
+ *    no longer exists as a separate turn;
+ *  - the **step diff block** (`step-diff`), which pasted a gathered diff into a gate turn that had not
+ *    seen the work — 92.4 min of gate turns over that run, against 23 min if each had cost its own task's
+ *    fastest. The reader has now made the edits itself, and what it gets instead is the one thing kimchi
+ *    gives its orchestrator: the step's start ref (`stepStartRefs`, "consumed at complete_ferment_step for
+ *    diff evidence", surfaced as a SHA in `derive-state.ts`). kimchi assembles a step diff for nobody.
  *
  * ## Shape
  *
@@ -45,19 +78,31 @@
  *   phases  = foreach phase
  *               refine?                                 only a phase the plan left with no steps
  *               steps = foreach step
- *                         (worker → S gates → verify → triage? → check)*
- *               close = (rework? → F gates → grade → decide)*
+ *                         (step turn → gate check → verify → triage? → check)*
+ *               close = (rework? → F gates → grade? → decide)*
  *   ship    = the C gates                               once every phase is terminal
  *
- * The three loops are where a ferment's "refuses advancement" lives, and they are not the same refusal:
+ * The loops are where a ferment's "refuses advancement" lives, and they are NOT the same refusal. Reading
+ * them as one is the single most expensive mistake this port has made:
  *
- *  - a flagged S gate or a failed verification sends the STEP back to its own worker for one bounded
- *    continuation (kimchi's rule for a worker that did not land: "a bounded direct continuation … do not
- *    raise the limits and retry the same broad task"), expressed as a `resumable` step in a `dountil`;
+ *  - a flagged S gate refuses ONE COMPLETION and nothing else. kimchi is explicit: "Step-level flags
+ *    don't feed the phase retry/escalation pipeline - they just refuse this single call, and the agent
+ *    has to fix the underlying issue and re-call" (tools/steps.ts:427). Nothing is recorded and the
+ *    verification never runs — "Gate validation runs BEFORE any state mutation" — and the step turn is
+ *    re-entered on its own session holding kimchi's refusal text, where it may work some more before
+ *    answering again. That is the same conversation continuing, not a second opinion being bought;
+ *  - a verification the triage judge calls real sends the STEP back, into that same session, told what
+ *    the command actually printed (kimchi's rule: "a bounded direct continuation … do not raise the
+ *    limits and retry the same broad task");
  *  - a PHASE that clears its F gates then has to clear the grader as well — A/B advance, C/D/F refuse
  *    and buy a rework, up to `MAX_BLOCK_RETRIES` times, after which the grade is accepted and the phase
  *    advances anyway. This is the piece of kimchi that is easiest to mistake for a report: the letter
  *    grade drives control flow, and an earlier version of this file omitted it entirely.
+ *
+ * The first two used to be two nested loops, because one re-ran a cheap gate turn and the other bought a
+ * fresh cold worker. Both are now the same act — re-enter the session that did the work — so they are one
+ * loop with one counter, and what differs is only what the turn is told and whether the verification is
+ * reached.
  */
 import { type Static, Type } from "typebox";
 import { createAgentStep, createStep, createWorkflow, type RunContext } from "../../../src/flow/index.ts";
@@ -89,24 +134,12 @@ import {
   verifyTriageSchema,
   workerReportSchema,
 } from "./contract.ts";
-import {
-  judgePrompt,
-  phaseGatesPrompt,
-  phaseGraderPrompt,
-  phaseReworkPrompt,
-  planPrompt,
-  refinePrompt,
-  shipPrompt,
-  stepGatesPrompt,
-  verifyTriagePrompt,
-  workerPrompt,
-} from "./prompts.ts";
-import { currentGitRef, type PhaseDiff, phaseDiffSince, runVerification } from "./verify.ts";
+import { judgePrompt, phaseGatesPrompt, phaseGraderPrompt, phaseReworkPrompt, planPrompt, refinePrompt, shipPrompt, stepTurnPrompt, verifyTriagePrompt } from "./prompts.ts";
+import { currentGitRef, type DiffEvidence, phaseDiffSince, runVerification } from "./verify.ts";
 
 type Task = Static<typeof taskInputSchema>;
 type Plan = Static<typeof planSchema>;
 type JudgeAnswers = Static<typeof judgeAnswersSchema>;
-type WorkerReport = Static<typeof workerReportSchema>;
 type StepGates = Static<typeof stepGatesSchema>;
 type PhaseGates = Static<typeof phaseGatesSchema>;
 type VerifyResult = Static<typeof verifyResultSchema>;
@@ -117,33 +150,64 @@ const MODEL = process.env.TB_MODEL ?? "kimchi-dev/kimi-k2.7";
 
 // -- Budgets -----------------------------------------------------------------------------------------
 //
-// There is NO wall clock here, on purpose. A ferment runs until the work is done; it never divides a
-// budget across its stages, never sizes a turn from what is left, and never tells a model how long it
-// has. Adding any of that would be inventing scheduling policy kimchi does not have, and a first run of
-// this workflow showed exactly what that costs: per-stage boxes fed on what earlier stages had spent,
-// so `phase-gates` was granted 307ms and `ship` a NEGATIVE box — the two closing gate turns never ran,
-// and the ship verdict was decided by arithmetic instead of by evidence.
+// NOTHING here is sized from what is left. A ferment runs until the work is done; it never divides a
+// budget across its stages, never sizes a turn from the remaining clock, and never tells a model how much
+// of the run it may have. Adding any of that would be inventing scheduling policy kimchi does not have,
+// and a first run of this workflow showed exactly what that costs: per-stage boxes fed on what earlier
+// stages had spent, so `phase-gates` was granted 307ms and `ship` a NEGATIVE box — the two closing gate
+// turns never ran, and the ship verdict was decided by arithmetic instead of by evidence.
+//
+// **A step turn now carries no wall clock at all, and that is the deliberate cost of the merge.** kimchi
+// bounds this turn with nothing but the run's own deadline: `complete_ferment_step` is a tool call inside
+// a session the harness owns, and the work before it is that same session's tool calls. There is no
+// second process to box once the orchestrator does the work, so boxing it would be inventing a bound
+// kimchi does not have — which is what the old `worker` tier box and `STEP_GATE_MAX_MS` were, honestly
+// arrived at and no longer applicable. The tier survives as PROMPT TEXT, exactly as kimchi's `limitsHint`
+// survives on the branch where no Agent is ever spawned.
+//
+// What that buys, stated plainly: a step turn that runs away now spends the RUN's clock rather than its
+// own, and the phases behind it get less. That is the same exposure kimchi carries, at the same level.
 //
 // The single deadline that does exist is the run's own, and it predates this workflow: `extension.ts`
 // aborts the run shortly before the harness would kill it, which cancels whatever is in flight and
 // leaves the machine settled. That is the same protection kimchi gets from its harness, at the same
 // level — the whole run, not the individual turn.
 //
-// The one budget that IS enforced per step is kimchi's own: a worker gets the `max_duration` of the
-// tier the plan chose for it (`FERMENT_WORKER_BUDGETS`, ported verbatim).
+// One constant box is left in this file, on `phase-rework` — the only turn still handed to an agent of
+// its own rather than taken by the orchestrator — and it is kimchi's own `standard` tier, not a share of
+// anything.
 
 /**
- * How many times a refused step may be re-attempted before the loop stops.
+ * The one conversation kimchi's orchestrator has, named so several steps can share it (spec §2.2,
+ * `resumable: "<key>"`).
  *
- * kimchi has NO cap here — "step-level flags don't feed the phase retry/escalation pipeline, they just
- * refuse this single call", and the planner re-calls until it passes, or resolves the step explicitly
- * with skip/fail. Neither of those exists as a turn in this workflow, so some bound is unavoidable; it
- * borrows `MAX_BLOCK_RETRIES`, the only retry budget kimchi actually defines, rather than inventing a
- * second number.
+ * In kimchi there is no such thing as "the planning agent", "the working agent" and "the gate agent":
+ * `scope_ferment`, `start_ferment_step`, the bash/edit/write that follow it, `complete_ferment_step`,
+ * `complete_ferment_phase` and `complete_ferment` are all one session's turns. That is why every gate is
+ * written in the second person, why C1 can walk a checklist "declared at scope time" — it declared it —
+ * and why S1 can ask about "your own summary": it did the work the summary is about. Keyed per step
+ * instead, each of those turns would meet the others' output as text it was handed.
  *
- * It was 2, chosen when the gate turn was a cold subagent that could never change its mind. Now that
- * the voter resumes its own session and is shown kimchi's refusal text, a re-call can actually converge,
- * so the budget is the one kimchi uses for exactly that shape of loop.
+ * The steps holding this key run strictly sequentially (no `.foreach` here exceeds concurrency 1), which
+ * is what makes sharing legal: `.commit()` rejects a shared key on anything that can overlap, because
+ * two subagents appending to one session file would interleave into nonsense.
+ */
+const ORCHESTRATOR_SESSION = "orchestrator";
+
+/**
+ * How many times a step's turn may run: the refusals of its completion and the continuations after a
+ * failed verification, counted together because they are now the same act.
+ *
+ * kimchi caps NEITHER — "step-level flags don't feed the phase retry/escalation pipeline, they just
+ * refuse this single call", and the orchestrator re-calls until it passes, or resolves the step
+ * explicitly with skip/fail. Neither of those exists as a turn in this workflow, so some bound is
+ * unavoidable; it borrows `MAX_BLOCK_RETRIES`, the only retry budget kimchi actually defines, rather
+ * than inventing a second number.
+ *
+ * It was 2, chosen when a refusal re-ran a cold subagent that could never change its mind. It then became
+ * two nested budgets, one per loop. It is one number again because there is one loop again: the same
+ * session is re-entered either way, so `STEP_MAX_ATTEMPTS` re-entries is the whole of a step's budget
+ * rather than one factor of a product.
  */
 const STEP_MAX_ATTEMPTS = MAX_BLOCK_RETRIES;
 
@@ -214,7 +278,12 @@ const plan = createAgentStep({
   background: true,
   // A second round is a REPLAN with the judge's answers in hand, not a fresh start — the same
   // continuity kimchi gets for free from running scoping inside one session.
-  resumable: true,
+  //
+  // The key is SHARED with every other turn kimchi's orchestrator owns (`step-turn`, `phase-gates`,
+  // `ship`): in kimchi those are all turns of the one session that wrote this plan, so the agent DOING a
+  // step is the agent that scoped it and knows why it is scoped that way. Sharing the key is what makes
+  // that true here; without it every later turn meets the plan as text it was handed.
+  resumable: ORCHESTRATOR_SESSION,
   optional: true,
   retry: { maxRetry: 0 },
   prompt: ({ ctx }) => {
@@ -306,7 +375,6 @@ type StepCheck = {
   verified: string;
   reason: string;
   flags: { id: string; rationale: string; evidence: string }[];
-  report: WorkerReport | undefined;
 };
 
 const stepCheckSchema = Type.Object({
@@ -319,19 +387,19 @@ const stepCheckSchema = Type.Object({
   verified: Type.String(),
   reason: Type.String(),
   flags: Type.Array(Type.Object({ id: Type.String(), rationale: Type.String(), evidence: Type.String() })),
-  // Carried rather than re-read: a step may not observe itself (spec §3.9), so the worker's prompt on a
-  // second attempt cannot read `worker`'s own previous output — it reads this.
-  report: Type.Optional(workerReportSchema),
 });
 
 /**
- * Which attempt at this step this is. Read at the top of the attempt, because a step may not observe
+ * Which attempt at this step this is. Read at the TOP of the attempt, because a step may not observe
  * itself (spec §3.9) — `step-check` cannot count its own attempts.
  *
  * The read is a BARE name on purpose: an explicit path is absolute (spec §8.5), and this loop lives
  * under whichever phase and step item it is nested in, so `attempts/step-check` would address a node
  * that exists at the root and resolve to nothing at all. A bare name resolves lexically, to this item's
  * own previous iteration.
+ *
+ * It used to sample a wall clock too, which `worker-landing` read to infer whether a dispatched worker
+ * had been killed at its cap. Nothing is dispatched and nothing is capped, so there is no kill to infer.
  */
 const attemptClock = createStep({
   name: "attempt-clock",
@@ -361,26 +429,56 @@ const priorStepsOf = (ctx: RunContext, phaseIndex: number, stepIndex: number): {
 
 const tierOf = (step: PlannedStep | undefined) => budgetTier(step?.budget_tier);
 
-const worker = createAgentStep({
-  name: "worker",
-  description: "Do this step's work and report on it",
-  output: workerReportSchema,
+/**
+ * The step: kimchi's `start_ferment_step`, the work, and `complete_ferment_step`, in the one turn that
+ * does all three.
+ *
+ * ## Who does the work, and the reading that got this wrong twice
+ *
+ * kimchi offers its orchestrator two branches at `start_ferment_step`: "Either spawn a subagent … or
+ * execute the step directly using bash/edit/write. … If you executed directly, call
+ * complete_ferment_step with just the summary and gates (worker_agent_id is optional)". One-shot ferment
+ * takes the direct branch every time — 31 of 31 completions across six live runs with `worker_agent_id`
+ * absent, 108 `bash` / 16 `write` / 13 `edit` calls made by the orchestrator session itself, 0 spawns.
+ *
+ * This port modelled the other branch, and paid for it twice over. First it made the gate turn an
+ * INDEPENDENT cold reviewer, on the argument that S1 ("does the summary describe work present in the
+ * diff?") is "only a real question when you have not written the summary yourself" — which measured 30
+ * refusals in 33 step attempts across five runs, the S gates never once passing a step they had already
+ * flagged. Then it kept a dispatched worker and merely resumed the reviewer, which fixed the refusals but
+ * left a whole extra agent, its box, its landing instruction and its escalation ladder in place — every
+ * one of them machinery for a subagent kimchi never spawns.
+ *
+ * So this is ONE agent step: it does the work with its tools, then answers S1/S2/S3 about what it did.
+ * That is what makes the registry's second person literally true — "Read your own summary" is addressed
+ * to the agent that wrote the summary because it did the work — and it is why a flag can be refused
+ * straight back here (`gate-check`): resolving it is this agent's own turn, in this conversation, with
+ * the same tools it used the first time.
+ *
+ * It shares `ORCHESTRATOR_SESSION` with `plan`, `phase-gates` and `ship`, because in kimchi all of them
+ * are turns of one session. No `maxDurationMs`: there is no separate process to box, and kimchi bounds
+ * this turn with nothing but the run's deadline (see "Budgets").
+ */
+const stepTurn = createAgentStep({
+  name: "step-turn",
+  description: "Do this step's work, then answer the step-scope gates on what you did",
+  output: stepGatesSchema,
   background: true,
-  // kimchi's recovery for a worker that did not land: `resume_subagent` for a bounded continuation
-  // rather than a broader retry. A resumed session is exactly that.
-  resumable: true,
   optional: true,
   retry: { maxRetry: 0 },
-  // kimchi's own budget for this worker: the `max_duration` of the tier the plan chose, and nothing
-  // else — no share of the run, no reading of the clock. The tier's `tokenBudget` has no counterpart,
-  // because `maxTokens` is a constant on the step (spec §9.3) while the tier varies per step.
-  maxDurationMs: ({ ctx }) => FERMENT_WORKER_BUDGETS[tierOf(ctx.getStepResult<StepItem>("step-ctx")?.step)].maxDuration * 1000,
+  // The orchestrator's own conversation, and the reason a refusal can be sent straight back into it: the
+  // agent re-entering has its work, its verdicts and kimchi's refusal text, and can act on all three.
+  resumable: ORCHESTRATOR_SESSION,
   prompt: ({ ctx }) => {
     const phase = ctx.getStepResult<PhaseItem>("phase-ctx");
     const item = ctx.getStepResult<StepItem>("step-ctx");
     const attempt = ctx.getStepResult<{ attempt: number }>("attempt-clock")?.attempt ?? 1;
     const last = ctx.getStepResult<StepCheck>("step-check");
-    return workerPrompt({
+    // The verification this step has already been through, which exists only from the SECOND attempt on:
+    // kimchi runs the verify command inside `complete_ferment_step`, AFTER the gates, and a refused call
+    // never reaches it at all. Reordering it to feed a first attempt would change what a refusal costs.
+    const verified = ctx.getStepResult<VerifyResult>("verify");
+    return stepTurnPrompt({
       plan: planOf(ctx),
       phaseIndex: phase?.index ?? 1,
       phaseCount: phase?.total ?? 1,
@@ -390,63 +488,78 @@ const worker = createAgentStep({
       step: item?.step ?? { description: "(missing)" },
       tier: tierOf(item?.step),
       priorSteps: priorStepsOf(ctx, phase?.index ?? 1, item?.index ?? 1),
-      attempt,
-      previous:
-        attempt > 1 && last
-          ? {
-              report: last.report,
-              flags: last.flags,
-              verify: ctx.getStepResult<VerifyResult>("verify"),
-              reason: last.reason,
-            }
-          : undefined,
+      startRef: ctx.getStepResult<{ ref: string }>("step-start-ref")?.ref,
+      // Everything a re-entry needs and nothing it already has: the session is resumed, so this says only
+      // what changed. `flags` picks the refusal branch, which is kimchi's gate error; anything else is the
+      // step itself coming back.
+      previous: attempt > 1 && last ? { reason: last.reason, flags: last.flags, verify: verified?.ran === true ? verified : undefined } : undefined,
     });
+  },
+});
+
+type GateCheck = {
+  refused: boolean;
+  summary: string;
+  verdicts: string;
+  flags: { id: string; rationale: string; evidence: string }[];
+};
+
+const gateCheckSchema = Type.Object({
+  refused: Type.Boolean(),
+  summary: Type.String(),
+  verdicts: Type.String(),
+  flags: Type.Array(Type.Object({ id: Type.String(), rationale: Type.String(), evidence: Type.String() })),
+});
+
+/**
+ * kimchi's gate validation, which runs at the TOP of `completeStep` and before any state mutation: a
+ * flagged verdict refuses this one call and nothing else happens — no verification, no step record.
+ *
+ * "Step-level flags don't feed the phase retry/escalation pipeline - they just refuse this single call,
+ * and the agent has to fix the underlying issue and re-call" (tools/steps.ts:427). Re-calling is exactly
+ * what the next iteration of this loop does, into the session that flagged.
+ *
+ * A turn that produced NOTHING has no verdicts, so `hasBlockingFlag(undefined)` is false and this is not
+ * a refusal — the step is decided on its verification alone, with the gate record reading "(none)" for
+ * `phase-gates` (F1 reads every step's S2) and the grader to see. That is how every unreachable judge in
+ * this port is read: advisory, never a refusal.
+ */
+const gateCheck = createStep({
+  name: "gate-check",
+  description: "Does this completion stand, or is it refused back to the same session",
+  output: gateCheckSchema,
+  run: ({ ctx, logger }) => {
+    const gates = ctx.getStepResult<StepGates>("step-turn");
+    const flags = (gates?.gates ?? [])
+      .filter((gate) => normalizeVerdict(gate.verdict) === "flag")
+      .map((gate) => ({ id: gate.id, rationale: gate.rationale, evidence: gate.evidence }));
+
+    const refused = hasBlockingFlag(gates?.gates);
+    logger.info("completion turn finished", { refused, flags: flags.map((flag) => flag.id) });
+    return {
+      refused,
+      summary: gates?.summary ?? "(no summary)",
+      verdicts: (gates?.gates ?? []).map((gate) => `${gate.id}:${gate.verdict}`).join(" ") || "(none)",
+      flags,
+    };
   },
 });
 
 /**
- * The step-scope gates (kimchi's `complete_ferment_step`).
- *
- * In kimchi the planner votes on these — it has the worker's report and the diff in its own context. Here
- * it is a fresh agent that has only the report, which is strictly more adversarial: S1 ("does the summary
- * describe work present in the diff?") is a real question when you have not written the summary yourself.
+ * kimchi runs the step's verify command itself, inside `complete_ferment_step`. So does this — and at
+ * the same point in the turn, which is AFTER the gates: "Gate validation runs BEFORE any state
+ * mutation" (tools/steps.ts:427). A refused call never reaches the verification, so neither does this.
  */
-const stepGates = createAgentStep({
-  name: "step-gates",
-  description: "Vote the step-scope gates on what the worker actually left behind",
-  output: stepGatesSchema,
-  background: true,
-  optional: true,
-  retry: { maxRetry: 0 },
-  // Resumable, because kimchi's re-call happens INSIDE the voter's own session. Its planner flags,
-  // reads "cannot complete - agent self-flagged … resolve and re-call with 'pass' (or 'omitted' …)",
-  // and votes again holding its own previous verdicts. A cold subagent per attempt re-derives the same
-  // scepticism from nothing and never converges — measured across five runs, 30 of 33 step attempts
-  // refused, with the S gates never once accepting a step they had already flagged.
-  resumable: true,
-  prompt: ({ ctx }) => {
-    const phase = ctx.getStepResult<PhaseItem>("phase-ctx");
-    const item = ctx.getStepResult<StepItem>("step-ctx");
-    return stepGatesPrompt({
-      plan: planOf(ctx),
-      phase: phase?.phase ?? { name: "(unknown)", goal: "(unknown)" },
-      stepIndex: item?.index ?? 1,
-      step: item?.step ?? { description: "(missing)" },
-      report: ctx.getStepResult<WorkerReport>("worker"),
-      previousFlags: ctx.getStepResult<StepCheck>("step-check")?.flags,
-    });
-  },
-});
-
-/** kimchi runs the step's verify command itself, inside `complete_ferment_step`. So does this. */
 const verify = createStep({
   name: "verify",
   description: "Run the step's verification command and record what it did",
   output: verifyResultSchema,
   optional: true,
   run: async ({ ctx, abortSignal, logger }) => {
+    const notRun = { ran: false, command: "", exitCode: 0, stdout: "", stderr: "" };
+    if (ctx.getStepResult<GateCheck>("gate-check")?.refused === true) return notRun;
     const command = ctx.getStepResult<StepItem>("step-ctx")?.step.verify?.trim();
-    if (!command) return { ran: false, command: "", exitCode: 0, stdout: "", stderr: "" };
+    if (!command) return notRun;
     const result = await runVerification(command, abortSignal);
     logger.info("verification finished", { command, exitCode: result.exitCode });
     return result;
@@ -482,42 +595,47 @@ const triageRound = createWorkflow({ name: TRIAGE_ARM }).then(triage).commit();
 
 /**
  * kimchi's `completeStep`, as a decision rather than a tool call — same order, same precedences:
- * a blocking gate flag refuses completion; then a worker that did not report `completed` refuses it;
- * then the verification decides, with a non-zero exit going to triage whose silence reads as `fail`.
+ * a blocking gate flag refuses the completion; then a turn that produced nothing refuses it; then the
+ * verification decides, with a non-zero exit going to triage whose silence reads as `fail`.
+ *
+ * The refusals are NOT interchangeable even though they now share a loop. A flag is refused BEFORE
+ * anything is recorded and before the verification runs at all, and what it asks for is a fix and a
+ * re-vote; a failed verification is the step itself coming back, with the command's output to work from.
+ * `reason` and `flags` are what tell the next turn which of the two it is looking at.
  */
 const stepCheck = createStep({
   name: "step-check",
-  description: "Decide whether this step is done, or gets one bounded continuation",
+  description: "Decide whether this step is done, or is re-entered",
   output: stepCheckSchema,
   run: ({ ctx, logger }) => {
     const item = ctx.getStepResult<StepItem>("step-ctx");
     const attempt = ctx.getStepResult<{ attempt: number }>("attempt-clock")?.attempt ?? 1;
-    const gates = ctx.getStepResult<StepGates>("step-gates");
-    const report = ctx.getStepResult<WorkerReport>("worker");
+    const completion = ctx.getStepResult<GateCheck>("gate-check");
+    const gates = ctx.getStepResult<StepGates>("step-turn");
     const verified = ctx.getStepResult<VerifyResult>("verify");
     const verdict = ctx.getStepResult<Record<string, Triage | undefined>>("triage")?.[TRIAGE_ARM];
 
-    const flags = (gates?.gates ?? [])
-      .filter((gate) => normalizeVerdict(gate.verdict) === "flag")
-      .map((gate) => ({ id: gate.id, rationale: gate.rationale, evidence: gate.evidence }));
+    const flags = completion?.flags ?? [];
 
     const verifiedLine = verified?.ran
       ? verified.exitCode === 0
         ? `exit 0 (${verified.command})`
         : `exit ${verified.exitCode} (${verified.command}) — triage: ${verdict?.verdict ?? "fail (no verdict)"}`
-      : "no verification command";
+      : completion?.refused === true
+        ? "not run — the completion was refused before verification"
+        : "no verification command";
 
     let done = true;
     let reason = "gates passed and verification held";
-    if (hasBlockingFlag(gates?.gates)) {
+    if (completion?.refused === true) {
       done = false;
       reason = `a step gate flagged: ${flags.map((flag) => flag.id).join(", ")}`;
-    } else if (report === undefined) {
+    } else if (gates === undefined) {
+      // The turn produced nothing at all — no summary, no verdicts, so nothing was done that anyone can
+      // account for. kimchi's session would be nudged to try the step again; here that is the next
+      // iteration, which resumes the same conversation.
       done = false;
-      reason = "the worker returned no report";
-    } else if (report.status !== "completed") {
-      done = false;
-      reason = `the worker reported "${report.status}": ${report.blockers?.join("; ") || report.remaining_steps.join("; ") || report.summary}`;
+      reason = "the step turn returned nothing — no summary and no gate verdicts";
     } else if (verified?.ran && verified.exitCode !== 0) {
       // kimchi's fail-safe: anything other than a clearly parsed "pass" is a failure, and a judge that
       // never answered is not a pass.
@@ -537,28 +655,68 @@ const stepCheck = createStep({
       attempt,
       index: item?.index ?? 0,
       description: item?.step.description ?? "(missing)",
-      summary: gates?.summary ?? report?.summary ?? "(no summary)",
-      verdicts: (gates?.gates ?? []).map((gate) => `${gate.id}:${gate.verdict}`).join(" ") || "(none)",
+      summary: completion?.summary ?? "(no summary)",
+      verdicts: completion?.verdicts ?? "(none)",
       verified: verifiedLine,
       reason,
       flags,
-      report,
     };
   },
 });
 
+/**
+ * One attempt at a step, and kimchi's own order inside `completeStep`: the gates first, because "Gate
+ * validation runs BEFORE any state mutation", then the verification the gates guard.
+ *
+ * This used to be two nested loops — an inner one that re-voted the gates alone, and an outer one that
+ * re-dispatched the worker. With one agent doing both, both loops are the same act (re-enter the session
+ * that did the work), so there is one loop, one counter, and no way for a step to cost the product of
+ * two budgets.
+ */
 const stepAttempt = createWorkflow({ name: "attempt" })
   .then(attemptClock)
-  .then(worker)
-  .then(stepGates)
+  .then(stepTurn)
+  .then(gateCheck)
   .then(verify)
   .branch([[verifyFailed, triageRound]], { name: "triage" })
   .then(stepCheck)
   .commit();
 
+/**
+ * A step ends when it is done, or when it has had its attempts.
+ *
+ * A flag no longer ends it. That rule was here because going round again meant re-running a WORKER, which
+ * is the one thing kimchi never does for a flag — it refuses a single tool call. Going round now means
+ * re-entering the session that flagged, holding kimchi's refusal text, which is precisely what kimchi's
+ * orchestrator does. A step that leaves this loop still flagged is simply not done, and the F gates and
+ * the phase grader read it that way.
+ */
+const stepSettled = (last: StepCheck): boolean => last.done || last.attempt >= STEP_MAX_ATTEMPTS;
+
+/**
+ * The commit this STEP starts from — kimchi's `stepStartRef`, captured at `start_ferment_step` and
+ * "consumed at complete_ferment_step for diff evidence" (runtime-state-store.ts:11).
+ *
+ * Outside the attempt loop deliberately: a second attempt continues the first one's work, so the range
+ * has to cover both. Anchored per step rather than per phase for the same reason in reverse — S1 asks
+ * whether THIS step's summary is in the diff, and a phase-wide range would drag in every earlier step.
+ *
+ * The SHA is all that is handed over, which is all kimchi hands over (`derive-state.ts:150`). The agent
+ * reading it made the edits itself; `git diff <ref>` is one command, and a version of this file that
+ * gathered the diff and pasted it in was serving a reader that no longer exists.
+ */
+const stepStartRef = createStep({
+  name: "step-start-ref",
+  description: "The commit this step starts from",
+  output: Type.Object({ ref: Type.String() }),
+  optional: true,
+  run: async ({ abortSignal }) => ({ ref: await currentGitRef(abortSignal) }),
+});
+
 const stepBody = createWorkflow({ name: "step" })
   .then(stepCtx)
-  .dountil(stepAttempt, (_ctx, last) => (last as StepCheck).done || (last as StepCheck).attempt >= STEP_MAX_ATTEMPTS, { name: "attempts", maxIterations: STEP_MAX_ATTEMPTS + 1 })
+  .then(stepStartRef)
+  .dountil(stepAttempt, (_ctx, last) => stepSettled(last as StepCheck), { name: "attempts", maxIterations: STEP_MAX_ATTEMPTS + 1 })
   .commit();
 
 // -- One phase --------------------------------------------------------------------------------------
@@ -607,11 +765,14 @@ const stepSelector = (ctx: RunContext): readonly StepItem[] => {
 
 const phaseGates = createAgentStep({
   name: "phase-gates",
-  description: "Vote the phase-scope gates on what the phase actually delivered",
+  description: "Answer the phase-scope gates on what the phase actually delivered",
   output: phaseGatesSchema,
   background: true,
   optional: true,
   retry: { maxRetry: 0 },
+  // kimchi's `complete_ferment_phase` — the same orchestrator turn again, so the same session. F1 asks it
+  // to "read the S2 verdicts from every step in this phase", which are verdicts it gave itself.
+  resumable: ORCHESTRATOR_SESSION,
   prompt: ({ ctx }) => {
     const item = ctx.getStepResult<PhaseItem>("phase-ctx");
     const steps = (ctx.getStepResult<(StepCheck | undefined)[]>("steps") ?? []).filter((step): step is StepCheck => step !== undefined);
@@ -646,14 +807,14 @@ const phaseGrade = createAgentStep({
     const item = ctx.getStepResult<PhaseItem>("phase-ctx");
     const gates = ctx.getStepResult<PhaseGates>("phase-gates");
     const steps = (ctx.getStepResult<(StepCheck | undefined)[]>("steps") ?? []).filter((step): step is StepCheck => step !== undefined);
-    const diff = ctx.getStepResult<PhaseDiff>("phase-diff");
+    const diff = ctx.getStepResult<DiffEvidence>("phase-diff");
     return phaseGraderPrompt({
       plan: planOf(ctx),
       phase: item?.phase ?? { name: "(unknown)", goal: "(unknown)" },
       phaseSummary: gates?.summary ?? "",
       stepSummaries: steps.map((step) => `  ${step.index}. "${step.description}" — ${step.summary} [${step.verified}]`).join("\n"),
       gateVerdicts: gates?.gates ?? [],
-      diff: diff ?? { available: false, filesChanged: "", diffSnippet: "" },
+      diff: diff ?? { available: false, filesChanged: "", diffSnippet: "", elidedBytes: 0 },
       cwd: process.cwd(),
     });
   },
@@ -671,7 +832,7 @@ const phaseStartRef = createStep({
 const phaseDiff = createStep({
   name: "phase-diff",
   description: "What this phase changed, for the grader",
-  output: Type.Object({ available: Type.Boolean(), filesChanged: Type.String(), diffSnippet: Type.String() }),
+  output: Type.Object({ available: Type.Boolean(), filesChanged: Type.String(), diffSnippet: Type.String(), elidedBytes: Type.Number() }),
   optional: true,
   run: async ({ ctx, abortSignal }) => phaseDiffSince(ctx.getStepResult<{ ref: string }>("phase-start-ref")?.ref ?? "", abortSignal),
 });
@@ -864,11 +1025,15 @@ const phaseSelector = (ctx: RunContext): readonly PhaseItem[] => {
 
 const ship = createAgentStep({
   name: "ship",
-  description: "Walk the P3 checklist and vote the ferment-scope gates",
+  description: "Walk the P3 checklist and answer the ferment-scope gates",
   output: shipGatesSchema,
   background: true,
   optional: true,
   retry: { maxRetry: 0 },
+  // kimchi's `complete_ferment`, the last of the orchestrator's four turns. C1 walks "the P3 checklist
+  // declared at scope time" and C3 reads "every S2 and F1 verdict across the ferment" — one session's
+  // own record in both cases, which is the whole reason the ship check can mean anything.
+  resumable: ORCHESTRATOR_SESSION,
   prompt: ({ ctx }) => {
     const phases = (ctx.getStepResult<(PhaseResult | undefined)[]>("phases") ?? []).filter((phase): phase is PhaseResult => phase !== undefined);
     return shipPrompt({ intent: intentOf(ctx), plan: planOf(ctx), phases });
@@ -899,7 +1064,7 @@ const report = createStep({
 
 export default createWorkflow({
   name: "ferment-oneshot",
-  description: "Run a terminal-bench task as kimchi's one-shot ferment: scope it into phases and steps, run each step through a worker, gate every completion",
+  description: "Run a terminal-bench task as kimchi's one-shot ferment: scope it into phases and steps, do each step and answer for it, gate every completion",
   input: taskInputSchema,
   defaultModel: MODEL,
 })

@@ -5,7 +5,7 @@ extension. `TB_WORKFLOW` picks which one a run uses.
 
 ```
 solver (default)   survey ──▶ ( implement ──▶ verify ──▶ audit? )*  ──▶ report
-ferment            plan ──▶ ( phase ──▶ ( worker ──▶ gates ──▶ verify )* ──▶ gates )* ──▶ ship
+ferment            plan ──▶ ( phase ──▶ ( step turn ──▶ gates ──▶ verify )* ──▶ gates )* ──▶ ship
 ```
 
 Every step is an isolated subagent (`background: true`), which in the PI host means a fresh subprocess
@@ -43,7 +43,7 @@ the binary, and launches the ordinary agent command plus one flag: `-e <bundle>`
 
 `ferment/ferment-oneshot.workflow.ts` is not a second design — it is **kimchi's `--ferment-oneshot`
 mode, rendered 1:1 as a workflow**: the same five-step planning process, the same P/S/F/C gate
-registry, the same worker budget tiers, the same judge standing in for the user, the same verification
+registry, the same budget tiers, the same judge standing in for the user, the same verification
 triage. It exists so that "workflow engine vs. one long session" can be measured without also changing
 the instructions, which is the one thing a comparison against `tb-solver` cannot tell you.
 
@@ -58,30 +58,71 @@ file it came from and what was dropped.
 | `ferment/ferment-oneshot.workflow.ts` | The lifecycle: scoping loop, phase/step fan-out, the step retry and the phase-grader loop |
 | `ferment/contract.ts` | kimchi's tool parameters as output schemas, plus the gate registry, budget tiers and grade bar |
 | `ferment/prompts.ts` | The ported prompts, with provenance |
-| `ferment/verify.ts` | Runs a step's verify command (`bash -lc`, 60s) and builds the phase diff the grader is shown |
+| `ferment/verify.ts` | Runs a step's verify command (`bash -lc`, 60s) and gathers the phase diff the grader is shown |
 
-Two refusals, not one, and they are easy to conflate. A flagged **S gate** or a failed verification sends
-the *step* back to its worker for one bounded continuation. A phase that clears its **F gates** then has
+**A step is one agent turn, and no worker is ever dispatched.** kimchi's `start_ferment_step` offers both
+branches — "Either spawn a subagent … or execute the step directly using bash/edit/write. … If you
+executed directly, call `complete_ferment_step` with just the summary and gates (`worker_agent_id` is
+optional)" — and one-shot ferment takes the second one every time: across six live native runs all 31
+`complete_ferment_step` calls omit `worker_agent_id`, and the orchestrator session itself spends 108
+`bash`, 16 `write` and 13 `edit` calls with **zero** agent spawns. So `step-turn` does the work with its
+tools and then answers S1/S2/S3 about that work, which is what makes the gate registry's second person
+literal: "Read **your own** summary" is addressed to the agent that wrote it because it did the work.
+
+Two refusals, and conflating them is the most expensive mistake this port has made. A flagged **S gate**
+refuses one *completion*: nothing is recorded, the verification never runs ("Gate validation runs BEFORE
+any state mutation"), and the same session is re-entered holding kimchi's refusal text — where it may fix
+what it flagged and answer again ("they just refuse this single call, and the agent has to fix the
+underlying issue and re-call", `tools/steps.ts:427`). A verification the triage judge calls real sends the
+*step* back into that same session with the command's output. A phase that clears its **F gates** then has
 to clear the **grader** — an independent A–F verdict where A/B advance and C/D/F refuse, buy a rework
 against the grader's recommendations, and try again (up to `MAX_BLOCK_RETRIES = 3`, after which the grade
 is accepted and the phase advances anyway). The grade is not a report: in kimchi it drives control flow.
 
-**There is no scheduling policy of its own** — no per-stage time boxes, no round caps, no budget talk in
-the prompts. A ferment runs until the work is done, so this does too; the only per-step budget is
-kimchi's own worker tier (`max_duration` 180/300/600s), and the only deadline is the run-level abort
-`extension.ts` already performs for both solvers. An earlier version *did* divide the budget across
+`plan`, `step-turn`, `phase-gates` and `ship` share one resume key, which is load-bearing rather than an
+optimisation: in kimchi they are turns of the *same session*, which is why C1 can walk a checklist
+"declared at scope time" and why a refusal can be handed straight back to the agent that has to resolve
+it. The three independent judges (`judge`, `verify-judge`, `phase-grade`) stay cold, because kimchi
+really does spawn those separately.
+
+**Nothing here is sized from what is left.** No per-stage share, no round caps, no reading of the clock,
+no telling a model how much of the run it may have. An earlier version *did* divide the budget across
 stages and it corrupted the experiment: boxes computed from what earlier stages had spent left
 `phase-gates` 307ms and `ship` a negative box, so the two closing gate turns never ran.
+
+**A step turn carries no wall clock at all**, and that is the deliberate cost of the merge: kimchi bounds
+this turn with nothing but the run deadline, because the work and the completion are tool calls inside a
+session its harness owns. There is no second process to box once the orchestrator does the work, so a step
+turn that runs away spends the *run's* clock and the phases behind it get less — the same exposure kimchi
+carries. The only deadline is still the run-level abort `extension.ts` performs for both solvers, and the
+only constant box left is kimchi's `standard` tier on `phase-rework`, the one turn still handed to an
+agent of its own.
+
+Three pieces of machinery went with the worker, each an honest repair to a shape kimchi does not have,
+all measured on one 6-task run (135 agent turns and 149.5 min, against native kimchi's ~128 turns and
+36.1 min):
+
+- **The worker's tier box, its "STOP WORKING AT *N*s" landing instruction, and the kill-and-escalate
+  ladder.** All three existed because a dispatched subagent killed at its cap returns *nothing* — 46.0 min
+  of that run, 6 of 11 workers on a single task. Nothing is dispatched, so nothing can be killed.
+- **The 180s box on the gate turn**, added because a turn that is a tool call in kimchi had become a
+  subagent here and one ran 1472s against a p75 of 57s. There is no separate gate turn any more.
+- **The step-diff block** pasted into the gate prompt, which cut 92.4 min of gate turns down toward the
+  23 min they would have cost at each task's fastest. Its reader had not seen the work; this one made the
+  edits itself. What it gets instead is what kimchi actually gives its orchestrator — the step's start
+  ref (`stepStartRefs`, "consumed at complete_ferment_step for diff evidence", surfaced as a SHA in
+  `derive-state.ts`), so `git diff <ref>` is one command. kimchi assembles a step diff for nobody.
 
 The remaining differences are forced by the medium, and the workflow's header records each one: phases
 and steps run sequentially (concurrent `.foreach` items must have non-overlapping side effects, which two
 agents editing one container cannot promise); `budget_tier` is chosen at plan time rather than at
-dispatch, since the dispatch turn is the orchestration the engine replaces; gate payloads are output
-schemas instead of tool arguments; and each agent step is `optional`, the engine's equivalent of a tool
-error the session survives. One judgment call is left: a step that a gate flags gets **one** bounded
-continuation (`STEP_MAX_ATTEMPTS`), because kimchi resolves that case with a planner turn that does not
-exist here — its own rule is "a bounded direct continuation … do not raise the limits and retry the same
-broad task".
+dispatch, since the dispatch turn is the orchestration the engine replaces, and it reaches the prompt as
+*advice* exactly as kimchi's `limitsHint` does on the branch where no Agent is spawned; gate payloads are
+output schemas instead of tool arguments; and each agent step is `optional`, the engine's equivalent of a
+tool error the session survives. One judgment call is left: kimchi bounds a step's re-entries not at all,
+because its orchestrator eventually resolves the step with a planner turn that does not exist here, so
+`STEP_MAX_ATTEMPTS` borrows `MAX_BLOCK_RETRIES` — the only retry budget kimchi actually defines — rather
+than inventing a number.
 
 ## Why this shape
 

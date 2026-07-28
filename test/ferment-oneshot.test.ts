@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fermentOneshot from "../benchmarks/terminal-bench/ferment/ferment-oneshot.workflow.ts";
-import { runVerification } from "../benchmarks/terminal-bench/ferment/verify.ts";
+import { currentGitRef, phaseDiffSince, runVerification } from "../benchmarks/terminal-bench/ferment/verify.ts";
 import { type AgentStep, forEachNode } from "../src/flow/index.ts";
 import { createTestRun, reply, throws } from "../src/testing/index.ts";
 
@@ -8,11 +12,16 @@ import { createTestRun, reply, throws } from "../src/testing/index.ts";
  * Structural tests for the one-shot ferment solver
  * (benchmarks/terminal-bench/ferment/ferment-oneshot.workflow.ts), with every agent step scripted and
  * the verification command stubbed — so this pins the WIRING (which stage reads whose output, when a
- * step is sent back, what the judge is asked) without a model or a container.
+ * step is re-entered, what the judge is asked) without a model or a container.
  *
  * The thing most worth pinning is the SHAPE of the port: this workflow claims to be kimchi's one-shot
  * ferment minus its nudges, so the tests check both halves of that claim — the ferment's instruction
  * text is present, and its continuation machinery is not.
+ *
+ * The load-bearing claim as of now: **a step is ONE agent turn that does the work and then answers for
+ * it, and no worker is ever dispatched.** kimchi's one-shot orchestrator executes steps directly (31 of
+ * 31 `complete_ferment_step` calls across six live runs omit `worker_agent_id`), so a flag is refused
+ * back into the session that raised it, which may work some more and answer again.
  */
 
 const gates = (ids: readonly string[], verdict = "pass") => ids.map((id) => ({ id, verdict, rationale: `${id} holds`, evidence: "n/a" }));
@@ -41,14 +50,7 @@ const onePhaseOneStep = {
   phases: [{ name: "Fix the cli", goal: "the cli prints ok", steps: [{ description: "patch main.py so it prints ok", verify: "python /app/main.py" }] }],
 };
 
-const completedReport = {
-  status: "completed",
-  summary: "patched main.py to print ok",
-  steps_completed: ["edited /app/main.py"],
-  remaining_steps: [],
-  files_touched: ["/app/main.py"],
-};
-
+/** What a step turn returns: the summary the next steps read, and its own verdicts on its own work. */
 const stepPass = { summary: "main.py now prints ok", gates: gates(["S1", "S2", "S3"]) };
 const stepFlagged = {
   summary: "claims a file it never touched",
@@ -67,15 +69,23 @@ const gradeC = {
   recommendations: ["grep the working tree for conflict markers and remove any that remain"],
 };
 const shipPass = { summary: "delivered", gates: gates(["C1", "C2", "C3"]) };
+/** The phase rework is the one turn still handed to an agent of its own, and it reports like a worker. */
+const reworked = {
+  status: "completed",
+  summary: "removed the conflict markers",
+  steps_completed: ["grepped the tree", "removed two markers"],
+  remaining_steps: [],
+};
 
 /** A verification that exits 0, standing in for the real `bash -lc` run. */
 const verifyOk = () => ({ ran: true, command: "python /app/main.py", exitCode: 0, stdout: "ok\n", stderr: "" });
 const verifyFail = () => ({ ran: true, command: "python /app/main.py", exitCode: 1, stdout: "", stderr: "SyntaxError: stray paren" });
 
-/** The phase-diff evidence steps shell out to git; stub them so the suite stays hermetic. */
+/** The git steps shell out; stub them so the suite stays hermetic. */
 const noGit = {
   "phase-start-ref": () => ({ ref: "abc123" }),
-  "phase-diff": () => ({ available: true, filesChanged: " _includes/about.md | 2 +-", diffSnippet: "@@ -1 +1 @@" }),
+  "phase-diff": () => ({ available: true, filesChanged: " _includes/about.md | 2 +-", diffSnippet: "@@ -1 +1 @@", elidedBytes: 0 }),
+  "step-start-ref": () => ({ ref: "abc123" }),
 };
 
 const roomyInput = () => ({ instruction: "Make the cli print ok.", deadlineIso: new Date(Date.now() + 3_600_000).toISOString() });
@@ -95,8 +105,7 @@ describe("ferment-oneshot: the lifecycle", () => {
       steps: { ...noGit, verify: verifyOk },
       agents: {
         plan: [reply(plan)],
-        worker: [reply(completedReport), reply(completedReport)],
-        "step-gates": [reply(stepPass), reply(stepPass)],
+        "step-turn": [reply(stepPass), reply(stepPass)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
@@ -105,21 +114,20 @@ describe("ferment-oneshot: the lifecycle", () => {
 
     if (run.status !== "completed") throw new Error(`${run.status} @ ${run.path} :: ${run.error}`);
     expect(run.output).toEqual({ shipped: true, phases: 1, steps: 2, stepsDone: 2 });
-    // One worker per step, one attempt each: nothing was sent back.
-    expect(run.agent("worker").sessions).toBe(2);
+    // One turn per step, and nothing else ran: the step turn IS the work.
+    expect(run.agent("step-turn").sessions).toBe(2);
     expect(run.agent("judge").sessions).toBe(0); // the plan asked nothing
     expect(run.agent("refine-steps").sessions).toBe(0); // the plan already had steps
     expect(run.agent("verify-judge").sessions).toBe(0); // verification passed, so nothing to triage
   });
 
-  it("gives a step ONE bounded continuation when a step gate flags it, and tells the worker why", async () => {
+  it("refuses a flagged completion straight back into the same session, and dispatches nobody", async () => {
     const run = await createTestRun(fermentOneshot, {
       input: roomyInput(),
       steps: { ...noGit, verify: verifyOk },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport), reply(completedReport)],
-        "step-gates": [reply(stepFlagged), reply(stepPass)],
+        "step-turn": [reply(stepFlagged), reply(stepPass)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
@@ -127,24 +135,27 @@ describe("ferment-oneshot: the lifecycle", () => {
     });
 
     expect(run.status).toBe("completed");
-    expect(run.agent("worker").sessions).toBe(2); // one step, two attempts
-
-    const second = run.agent("worker").messages[1] as string;
-    // kimchi's recovery rule: resume the same bounded work rather than restarting it broader.
-    expect(second).toContain("BOUNDED CONTINUATION");
-    expect(second).toContain("do not widen the task");
-    expect(second).toContain("the summary names src/other.py"); // the flag's own rationale reaches it
+    // kimchi: "step-level flags don't feed the phase retry/escalation pipeline - they just refuse this
+    // single call, and the agent has to fix the underlying issue and re-call" (tools/steps.ts:427). The
+    // re-call is the SAME agent, in the same conversation, with the tools it used the first time.
+    expect(run.agent("step-turn").sessions).toBe(2);
     expect(run.output).toMatchObject({ shipped: true, stepsDone: 1 });
   });
 
-  it("stops sending a step back once the re-call budget is spent, and records it as not done", async () => {
+  it("stops re-entering once the attempt budget is spent, and records the step as not done", async () => {
+    // A real verify command, deliberately: kimchi validates gates BEFORE the verification, so a
+    // completion that never stops flagging must never reach it. `verify` is left unstubbed so that
+    // reaching it would actually shell out.
+    const trivialVerify = {
+      ...onePhaseOneStep,
+      phases: [{ name: "Fix the cli", goal: "the cli prints ok", steps: [{ description: "patch main.py so it prints ok", verify: "true" }] }],
+    };
     const run = await createTestRun(fermentOneshot, {
       input: roomyInput(),
-      steps: { ...noGit, verify: verifyOk },
+      steps: { ...noGit },
       agents: {
-        plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport), reply(completedReport), reply(completedReport)],
-        "step-gates": [reply(stepFlagged), reply(stepFlagged), reply(stepFlagged)],
+        plan: [reply(trivialVerify)],
+        "step-turn": [reply(stepFlagged), reply(stepFlagged), reply(stepFlagged)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
@@ -152,10 +163,15 @@ describe("ferment-oneshot: the lifecycle", () => {
     });
 
     expect(run.status).toBe("completed");
-    // MAX_BLOCK_RETRIES attempts, then the loop stops — kimchi has no step-level cap at all, so this
-    // borrows the only retry budget it does define rather than inventing a second one.
-    expect(run.agent("worker").sessions).toBe(3);
+    // STEP_MAX_ATTEMPTS re-entries, then the loop stops — kimchi caps it at all, because its
+    // orchestrator resolves the step with a planner turn this workflow does not have. One counter, not
+    // the product of two: the flag loop and the continuation loop are the same loop now.
+    expect(run.agent("step-turn").sessions).toBe(3);
     expect(run.output).toMatchObject({ steps: 1, stepsDone: 0 });
+
+    // "Gate validation runs BEFORE any state mutation" — a refused call never reaches the verification.
+    const phaseGatePrompt = run.agent("phase-gates").messages[0] as string;
+    expect(phaseGatePrompt).toContain("verification: not run — the completion was refused before verification");
   });
 
   it("triages a non-zero verification, and treats a benign one as done", async () => {
@@ -164,8 +180,7 @@ describe("ferment-oneshot: the lifecycle", () => {
       steps: { ...noGit, verify: verifyFail },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport)],
-        "step-gates": [reply(stepPass)],
+        "step-turn": [reply(stepPass)],
         "verify-judge": [reply({ verdict: "pass", reason: "the grep matched nothing, which is what the step wanted" })],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
@@ -175,7 +190,7 @@ describe("ferment-oneshot: the lifecycle", () => {
 
     expect(run.status).toBe("completed");
     expect(run.agent("verify-judge").sessions).toBe(1);
-    expect(run.agent("worker").sessions).toBe(1); // a benign exit is not a reason to redo the work
+    expect(run.agent("step-turn").sessions).toBe(1); // a benign exit is not a reason to redo the work
     expect(run.output).toMatchObject({ stepsDone: 1 });
 
     const triagePrompt = run.agent("verify-judge").messages[0] as string;
@@ -184,14 +199,13 @@ describe("ferment-oneshot: the lifecycle", () => {
     expect(triagePrompt).toContain("SyntaxError: stray paren");
   });
 
-  it("sends the step back when triage calls the failure real", async () => {
+  it("sends the step back into its own session when triage calls the failure real", async () => {
     const run = await createTestRun(fermentOneshot, {
       input: roomyInput(),
       steps: { ...noGit, verify: verifyFail },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport), reply(completedReport), reply(completedReport)],
-        "step-gates": [reply(stepPass), reply(stepPass), reply(stepPass)],
+        "step-turn": [reply(stepPass), reply(stepPass), reply(stepPass)],
         "verify-judge": [
           reply({ verdict: "fail", reason: "the cli does not run at all" }),
           reply({ verdict: "fail", reason: "still broken" }),
@@ -204,8 +218,13 @@ describe("ferment-oneshot: the lifecycle", () => {
     });
 
     expect(run.status).toBe("completed");
-    expect(run.agent("worker").sessions).toBe(3);
-    expect(run.agent("worker").messages[1]).toContain("verification failed (exit 1)");
+    expect(run.agent("step-turn").sessions).toBe(3);
+    // kimchi's rule for a continuation, kept verbatim even though the box it was written for is gone:
+    // finish the same bounded work, do not widen it.
+    const second = run.agent("step-turn").messages[1] as string;
+    expect(second).toContain("THIS STEP WAS NOT ACCEPTED, AND THIS IS A BOUNDED CONTINUATION");
+    expect(second).toContain("verification failed (exit 1)");
+    expect(second).toContain("do not widen the task, and do not start over");
     expect(run.output).toMatchObject({ stepsDone: 0 });
   });
 
@@ -215,8 +234,7 @@ describe("ferment-oneshot: the lifecycle", () => {
       steps: { ...noGit, verify: verifyFail },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport), reply(completedReport)],
-        "step-gates": [reply(stepPass), reply(stepPass)],
+        "step-turn": [reply(stepPass), reply(stepPass), reply(stepPass)],
         // The step is `optional`; a judge that never answered leaves nothing behind. False-pass is the
         // worst outcome available here, so silence must not advance the step.
         "verify-judge": [],
@@ -230,15 +248,15 @@ describe("ferment-oneshot: the lifecycle", () => {
     expect(run.output).toMatchObject({ stepsDone: 0 });
   });
 
-  it("does not complete a step whose worker reported partial work", async () => {
-    const partial = { status: "partial", summary: "got halfway", steps_completed: ["read main.py"], remaining_steps: ["actually patch it"] };
+  it("re-enters a step whose turn returned nothing at all", async () => {
     const run = await createTestRun(fermentOneshot, {
       input: roomyInput(),
       steps: { ...noGit, verify: verifyOk },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(partial), reply(completedReport)],
-        "step-gates": [reply(stepPass), reply(stepPass)],
+        // The turn failed outright: no summary, no verdicts, nothing anyone can account for. kimchi's
+        // session would be nudged back to the step; here the next iteration resumes that conversation.
+        "step-turn": [throws(new Error("output: the reply was not valid JSON")), reply(stepPass)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
@@ -246,8 +264,8 @@ describe("ferment-oneshot: the lifecycle", () => {
     });
 
     expect(run.status).toBe("completed");
-    expect(run.agent("worker").sessions).toBe(2);
-    expect(run.agent("worker").messages[1]).toContain("actually patch it"); // what it said was outstanding
+    expect(run.agent("step-turn").sessions).toBe(2);
+    expect(run.agent("step-turn").messages[1]).toContain("the step turn returned nothing");
     expect(run.output).toMatchObject({ stepsDone: 1 });
   });
 
@@ -257,8 +275,7 @@ describe("ferment-oneshot: the lifecycle", () => {
       steps: { ...noGit, verify: verifyOk },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport)],
-        "step-gates": [reply(stepPass)],
+        "step-turn": [reply(stepPass)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [
@@ -282,12 +299,11 @@ describe("ferment-oneshot: the phase grader", () => {
       steps: { ...noGit, verify: verifyOk },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport)],
-        "step-gates": [reply(stepPass)],
+        "step-turn": [reply(stepPass)],
         "phase-gates": [reply(phasePass), reply(phasePass)],
         // C on the first closing turn refuses; the rework lands and the second turn grades A.
         "phase-grade": [reply(gradeC), reply(gradeA)],
-        "phase-rework": [reply(completedReport)],
+        "phase-rework": [reply(reworked)],
         ship: [reply(shipPass)],
       },
     });
@@ -310,6 +326,31 @@ describe("ferment-oneshot: the phase grader", () => {
     expect(grader).toContain("agent self-reported — verify independently");
   });
 
+  it("tells the grader how much of the diff it is not being shown", async () => {
+    const run = await createTestRun(fermentOneshot, {
+      input: roomyInput(),
+      steps: {
+        ...noGit,
+        verify: verifyOk,
+        "phase-diff": () => ({ available: true, filesChanged: " app/main.py | 900 ++++", diffSnippet: "@@ head @@\n[... truncated ...]\n@@ tail @@", elidedBytes: 41_000 }),
+      },
+      agents: {
+        plan: [reply(onePhaseOneStep)],
+        "step-turn": [reply(stepPass)],
+        "phase-gates": [reply(phasePass)],
+        "phase-grade": [reply(gradeA)],
+        ship: [reply(shipPass)],
+      },
+    });
+
+    // A byte cap read as an absence of work is a phase refused for the wrong reason. The grader has
+    // tools and is told to verify independently; this is what tells it where it must.
+    const grader = run.agent("phase-grade").messages[0] as string;
+    expect(grader).toContain("This snippet is truncated: 41000 bytes were elided");
+    expect(grader).toContain("check it rather than grading it absent");
+    expect(run.status).toBe("completed");
+  });
+
   it("accepts a B after a rework, because the bar drops once the phase has been sent back", async () => {
     const gradeB = { grade: "B", rationale: "goal met, one rough edge", recommendations: ["tidy the commit message"] };
     const run = await createTestRun(fermentOneshot, {
@@ -317,11 +358,10 @@ describe("ferment-oneshot: the phase grader", () => {
       steps: { ...noGit, verify: verifyOk },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport)],
-        "step-gates": [reply(stepPass)],
+        "step-turn": [reply(stepPass)],
         "phase-gates": [reply(phasePass), reply(phasePass)],
         "phase-grade": [reply(gradeC), reply(gradeB)],
-        "phase-rework": [reply(completedReport)],
+        "phase-rework": [reply(reworked)],
         ship: [reply(shipPass)],
       },
     });
@@ -339,11 +379,10 @@ describe("ferment-oneshot: the phase grader", () => {
       steps: { ...noGit, verify: verifyOk },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport)],
-        "step-gates": [reply(stepPass)],
+        "step-turn": [reply(stepPass)],
         "phase-gates": Array.from({ length: 6 }, () => reply(phasePass)),
         "phase-grade": Array.from({ length: 6 }, () => reply(gradeC)),
-        "phase-rework": Array.from({ length: 6 }, () => reply(completedReport)),
+        "phase-rework": Array.from({ length: 6 }, () => reply(reworked)),
         ship: [reply(shipPass)],
       },
     });
@@ -362,8 +401,7 @@ describe("ferment-oneshot: the phase grader", () => {
       steps: { ...noGit, verify: verifyOk },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport)],
-        "step-gates": [reply(stepPass)],
+        "step-turn": [reply(stepPass)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [], // the step is optional; a grader that returns nothing must not block
         ship: [reply(shipPass)],
@@ -376,15 +414,16 @@ describe("ferment-oneshot: the phase grader", () => {
   });
 });
 
-describe("ferment-oneshot: the gate re-call", () => {
-  it("sends a refused step back to the SAME gate session, with kimchi's refusal text", async () => {
+describe("ferment-oneshot: a step turn that never answers its gates", () => {
+  it("advances the step on silence, instead of reading silence as a flag", async () => {
     const run = await createTestRun(fermentOneshot, {
       input: roomyInput(),
       steps: { ...noGit, verify: verifyOk },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport), reply(completedReport)],
-        "step-gates": [reply(stepFlagged), reply(stepPass)],
+        // The turn ran but produced no parseable payload every time: the step is `optional`, so the
+        // engine records `step-failed` and hands `undefined` on.
+        "step-turn": [],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
@@ -392,14 +431,47 @@ describe("ferment-oneshot: the gate re-call", () => {
     });
 
     expect(run.status).toBe("completed");
-    // Two executions, ONE conversation: kimchi's planner re-calls complete_ferment_step inside the
-    // session that flagged, so it can reconsider rather than re-derive the same doubt from nothing.
-    expect(run.agent("step-gates").sessions).toBe(2);
+    // No verdicts means no FLAG, so the completion is not REFUSED — the step is simply not done, for
+    // the recorded reason. kimchi's own rule for an unreachable judge reads the same way: advisory.
+    expect(run.agent("step-turn").sessions).toBe(3);
+    expect(run.output).toMatchObject({ stepsDone: 0 });
 
-    const recall = run.agent("step-gates").messages[1] as string;
+    // And the silence is visible downstream rather than papered over: F1 reads every step's S2 verdict,
+    // and the verification still ran, because nothing refused it.
+    const phaseGatePrompt = run.agent("phase-gates").messages[0] as string;
+    expect(phaseGatePrompt).toContain("step gates: (none)");
+    expect(phaseGatePrompt).toContain("verification: exit 0 (python /app/main.py)");
+  });
+});
+
+describe("ferment-oneshot: the gate re-call", () => {
+  it("sends a refused step back to the SAME session, with kimchi's refusal text", async () => {
+    const run = await createTestRun(fermentOneshot, {
+      input: roomyInput(),
+      steps: { ...noGit, verify: verifyOk },
+      agents: {
+        plan: [reply(onePhaseOneStep)],
+        "step-turn": [reply(stepFlagged), reply(stepPass)],
+        "phase-gates": [reply(phasePass)],
+        "phase-grade": [reply(gradeA)],
+        ship: [reply(shipPass)],
+      },
+    });
+
+    expect(run.status).toBe("completed");
+    // Two executions, ONE conversation: kimchi's orchestrator re-calls complete_ferment_step inside the
+    // session that flagged, having fixed the underlying issue itself.
+    expect(run.agent("step-turn").sessions).toBe(2);
+
+    const recall = run.agent("step-turn").messages[1] as string;
     expect(recall).toContain("cannot complete - agent self-flagged on 1 step gate(s)");
     expect(recall).toContain("⛔ Gate S1:");
     expect(recall).toContain("'omitted' with rationale if a gate truly does not apply");
+    // The three ways out, addressed to the agent that did the work — which is what makes "fix it
+    // yourself" an instruction it can carry out rather than a request it must forward.
+    expect(recall).toContain("You did this work and you flagged it, in this conversation");
+    expect(recall).toContain("fix the underlying issue with your tools");
+    expect(recall).toContain("vote 'omitted' with a rationale");
     expect(run.output).toMatchObject({ stepsDone: 1 });
   });
 });
@@ -415,12 +487,11 @@ describe("ferment-oneshot: phase-scope flags", () => {
       steps: { ...noGit, verify: verifyOk },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport)],
-        "step-gates": [reply(stepPass)],
+        "step-turn": [reply(stepPass)],
         "phase-gates": [reply(phaseFlagged), reply(phasePass)],
         // Only ONE grade is scripted: the flagged closing turn must not reach the grader at all.
         "phase-grade": [reply(gradeA)],
-        "phase-rework": [reply(completedReport)],
+        "phase-rework": [reply(reworked)],
         ship: [reply(shipPass)],
       },
     });
@@ -459,8 +530,7 @@ describe("ferment-oneshot: the interview", () => {
       agents: {
         plan: [reply(asking), reply(onePhaseOneStep)],
         judge: [reply({ answers: [{ id: "target", value: "venv" }], rationale: "the venv is what the task's own commands use" })],
-        worker: [reply(completedReport)],
-        "step-gates": [reply(stepPass)],
+        "step-turn": [reply(stepPass)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
@@ -494,8 +564,7 @@ describe("ferment-oneshot: the interview", () => {
         // Four rounds of questions before the planner settles — more than any cap this used to impose.
         plan: [reply(asking), reply(asking), reply(asking), reply(asking), reply(onePhaseOneStep)],
         judge: [answer(), answer(), answer(), answer()],
-        worker: [reply(completedReport)],
-        "step-gates": [reply(stepPass)],
+        "step-turn": [reply(stepPass)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
@@ -537,8 +606,7 @@ describe("ferment-oneshot: the interview", () => {
           throws(new Error("output: the reply was not valid JSON")),
           reply({ answers: [{ id: "target", value: "venv" }], rationale: "the venv is what the task uses" }),
         ],
-        worker: [reply(completedReport)],
-        "step-gates": [reply(stepPass)],
+        "step-turn": [reply(stepPass)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
@@ -574,8 +642,7 @@ describe("ferment-oneshot: the interview", () => {
       agents: {
         plan: [reply(asking), reply(onePhaseOneStep)],
         judge: [dead(), dead(), dead()],
-        worker: [reply(completedReport)],
-        "step-gates": [reply(stepPass)],
+        "step-turn": [reply(stepPass)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
@@ -603,8 +670,7 @@ describe("ferment-oneshot: the interview", () => {
       agents: {
         plan: [reply(emptyPhase)],
         "refine-steps": [reply({ steps: [{ description: "patch main.py", verify: "python /app/main.py" }] })],
-        worker: [reply(completedReport)],
-        "step-gates": [reply(stepPass)],
+        "step-turn": [reply(stepPass)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
@@ -625,8 +691,7 @@ describe("ferment-oneshot: what the steps are told", () => {
       steps: { ...noGit, verify: verifyOk },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport)],
-        "step-gates": [reply(stepPass)],
+        "step-turn": [reply(stepPass)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
@@ -649,54 +714,60 @@ describe("ferment-oneshot: what the steps are told", () => {
     expect(planPrompt).not.toContain("start_ferment_step");
   });
 
-  it("hands each worker its step, its budget tier's limits, and what earlier steps left behind", async () => {
+  it("tells the step turn to do the work itself, with the tier as advice and the start ref to cite from", async () => {
     const run = await createTestRun(fermentOneshot, {
       input: roomyInput(),
       steps: { ...noGit, verify: verifyOk },
       agents: {
         plan: [reply(plan)],
-        worker: [reply(completedReport), reply(completedReport)],
-        "step-gates": [reply({ ...stepPass, summary: "main.py prints ok now" }), reply(stepPass)],
+        "step-turn": [reply({ ...stepPass, summary: "main.py prints ok now" }), reply(stepPass)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
       },
     });
 
-    const [first, second] = run.agent("worker").messages as string[];
+    const [first, second] = run.agent("step-turn").messages as string[];
     expect(first).toContain("📋 Plan first");
     expect(first).toContain("Step 1/2: patch main.py so it prints ok");
     expect(first).toContain("verify: python /app/main.py");
-    // The tier the plan chose picks the limits, verbatim from kimchi's budget policy.
+    // kimchi's own direct-execution branch: "or execute the step directly using bash/edit/write".
+    expect(first).toContain("Execute this step directly, using bash/edit/write");
+    // The tier's limits, stated exactly as kimchi's limitsHint states them — and enforced by nothing,
+    // because nothing is dispatched. No landing instruction: there is no box to land inside.
     expect(first).toContain("budget_tier=standard, max_turns=25, max_duration=300s, token_budget=100000");
+    expect(first).not.toContain("STOP WORKING AT");
+    // kimchi's `stepStartRef`, which is all it ever hands over about a step's diff.
+    expect(first).toContain("This step starts at git ref abc123");
+    expect(first).toContain("`git diff abc123` is exactly what it changed");
     expect(first).not.toContain("Prior:"); // nothing ran before it
 
-    // The second worker is a fresh session, so continuity has to arrive in the prompt: kimchi's `Prior:`
-    // line, carrying the SUMMARY the first step's gate turn wrote.
+    // The second step is a later turn of the SAME conversation, but kimchi's `Prior:` line is sent
+    // anyway — it is what the step's own summary is for.
     expect(second).toContain("budget_tier=narrow, max_turns=10, max_duration=180s, token_budget=50000");
     expect(second).toContain('Prior: ✓1 "patch main.py so it prints ok" — main.py prints ok now');
   });
 
-  it("shows the gate turns the record but tells them to go and look, and never to fix anything", async () => {
+  it("asks the same turn for the gates, and tells the closing turns to go and look", async () => {
     const run = await createTestRun(fermentOneshot, {
       input: roomyInput(),
       steps: { ...noGit, verify: verifyOk },
       agents: {
         plan: [reply(onePhaseOneStep)],
-        worker: [reply(completedReport)],
-        "step-gates": [reply(stepPass)],
+        "step-turn": [reply(stepPass)],
         "phase-gates": [reply(phasePass)],
         "phase-grade": [reply(gradeA)],
         ship: [reply(shipPass)],
       },
     });
 
-    const stepGatePrompt = run.agent("step-gates").messages[0] as string;
-    expect(stepGatePrompt).toContain("Does the summary describe work present in the diff?");
-    expect(stepGatePrompt).toContain("patched main.py to print ok"); // the worker's report, shown
-    // The one line the medium forces: kimchi's planner already holds the diff, a fresh gate turn does not.
-    expect(stepGatePrompt).toContain("The diff and the machine are not in your context");
-    expect(stepGatePrompt).toContain("Do not fix anything");
+    // One prompt carries both halves of kimchi's turn: do the work, then answer for it.
+    const stepTurnPrompt = run.agent("step-turn").messages[0] as string;
+    expect(stepTurnPrompt).toContain("Do its work, then run its verification yourself and fix what fails");
+    expect(stepTurnPrompt).toContain("Then answer for what you did");
+    expect(stepTurnPrompt).toContain("Does the summary describe work present in the diff?");
+    expect(stepTurnPrompt).toContain('a "flag" verdict refuses this completion and comes straight back to you to resolve');
+    expect(stepTurnPrompt).toContain("write the summary the following steps in this phase will read");
 
     const phaseGatePrompt = run.agent("phase-gates").messages[0] as string;
     expect(phaseGatePrompt).toContain("Did every step's claim verify against real behavior");
@@ -712,65 +783,195 @@ describe("ferment-oneshot: what the steps are told", () => {
     expect(shipPrompt).toContain("running the cli prints ok and exits 0"); // the P3 checklist
     expect(shipPrompt).toContain("C1 and C3 both ask for evidence, so go and look");
   });
+
+  it("resolves that start ref for real, from the commit taken before the step began", async () => {
+    const run = await createTestRun(fermentOneshot, {
+      input: roomyInput(),
+      // `step-start-ref` runs FOR REAL here (against this repository), because the read it makes is the
+      // part that can rot silently: a ref it could not resolve degrades to "there is no diff to cite"
+      // without anything failing — the exact shape of bug `mustRead` exists to prevent elsewhere.
+      steps: { "phase-start-ref": noGit["phase-start-ref"], "phase-diff": noGit["phase-diff"], verify: verifyOk },
+      agents: {
+        plan: [reply(onePhaseOneStep)],
+        "step-turn": [reply(stepPass)],
+        "phase-gates": [reply(phasePass)],
+        "phase-grade": [reply(gradeA)],
+        ship: [reply(shipPass)],
+      },
+    });
+
+    expect(run.status).toBe("completed");
+    const stepTurnPrompt = run.agent("step-turn").messages[0] as string;
+    expect(stepTurnPrompt).toMatch(/This step starts at git ref [0-9a-f]{40}\./);
+    expect(stepTurnPrompt).not.toContain("not a git repository");
+  });
+
+  it("says there is nothing to cite when there is no git repository to cite from", async () => {
+    const run = await createTestRun(fermentOneshot, {
+      input: roomyInput(),
+      // What a container that is not a git repo produces: the evidence is best-effort, never fatal.
+      steps: { ...noGit, verify: verifyOk, "step-start-ref": () => ({ ref: "" }) },
+      agents: {
+        plan: [reply(onePhaseOneStep)],
+        "step-turn": [reply(stepPass)],
+        "phase-gates": [reply(phasePass)],
+        "phase-grade": [reply(gradeA)],
+        ship: [reply(shipPass)],
+      },
+    });
+
+    const stepTurnPrompt = run.agent("step-turn").messages[0] as string;
+    expect(stepTurnPrompt).toContain("not a git repository");
+    expect(stepTurnPrompt).toContain("cite what you can show instead");
+    expect(run.status).toBe("completed");
+  });
+
+  it("shows a re-entered turn the verification that has already run, once one has", async () => {
+    const run = await createTestRun(fermentOneshot, {
+      input: roomyInput(),
+      steps: { ...noGit, verify: verifyFail },
+      agents: {
+        plan: [reply(onePhaseOneStep)],
+        "step-turn": [reply(stepPass), reply(stepPass), reply(stepPass)],
+        "verify-judge": [
+          reply({ verdict: "fail", reason: "the cli does not run at all" }),
+          reply({ verdict: "fail", reason: "still broken" }),
+          reply({ verdict: "fail", reason: "still broken" }),
+        ],
+        "phase-gates": [reply(phasePass)],
+        "phase-grade": [reply(gradeA)],
+        ship: [reply(shipPass)],
+      },
+    });
+
+    const [first, second] = run.agent("step-turn").messages as string[];
+    // kimchi runs the verify command INSIDE `complete_ferment_step`, after the gates — and a refused call
+    // never reaches it. So on a first attempt there is genuinely nothing to show.
+    expect(first).not.toContain("exit 1");
+    // From the second attempt on, the record exists and is handed over rather than re-run by the agent.
+    expect(second).toContain("$ python /app/main.py");
+    expect(second).toContain("exit 1");
+    expect(second).toContain("SyntaxError: stray paren");
+  });
+
+  it("asks the gates in kimchi's own second person, because that is who they are addressed to", async () => {
+    const run = await createTestRun(fermentOneshot, {
+      input: roomyInput(),
+      steps: { ...noGit, verify: verifyOk },
+      agents: {
+        plan: [reply(onePhaseOneStep)],
+        "step-turn": [reply(stepPass)],
+        "phase-gates": [reply(phasePass)],
+        "phase-grade": [reply(gradeA)],
+        ship: [reply(shipPass)],
+      },
+    });
+
+    // `complete_ferment_step` is called by the agent that did the work — one-shot kimchi omits
+    // `worker_agent_id` on all 31 of its completions, which `validateLinkedWorker` reads as "the
+    // orchestrator executed the step directly" (tools/steps.ts:146). kimchi's registry talks to it in
+    // the second person throughout, and this port had rewritten the S gates into the third ("Read the
+    // step's summary", "the verify command", "this work"). Same questions, different addressee — and an
+    // outside assessor answers them like one: over a live run S3 flagged 21 times against 15 passes, on
+    // correct work. The wording IS the mechanism.
+    const stepTurnPrompt = run.agent("step-turn").messages[0] as string;
+    expect(stepTurnPrompt).toContain("Read your own summary.");
+    expect(stepTurnPrompt).toContain("If you claim a file you didn't touch, or a function not in the diff — flag this gate.");
+    expect(stepTurnPrompt).toContain("Classify your own verify command honestly:");
+    expect(stepTurnPrompt).toContain("Return 'flag' if your verify is proxy or sentinel for a step that claims semantic work.");
+    expect(stepTurnPrompt).toContain("Name one concrete input or condition that would make your work fail.");
+    expect(stepTurnPrompt).toContain("Then state whether your work handles it.");
+
+    const phaseGatePrompt = run.agent("phase-gates").messages[0] as string;
+    expect(phaseGatePrompt).toContain("List anything you couldn't do, skipped, or deferred — by step or by intent.");
+  });
+});
+
+describe("ferment-oneshot: nobody is dispatched for a step", () => {
+  it("has no worker step at all, so a test cannot even script one", async () => {
+    // kimchi's one-shot orchestrator takes the direct branch of `start_ferment_step` every time: across
+    // six live runs, all 31 `complete_ferment_step` calls omitted `worker_agent_id`, and the session
+    // itself made 108 bash / 16 write / 13 edit calls and spawned nothing. The port used to model the
+    // other branch; this is the assertion that stops it coming back.
+    await expect(
+      createTestRun(fermentOneshot, {
+        input: roomyInput(),
+        steps: { ...noGit, verify: verifyOk },
+        agents: { plan: [reply(onePhaseOneStep)], worker: [reply({ status: "completed" })] },
+      }),
+    ).rejects.toThrow('agent script for "worker": the workflow has no agent step with that name');
+  });
+
+  it("spends exactly one agent turn on a step that lands first time", async () => {
+    const run = await createTestRun(fermentOneshot, {
+      input: roomyInput(),
+      steps: { ...noGit, verify: verifyOk },
+      agents: {
+        plan: [reply(onePhaseOneStep)],
+        "step-turn": [reply(stepPass)],
+        "phase-gates": [reply(phasePass)],
+        "phase-grade": [reply(gradeA)],
+        ship: [reply(shipPass)],
+      },
+    });
+
+    expect(run.status).toBe("completed");
+    // The whole step: one turn. It used to be two (a worker, then a gate turn), and a refusal used to
+    // buy another of each.
+    expect(run.agent("step-turn").sessions).toBe(1);
+    expect(run.agent("step-turn").remaining).toBe(0);
+  });
 });
 
 describe("ferment-oneshot: the shape", () => {
   it("runs every agent step as an isolated subagent that may fail without ending the run", () => {
     const steps = agentSteps();
-    const names = ["plan", "judge", "refine-steps", "worker", "step-gates", "verify-judge", "phase-gates", "phase-grade", "phase-rework", "ship"];
+    const names = ["plan", "judge", "refine-steps", "step-turn", "verify-judge", "phase-gates", "phase-grade", "phase-rework", "ship"];
 
     expect([...steps.keys()].sort()).toEqual([...names].sort());
     for (const name of names) {
       expect(steps.get(name)?.background, name).toBe(true);
-      // Optional throughout: a stage that blows its box must cost that stage, not the run — the run has
-      // to reach `report` with whatever landed, because the container is graded either way.
+      // Optional throughout: a stage that fails must cost that stage, not the run — the run has to
+      // reach `report` with whatever landed, because the container is graded either way.
       expect(steps.get(name)?.optional, name).toBe(true);
     }
   });
 
-  it("resumes exactly the two steps whose value is continuity, and no others", () => {
+  it("puts kimchi's orchestrator turns in one session, and leaves every independent judge cold", () => {
     const steps = agentSteps();
 
-    // The planner replans with the judge's answers; a rejected worker continues its own bounded work.
-    expect(steps.get("plan")?.resumable).toBe(true);
-    expect(steps.get("worker")?.resumable).toBe(true);
-    // The gate voter too: kimchi's re-call happens inside the voter's own session, which is what lets a
-    // refused step converge instead of being re-flagged from scratch by a fresh sceptic.
-    expect(steps.get("step-gates")?.resumable).toBe(true);
-    // Every checking step looks with fresh eyes: a resumed gate turn would inherit the belief it exists
-    // to test.
-    for (const name of ["judge", "verify-judge", "phase-gates", "ship"]) {
-      expect(steps.get(name)?.resumable, name).not.toBe(true);
+    // kimchi owns its gates by TURN, and scope_ferment, the step (start → work → complete),
+    // complete_ferment_phase and complete_ferment are all turns of the ONE session that wrote the plan
+    // (gate-registry.ts's header; tools/steps.ts:146). Sharing a resume key is how that is said here, and
+    // it is what makes the registry's second person true: C1 walks a checklist "declared at scope time"
+    // because this session declared it, and S1 asks about "your own summary" because this session did
+    // the work.
+    for (const name of ["plan", "step-turn", "phase-gates", "ship"]) {
+      expect(steps.get(name)?.resumable, name).toBe("orchestrator");
+    }
+
+    // The judges stay cold, and this is not the same argument that lost for the step gates. kimchi
+    // really does spawn these as separate opinions (judgeStepVerification, judgePhaseGradeViaSubagent),
+    // so fresh eyes here is fidelity, not scepticism-by-default. The phase rework is a dispatched agent
+    // in kimchi too.
+    for (const name of ["judge", "verify-judge", "phase-grade", "phase-rework", "refine-steps"]) {
+      expect(steps.get(name)?.resumable, name).toBeUndefined();
     }
   });
 
-  it("budgets a worker from kimchi's tier table and from nothing else", () => {
-    const box = agentSteps().get("worker")?.maxDurationMs;
-    expect(typeof box).toBe("function");
-    const boxFor = (tier: string, deadlineIso: string): number =>
-      (box as (a: { ctx: unknown }) => number)({
-        ctx: { getStepResult: () => ({ step: { description: "x", budget_tier: tier } }), getInitData: () => ({ deadlineIso }) },
-      });
+  it("puts no wall clock on the step turn, or on anything but the phase rework", () => {
+    // kimchi bounds a step turn with NOTHING but the run's deadline: the work and the completion are
+    // tool calls inside a session its harness owns. There is no second process to box once the
+    // orchestrator does the work, so the worker's tier box and the 180s gate box are both gone — and a
+    // step turn that runs away now spends the RUN's clock, which is the same exposure kimchi has.
+    expect(agentSteps().get("step-turn")?.maxDurationMs).toBeUndefined();
 
-    const roomy = new Date(Date.now() + 3_600_000).toISOString();
-    expect(boxFor("narrow", roomy)).toBe(180_000);
-    expect(boxFor("standard", roomy)).toBe(300_000);
-    expect(boxFor("complex", roomy)).toBe(600_000);
-
-    // The tier is the WHOLE budget: the deadline does not enter into it. An earlier version scaled every
-    // box by the time left, which is scheduling policy kimchi does not have — and which starved the two
-    // closing gate turns (`phase-gates` got 307ms, `ship` a negative box) in the first live run.
-    expect(boxFor("complex", new Date(Date.now() + 5000).toISOString())).toBe(600_000);
-    expect(boxFor("complex", new Date(Date.now() - 60_000).toISOString())).toBe(600_000);
-  });
-
-  it("puts no wall clock on anything but the two steps that do work", () => {
-    // Both carry a kimchi tier budget and nothing else; the rework is a worker like any other.
+    // The one constant left, on the one turn still handed to an agent of its own: kimchi's `standard`
+    // tier, never a share of anything.
     expect(agentSteps().get("phase-rework")?.maxDurationMs).toBe(300_000);
+
     for (const [name, step] of agentSteps()) {
-      if (name === "worker" || name === "phase-rework") continue;
-      // Only the worker carries a budget, and it is kimchi's own. Everything else runs until it is done,
-      // exactly as a ferment turn does; the run-level deadline in extension.ts is the only other bound.
+      if (name === "phase-rework") continue;
       expect(step.maxDurationMs, name).toBeUndefined();
     }
   });
@@ -802,5 +1003,78 @@ describe("ferment-oneshot: running a verify command", () => {
     const result = await running;
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("cancelled");
+  });
+});
+
+/**
+ * The other piece with real I/O, and the one the phase grade rests on: what `git` is asked, and what
+ * comes back. Run against a throwaway repo rather than stubbed, because the failure that matters here —
+ * a diff that omits files the phase CREATED — is invisible to a stub.
+ */
+describe("ferment-oneshot: gathering the diff evidence", () => {
+  const signal = new AbortController().signal;
+  const originalCwd = process.cwd();
+  let repo = "";
+
+  const git = (...args: string[]): void => {
+    execFileSync("git", ["-c", "commit.gpgsign=false", "-c", "user.email=t@example.com", "-c", "user.name=t", ...args], { cwd: repo, stdio: "ignore" });
+  };
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), "ferment-diff-"));
+    git("init", "-q");
+    writeFileSync(join(repo, "main.py"), "print('bad')\n");
+    git("add", "-A");
+    git("commit", "-qm", "base");
+    process.chdir(repo);
+  });
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("shows edits AND files the phase created, because a new file is not an empty diff", async () => {
+    const ref = await currentGitRef(signal);
+    writeFileSync(join(repo, "main.py"), "print('ok')\n");
+    writeFileSync(join(repo, "helper.py"), "def helper():\n    return 1\n");
+
+    const diff = await phaseDiffSince(ref, signal);
+
+    expect(diff.available).toBe(true);
+    expect(diff.filesChanged).toContain("main.py");
+    expect(diff.diffSnippet).toContain("+print('ok')");
+    // kimchi lists untracked files with the `?? ` prefix and synthesises a diff against /dev/null for
+    // each. Without that, a phase whose whole job was to write new files reads to the grader — and to
+    // F2's "cite the specific artifact" — as a phase that changed nothing.
+    expect(diff.filesChanged).toContain("?? helper.py");
+    expect(diff.diffSnippet).toContain("+def helper():");
+    expect(diff.elidedBytes).toBe(0);
+  });
+
+  it("keeps the head and the tail when it truncates, and says how much it dropped", async () => {
+    const ref = await currentGitRef(signal);
+    const body = Array.from({ length: 4000 }, (_, line) => `filler line ${line}`).join("\n");
+    writeFileSync(join(repo, "big.py"), `HEAD_SENTINEL\n${body}\nTAIL_SENTINEL\n`);
+
+    const diff = await phaseDiffSince(ref, signal);
+
+    expect(diff.elidedBytes).toBeGreaterThan(0);
+    expect(diff.diffSnippet).toContain("HEAD_SENTINEL");
+    expect(diff.diffSnippet).toContain("TAIL_SENTINEL");
+    expect(diff.diffSnippet).toContain(`diff truncated, ${diff.elidedBytes} bytes elided`);
+  });
+
+  it("reports no evidence rather than a wrong one outside a git repo", async () => {
+    const bare = mkdtempSync(join(tmpdir(), "ferment-nogit-"));
+    try {
+      process.chdir(bare);
+      expect(await currentGitRef(signal)).toBe("");
+      // Which is what the grader prompt turns into "no diff available — inspect files directly".
+      expect(await phaseDiffSince("", signal)).toMatchObject({ available: false, diffSnippet: "", elidedBytes: 0 });
+    } finally {
+      process.chdir(repo);
+      rmSync(bare, { recursive: true, force: true });
+    }
   });
 });
