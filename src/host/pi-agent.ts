@@ -104,6 +104,31 @@ export function resolvePiInvocation(args: readonly string[]): { command: string;
   return { command: "pi", args };
 }
 
+/**
+ * Permission-bypass flags the CURRENT process was launched with, which every subagent it spawns must be
+ * launched with too.
+ *
+ * `resolvePiInvocation` above respawns the harness that is running right now precisely so a subagent
+ * inherits its provider, auth and model registry rather than guessing at them. Permission posture is the
+ * one part of that inheritance the argv does not carry for free: the parent's mode is decided from ITS
+ * argv, and a fresh process reads its own. So a run launched with permissions bypassed was spawning
+ * subagents that re-armed the classifier — measured on a benchmark run, **59 tool calls refused inside
+ * subagent sessions while the parent had none**, including `mkdir -p` and `test -f`, with one task lost
+ * outright because its worker could not install a package the task itself required and burned its budget
+ * trying to talk its way around the refusal. The parent had no such trouble.
+ *
+ * Inheriting is safe in the only direction that matters: a flag has to be present in the PARENT's own
+ * argv to be forwarded, so this can never make a child more permissive than the process that started it,
+ * and a normally-launched session keeps its subagents' checks armed. It is deliberately a small, explicit
+ * allowlist rather than a general argv passthrough — forwarding the parent's whole command line would
+ * hand a subagent its `--session`, its prompt, and anything else the embedder happened to pass.
+ */
+const PERMISSION_BYPASS_FLAGS = ["--dangerously-skip-permissions", "--yolo"] as const;
+
+export function inheritedPermissionArgs(argv: readonly string[] = process.argv): string[] {
+  return PERMISSION_BYPASS_FLAGS.filter((flag) => argv.includes(flag));
+}
+
 /** Where a resumable isolated step's session file lives; the harness creates the file, we own the directory. */
 function resumeSessionPath(resumeKey: string): string {
   const dir = process.env.PI_WORKFLOW_SESSIONS_DIR ?? path.join(process.cwd(), ".pi", "workflows", "sessions");
@@ -222,7 +247,16 @@ function backgroundSession(pi: ExtensionAPI, modelRegistry: ModelRegistry, reque
       // the second run starts with everything the first one had read, tried and learned, instead of
       // rediscovering it. Everything else stays ephemeral — a fresh, small context per step is what
       // makes a chain of isolated steps cheap, and a verifier's whole value is not remembering.
-      const args = ["--mode", "json", "-p", ...(request.resumeKey ? ["--session", resumeSessionPath(request.resumeKey)] : ["--no-session"])];
+      // Permission posture is inherited, not defaulted (see `inheritedPermissionArgs`): a subagent of a
+      // run that bypasses permissions must bypass them too, or it re-arms the classifier and spends its
+      // budget arguing with a prompt no one is there to answer.
+      const args = [
+        "--mode",
+        "json",
+        "-p",
+        ...(request.resumeKey ? ["--session", resumeSessionPath(request.resumeKey)] : ["--no-session"]),
+        ...inheritedPermissionArgs(),
+      ];
       if (request.model) {
         // Resolved (and rejected) up front, same as the interactive path: a typo'd model should fail
         // clearly here rather than surface as an opaque nonzero exit from the child process.

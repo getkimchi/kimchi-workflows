@@ -163,3 +163,49 @@ describe("a resume key shared by several steps", () => {
     }
   });
 });
+
+/**
+ * A subagent respawns the running harness to inherit its provider and auth; permission posture has to be
+ * carried across explicitly, because a fresh process decides its own from its own argv. A benchmark run
+ * launched with permissions bypassed had 59 tool calls refused inside subagent sessions and none in the
+ * parent, losing a task whose worker could not install a package the task required.
+ */
+describe("permission posture is inherited by spawned subagents", () => {
+  it("forwards only the bypass flags the parent itself was launched with", async () => {
+    const { inheritedPermissionArgs } = await import("../src/host/pi-agent.ts");
+
+    expect(inheritedPermissionArgs(["node", "cli.js", "--dangerously-skip-permissions"])).toEqual(["--dangerously-skip-permissions"]);
+    expect(inheritedPermissionArgs(["node", "cli.js", "--yolo"])).toEqual(["--yolo"]);
+    // A child can never come out more permissive than the parent that spawned it.
+    expect(inheritedPermissionArgs(["node", "cli.js", "--print"])).toEqual([]);
+    // Not a general argv passthrough: the parent's session, prompt and everything else stay behind.
+    expect(inheritedPermissionArgs(["node", "cli.js", "--session", "/tmp/main.jsonl", "--model", "x/y", "do the thing"])).toEqual([]);
+  });
+
+  it("puts the inherited flag on the spawned subagent's command line", async () => {
+    const { createPiAgentBridge } = await import("../src/host/pi-agent.ts");
+    const spawned: string[][] = [];
+    const pi = {
+      on: () => {},
+      exec: async (_command: string, args: string[]) => {
+        spawned.push(args);
+        return {
+          code: 0,
+          stdout: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "{}" }], usage: { totalTokens: 1 } } }),
+          stderr: "",
+        };
+      },
+    } as never;
+
+    const realArgv = process.argv;
+    process.argv = [...realArgv, "--dangerously-skip-permissions"];
+    try {
+      const start = createPiAgentBridge(pi, (args) => ({ command: "kimchi", args }))({ find: () => undefined } as never);
+      await start({ stepName: "worker", background: true }).sendAndAwaitEnd("go");
+    } finally {
+      process.argv = realArgv;
+    }
+
+    expect(spawned[0]).toContain("--dangerously-skip-permissions");
+  });
+});
