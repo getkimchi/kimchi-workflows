@@ -4,10 +4,20 @@
  * The two are deliberately sequential — a live run must be cancelled before it can be deleted — so
  * removal is always a second, deliberate act.
  */
+import type { RunStatus } from "../resume-router.ts";
 import type { ActiveRun, RunLock } from "../run-lock.ts";
 import { summarizeRun } from "../summarize-run.ts";
 import type { RunStore } from "../types.ts";
 import { type NotifyCtx, resolveRunRef } from "./context.ts";
+
+/**
+ * The live/stopped split the two commands turn on (spec §6.4/§6.5): a live run can be cancelled but
+ * not deleted, a stopped one the reverse. Stated once, so completion (spec §14.4) can filter run-ids
+ * by the rule the handlers enforce instead of carrying a second copy of the status list.
+ */
+export function isLiveRun(status: RunStatus): boolean {
+  return status === "in_progress" || status === "blocked";
+}
 
 /**
  * `/workflow cancel [run-id]` (spec §6.4, §10.2). Two distinct cases:
@@ -70,7 +80,7 @@ export async function handleDelete(ctx: NotifyCtx, store: Pick<RunStore, "loadEv
 
   const status = summarizeRun(await store.loadEvents(runId))?.status;
   if (!status) return void ctx.ui.notify(`workflow: no run "${runId}" to delete.`, "error");
-  if (status === "in_progress" || status === "blocked") {
+  if (isLiveRun(status)) {
     ctx.ui.notify(`workflow: run ${runId} is ${status}; cancel it first ("/workflow cancel ${runId}"), then delete.`, "warning");
     return;
   }

@@ -31,6 +31,10 @@ export interface RunStore {
   loadEvents(runId: string): Promise<RunEvent[]>;
   /** Permanently remove a run's event log (spec §6.5). */
   delete(runId: string): Promise<void>;
-  /** Summarize every recorded run for `/workflow list`. */
+  /**
+   * Summarize every recorded run for `/workflow run list`. A pure read: it never creates the store's
+   * backing directory, because completion calls it on a keystroke (spec §14.6). No runs recorded — or
+   * nowhere to record them yet — is an empty list.
+   */
   list(): Promise<RunSummary[]>;
 }

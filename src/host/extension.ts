@@ -8,6 +8,8 @@
  */
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { handleCancel, handleCreate, handleDelete, handleListRuns, handleListWorkflows, handleResume, handleRun, handleStatus } from "./commands/index.ts";
+import { createCompletionSources } from "./completion-sources.ts";
+import { completeWorkflowArgument } from "./completions.ts";
 import { createFsStore } from "./fs-store.ts";
 import { createPiAgentBridge } from "./pi-agent.ts";
 import { bindProgress } from "./progress-sink.ts";
@@ -17,9 +19,16 @@ import { createRunLock } from "./run-lock.ts";
 export default function piWorkflowsExtension(pi: ExtensionAPI): void {
   const guard = createRunLock(); // one execution slot per project, backed by the file lock (spec §7)
   const bindAgentStarter = createPiAgentBridge(pi); // one agent_end listener for the extension's lifetime
+  const completionSources = createCompletionSources();
+
+  // The completion callback is given no context of its own (spec §14.2), so the pair the store is built
+  // from below is captured here — on every session start, whatever the reason (spec §14.7).
+  pi.on("session_start", (_event, ctx) => completionSources.setProject(ctx.cwd, ctx.sessionManager.getSessionDir()));
 
   pi.registerCommand("workflow", {
-    description: "Create, run, list, show, resume, cancel, and delete PI workflows",
+    // An extension cannot set an `argumentHint` (spec §14.9), so the description names the verbs.
+    description: "PI workflows: run | create | list | status | resume | cancel | delete",
+    getArgumentCompletions: (argumentPrefix: string) => completeWorkflowArgument(argumentPrefix, completionSources),
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
       // Resolved per invocation, not at load: the session directory is a property of the CONTEXT (it

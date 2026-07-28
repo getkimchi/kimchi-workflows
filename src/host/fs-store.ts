@@ -81,7 +81,9 @@ export function createFsStore(dir: string): RunStore {
       await rm(logFilePath(runId), { force: true });
     },
     async list(): Promise<RunSummary[]> {
-      await ensureDir();
+      // Deliberately does NOT create the directory: `list()` is a pure read, and completion calls it on
+      // a keystroke (spec §14.6) — typing `/workflow ` in a session that has never run a workflow must
+      // not deposit an artifacts directory. A missing directory is simply no runs.
       const entries = await readdir(dir).catch(() => [] as string[]);
       const summaries: RunSummary[] = [];
       for (const entry of entries) {

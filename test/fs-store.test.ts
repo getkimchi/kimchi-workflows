@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -51,9 +52,14 @@ describe("filesystem run store (spec §8.9)", () => {
     expect(runs[0]).toMatchObject({ runId: result.runId, workflowName: "hello", status: "completed" });
   });
 
-  it("list() returns an empty array when no runs have been recorded", async () => {
-    const store = createFsStore(runDir);
-    expect(await store.list()).toEqual([]);
+  it("list() returns an empty array when no runs have been recorded, creating nothing (spec §14.6)", async () => {
+    expect(await createFsStore(runDir).list()).toEqual([]);
+
+    // Completion lists runs on a keystroke, so `list()` is a pure read: an invocation whose artifacts
+    // directory does not exist yet is told "no runs" rather than handed a freshly created directory.
+    const absent = path.join(runDir, "never-used");
+    expect(await createFsStore(absent).list()).toEqual([]);
+    expect(existsSync(absent)).toBe(false);
   });
 
   // Run logs and step session files share one directory now (project-dir.ts), so the `.events.jsonl`
