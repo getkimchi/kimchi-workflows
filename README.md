@@ -89,7 +89,7 @@ Status is derived from the event log — nothing stores a status that can drift 
 
 ## Installing
 
-**Requirements:** Node.js ≥ 22 and the PI coding harness (`@earendil-works/pi-coding-agent`).
+**Requirements:** Node.js ≥ 24 and the PI coding harness (`@earendil-works/pi-coding-agent`).
 
 There are two separate installs, and most people only need the first:
 

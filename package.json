@@ -21,7 +21,7 @@
 	"packageManager": "pnpm@10.33.0",
 	"type": "module",
 	"engines": {
-		"node": ">=22"
+		"node": ">=24"
 	},
 	"//files": "BOTH, and each earns its place. `dist` is what consumers import: shipping only TypeScript makes the package unloadable by plain Node (it refuses to strip types under node_modules) and forces `allowImportingTsExtensions` on anyone type-checking it. `src` is what PI loads — the `pi` manifest below points at the TypeScript, so a git install with no build output still registers /workflow — and it is what the source maps resolve against.",
 	"files": [
