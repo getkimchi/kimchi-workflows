@@ -1,14 +1,14 @@
 {
-  "//": "Publish build. The repo itself never needs this — PI loads TypeScript through jiti — but a package that only ships .ts cannot be imported by plain Node at all (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING refuses to strip types under node_modules) and forces every consumer to set `allowImportingTsExtensions`. `rewriteRelativeImportExtensions` is what lets the source keep its explicit `.ts` specifiers while the emitted JS says `.js`.",
-  "extends": "./tsconfig.json",
-  "compilerOptions": {
-    "noEmit": false,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "rewriteRelativeImportExtensions": true,
-    "outDir": "./dist",
-    "rootDir": "./src"
-  },
-  "include": ["src"]
+	"//": "Publish build. The repo itself never needs this — PI loads TypeScript through jiti — but a package that only ships .ts cannot be imported by plain Node at all (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING refuses to strip types under node_modules) and forces every consumer to set `allowImportingTsExtensions`. `rewriteRelativeImportExtensions` is what lets the source keep its explicit `.ts` specifiers while the emitted JS says `.js`.",
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"noEmit": false,
+		"declaration": true,
+		"declarationMap": true,
+		"sourceMap": true,
+		"rewriteRelativeImportExtensions": true,
+		"outDir": "./dist",
+		"rootDir": "./src"
+	},
+	"include": ["src"]
 }

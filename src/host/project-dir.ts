@@ -20,12 +20,12 @@
  *
  * Host-layer only: the engine never imports this — it has no filesystem at all (spec §2.1).
  */
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { getPackageDir } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs"
+import path from "node:path"
+import { getPackageDir } from "@earendil-works/pi-coding-agent"
 
 /** What a harness with no `piConfig.name` of its own is called (vanilla `pi` — see the module header). */
-const DEFAULT_APP_NAME = "pi";
+const DEFAULT_APP_NAME = "pi"
 
 /**
  * The subdirectory OUR artifacts occupy inside whatever session directory the harness gave us.
@@ -39,9 +39,9 @@ const DEFAULT_APP_NAME = "pi";
  * picker would parse all 50 on every open, permanently. The harness sets the precedent itself by parking
  * `image-cache/` in the same directory for the same reason.
  */
-const ARTIFACTS_SUBDIR = "workflow";
+const ARTIFACTS_SUBDIR = "workflow"
 
-let cachedAppName: string | undefined;
+let cachedAppName: string | undefined
 
 /**
  * Read the running harness's app name out of `<packageDir>/package.json`. Exported (rather than folded
@@ -52,29 +52,31 @@ let cachedAppName: string | undefined;
  * JSON or absent key all mean "we are not being told a name", and a workflow run must not fail over it.
  */
 export function readAppName(packageDir: string): string {
-  try {
-    const pkg = JSON.parse(readFileSync(path.join(packageDir, "package.json"), "utf8")) as { piConfig?: { name?: unknown } };
-    const name = pkg.piConfig?.name;
-    return typeof name === "string" && name.length > 0 ? name : DEFAULT_APP_NAME;
-  } catch {
-    return DEFAULT_APP_NAME;
-  }
+	try {
+		const pkg = JSON.parse(readFileSync(path.join(packageDir, "package.json"), "utf8")) as {
+			piConfig?: { name?: unknown }
+		}
+		const name = pkg.piConfig?.name
+		return typeof name === "string" && name.length > 0 ? name : DEFAULT_APP_NAME
+	} catch {
+		return DEFAULT_APP_NAME
+	}
 }
 
 /** The running harness's app name (`pi`, `kimchi`, …), read once — the package.json cannot change under a live process. */
 export function appName(): string {
-  cachedAppName ??= readAppName(getPackageDir());
-  return cachedAppName;
+	cachedAppName ??= readAppName(getPackageDir())
+	return cachedAppName
 }
 
 /** A project's harness directory: `.pi` under pi, `.kimchi` under kimchi (spec §6.8/§8.9's `<project>/.<app>`). */
 export function projectDir(projectRoot: string, app: string = appName()): string {
-  return path.join(projectRoot, `.${app}`);
+	return path.join(projectRoot, `.${app}`)
 }
 
 /** The directory a project's authored workflows live in — and the one the run lock sits in (spec §7.2). */
 export function workflowsDir(projectRoot: string, app: string = appName()): string {
-  return path.join(projectDir(projectRoot, app), "workflows");
+	return path.join(projectDir(projectRoot, app), "workflows")
 }
 
 /**
@@ -96,5 +98,5 @@ export function workflowsDir(projectRoot: string, app: string = appName()): stri
  * them from the authoring sources, so a second level would name the same thing twice.
  */
 export function runArtifactsDir(projectRoot: string, sessionDir: string | undefined): string {
-  return sessionDir ? path.join(sessionDir, ARTIFACTS_SUBDIR) : path.join(workflowsDir(projectRoot), "runs");
+	return sessionDir ? path.join(sessionDir, ARTIFACTS_SUBDIR) : path.join(workflowsDir(projectRoot), "runs")
 }

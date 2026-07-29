@@ -17,7 +17,7 @@
  *
  * Host-layer only: the engine never sees these — it addresses everything by node path (spec §8.5).
  */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto"
 
 /**
  * How much of a workflow's declared name a filename carries. Long enough to identify, short enough that
@@ -28,7 +28,7 @@ import { createHash, randomBytes } from "node:crypto";
  * at all to tell them apart: `release-…-service-alpha` and `release-…-service-beta` would share one
  * session file, and one workflow's worker would resume holding the other's conversation.
  */
-const WORKFLOW_NAME_MAX = 40;
+const WORKFLOW_NAME_MAX = 40
 
 /**
  * How much of a node path a session filename carries. Deep paths are real (`until-valid#3/batch@7/review`)
@@ -36,16 +36,16 @@ const WORKFLOW_NAME_MAX = 40;
  * truncated AND tagged with a hash of the whole thing, since plain truncation would collide silently and
  * hand two different items one session file.
  */
-const NODE_PATH_MAX = 120;
+const NODE_PATH_MAX = 120
 
 /** The random tail of a run id, and therefore the run's short form everywhere it appears. */
-const RUN_HASH_LENGTH = 8;
+const RUN_HASH_LENGTH = 8
 
 /** How much hash is appended to a truncated (or otherwise unrepresentable) name — enough to separate, not enough to dominate. */
-const NAME_HASH_LENGTH = 6;
+const NAME_HASH_LENGTH = 6
 
 /** Give up minting rather than spin: 8 consecutive collisions on 32 random bits is not a collision, it is a broken `isTaken`. */
-const MINT_ATTEMPTS = 8;
+const MINT_ATTEMPTS = 8
 
 /**
  * Reduce an arbitrary author-supplied string to one filesystem-safe path segment: lowercase, anything
@@ -54,20 +54,20 @@ const MINT_ATTEMPTS = 8;
  * name that survives sanitization as nothing still produces a distinct, stable filename.
  */
 export function sanitizeSegment(raw: string): string {
-  return raw
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
+	return raw
+		.toLowerCase()
+		.replace(/[^a-z0-9._-]+/g, "-")
+		.replace(/-+/g, "-")
+		.replace(/^-+|-+$/g, "")
 }
 
 function hashOf(raw: string, length: number): string {
-  return createHash("sha256").update(raw).digest("hex").slice(0, length);
+	return createHash("sha256").update(raw).digest("hex").slice(0, length)
 }
 
 /** A sanitized name, or — when sanitization left nothing at all — a hash of the original, so distinct inputs stay distinct. */
 function orHash(sanitized: string, raw: string): string {
-  return sanitized || hashOf(raw, NAME_HASH_LENGTH);
+	return sanitized || hashOf(raw, NAME_HASH_LENGTH)
 }
 
 /**
@@ -81,13 +81,13 @@ function orHash(sanitized: string, raw: string): string {
  * distinction the truncation threw away.
  */
 function capWithHash(sanitized: string, raw: string, max: number): string {
-  if (sanitized.length <= max) return sanitized;
-  return `${sanitized.slice(0, max).replace(/-+$/, "")}-${hashOf(raw, NAME_HASH_LENGTH)}`;
+	if (sanitized.length <= max) return sanitized
+	return `${sanitized.slice(0, max).replace(/-+$/, "")}-${hashOf(raw, NAME_HASH_LENGTH)}`
 }
 
 /** A workflow's declared name as it appears in a run id / session filename: sanitized, capped, tagged if truncated. */
 export function sanitizeWorkflowName(name: string): string {
-  return capWithHash(orHash(sanitizeSegment(name), name), name, WORKFLOW_NAME_MAX);
+	return capWithHash(orHash(sanitizeSegment(name), name), name, WORKFLOW_NAME_MAX)
 }
 
 /**
@@ -98,13 +98,13 @@ export function sanitizeWorkflowName(name: string): string {
  * two deep foreach items apart when their prefixes are identical.
  */
 export function sanitizeNodePath(nodePath: string): string {
-  const flattened = nodePath.replace(/\//g, ".").replace(/[#@]/g, "-");
-  return capWithHash(orHash(sanitizeSegment(flattened), nodePath), nodePath, NODE_PATH_MAX);
+	const flattened = nodePath.replace(/\//g, ".").replace(/[#@]/g, "-")
+	return capWithHash(orHash(sanitizeSegment(flattened), nodePath), nodePath, NODE_PATH_MAX)
 }
 
 /** A run id's random tail — the short form a user can type instead of the whole slug (see {@link matchRunId}). */
 export function runIdHash(runId: string): string {
-  return runId.slice(-RUN_HASH_LENGTH);
+	return runId.slice(-RUN_HASH_LENGTH)
 }
 
 /**
@@ -116,17 +116,21 @@ export function runIdHash(runId: string): string {
  * would then read as one incoherent run. `hex` is injectable so the retry path is testable without
  * waiting for a real 1-in-4-billion event.
  */
-export async function mintRunId(workflowName: string, isTaken: (runId: string) => Promise<boolean>, hex: () => string = randomHex): Promise<string> {
-  const stem = `workflow-${sanitizeWorkflowName(workflowName)}`;
-  for (let attempt = 0; attempt < MINT_ATTEMPTS; attempt++) {
-    const candidate = `${stem}-${hex()}`;
-    if (!(await isTaken(candidate))) return candidate;
-  }
-  throw new Error(`could not mint a free run id for workflow "${workflowName}" after ${MINT_ATTEMPTS} attempts`);
+export async function mintRunId(
+	workflowName: string,
+	isTaken: (runId: string) => Promise<boolean>,
+	hex: () => string = randomHex,
+): Promise<string> {
+	const stem = `workflow-${sanitizeWorkflowName(workflowName)}`
+	for (let attempt = 0; attempt < MINT_ATTEMPTS; attempt++) {
+		const candidate = `${stem}-${hex()}`
+		if (!(await isTaken(candidate))) return candidate
+	}
+	throw new Error(`could not mint a free run id for workflow "${workflowName}" after ${MINT_ATTEMPTS} attempts`)
 }
 
 function randomHex(): string {
-  return randomBytes(RUN_HASH_LENGTH / 2).toString("hex");
+	return randomBytes(RUN_HASH_LENGTH / 2).toString("hex")
 }
 
 /**
@@ -137,7 +141,7 @@ function randomHex(): string {
  * id in would give every run a fresh file and turn `resumable` into a silent no-op.
  */
 export function resumeSessionFile(workflowName: string, resumeKey: string): string {
-  return `workflow-${sanitizeWorkflowName(workflowName)}-key-${sanitizeNodePath(resumeKey)}.jsonl`;
+	return `workflow-${sanitizeWorkflowName(workflowName)}-key-${sanitizeNodePath(resumeKey)}.jsonl`
 }
 
 /**
@@ -152,16 +156,19 @@ export function resumeSessionFile(workflowName: string, resumeKey: string): stri
  * now lives in one flat directory beside the harness's own sessions.
  */
 export function traceSessionFile(workflowName: string, runId: string, nodePath: string, attempt: number): string {
-  return `workflow-${sanitizeWorkflowName(workflowName)}-run-${runIdHash(runId)}-${sanitizeNodePath(nodePath)}-a${attempt}.jsonl`;
+	return `workflow-${sanitizeWorkflowName(workflowName)}-run-${runIdHash(runId)}-${sanitizeNodePath(nodePath)}-a${attempt}.jsonl`
 }
 
 /** The display name a spawned step session is launched with (`--name`), so it reads as something in a picker rather than as a filename. */
 export function stepSessionName(workflowName: string, nodePath: string, runId: string): string {
-  return `${workflowName}/${nodePath} #${runIdHash(runId)}`;
+	return `${workflowName}/${nodePath} #${runIdHash(runId)}`
 }
 
 /** How a `/workflow resume|cancel|delete` argument resolved against the runs actually on disk. */
-export type RunIdMatch = { readonly kind: "ok"; readonly runId: string } | { readonly kind: "unknown" } | { readonly kind: "ambiguous"; readonly candidates: readonly string[] };
+export type RunIdMatch =
+	| { readonly kind: "ok"; readonly runId: string }
+	| { readonly kind: "unknown" }
+	| { readonly kind: "ambiguous"; readonly candidates: readonly string[] }
 
 /**
  * Resolve a user-typed run reference (spec §6.2/§6.4/§6.5): exact id, then the 8-hex tail alone, then
@@ -174,12 +181,12 @@ export type RunIdMatch = { readonly kind: "ok"; readonly runId: string } | { rea
  * picking one — the operations behind this are cancel and delete.
  */
 export function matchRunId(known: readonly string[], arg: string): RunIdMatch {
-  if (arg.length === 0) return { kind: "unknown" };
-  if (known.includes(arg)) return { kind: "ok", runId: arg };
+	if (arg.length === 0) return { kind: "unknown" }
+	if (known.includes(arg)) return { kind: "ok", runId: arg }
 
-  for (const candidates of [known.filter((id) => runIdHash(id) === arg), known.filter((id) => id.startsWith(arg))]) {
-    if (candidates.length === 1) return { kind: "ok", runId: candidates[0] as string };
-    if (candidates.length > 1) return { kind: "ambiguous", candidates };
-  }
-  return { kind: "unknown" };
+	for (const candidates of [known.filter((id) => runIdHash(id) === arg), known.filter((id) => id.startsWith(arg))]) {
+		if (candidates.length === 1) return { kind: "ok", runId: candidates[0] as string }
+		if (candidates.length > 1) return { kind: "ambiguous", candidates }
+	}
+	return { kind: "unknown" }
 }

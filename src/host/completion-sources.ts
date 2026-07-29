@@ -21,54 +21,56 @@
  * the pair to resolve either way. The extension re-captures them from every `session_start`; this copy
  * exists for completion only, and the handlers keep resolving from their own invocation's context.
  */
-import { readdir } from "node:fs/promises";
-import type { CompletionSources } from "./completions.ts";
-import { createFsStore } from "./fs-store.ts";
-import { runArtifactsDir, workflowsDir } from "./project-dir.ts";
-import type { RunSummary } from "./types.ts";
-import { WORKFLOW_SUFFIX } from "./workflow-catalog.ts";
+import { readdir } from "node:fs/promises"
+import type { CompletionSources } from "./completions.ts"
+import { createFsStore } from "./fs-store.ts"
+import { runArtifactsDir, workflowsDir } from "./project-dir.ts"
+import type { RunSummary } from "./types.ts"
+import { WORKFLOW_SUFFIX } from "./workflow-catalog.ts"
 
 /** How long one run listing is reused for (spec §14.6). */
-const RUNS_MEMO_MS = 1000;
+const RUNS_MEMO_MS = 1000
 
 /** Completion sources bound to a location the extension re-points on every session start. */
 export interface ProjectCompletionSources extends CompletionSources {
-  /** Point the sources at the project and session directory of the session that just started (spec §14.7). */
-  setProject(cwd: string, sessionDir: string): void;
+	/** Point the sources at the project and session directory of the session that just started (spec §14.7). */
+	setProject(cwd: string, sessionDir: string): void
 }
 
 export function createCompletionSources(): ProjectCompletionSources {
-  // The pre-first-start fallback (spec §14.7): a keystroke cannot wait for `session_start`, and an empty
-  // session dir is exactly what `--no-session` hands the handlers, which `runArtifactsDir` already covers.
-  let cwd = process.cwd();
-  let sessionDir = "";
-  let memo: { at: number; runs: Promise<readonly RunSummary[]> } | undefined;
+	// The pre-first-start fallback (spec §14.7): a keystroke cannot wait for `session_start`, and an empty
+	// session dir is exactly what `--no-session` hands the handlers, which `runArtifactsDir` already covers.
+	let cwd = process.cwd()
+	let sessionDir = ""
+	let memo: { at: number; runs: Promise<readonly RunSummary[]> } | undefined
 
-  return {
-    setProject(nextCwd: string, nextSessionDir: string): void {
-      cwd = nextCwd;
-      sessionDir = nextSessionDir;
-      memo = undefined; // the memo holds another location's runs
-    },
+	return {
+		setProject(nextCwd: string, nextSessionDir: string): void {
+			cwd = nextCwd
+			sessionDir = nextSessionDir
+			memo = undefined // the memo holds another location's runs
+		},
 
-    async workflows(): Promise<readonly string[]> {
-      const entries = await readdir(workflowsDir(cwd)).catch(() => [] as string[]);
-      return entries.filter((entry) => entry.endsWith(WORKFLOW_SUFFIX)).map((entry) => entry.slice(0, -WORKFLOW_SUFFIX.length));
-    },
+		async workflows(): Promise<readonly string[]> {
+			const entries = await readdir(workflowsDir(cwd)).catch(() => [] as string[])
+			return entries
+				.filter((entry) => entry.endsWith(WORKFLOW_SUFFIX))
+				.map((entry) => entry.slice(0, -WORKFLOW_SUFFIX.length))
+		},
 
-    runs(): Promise<readonly RunSummary[]> {
-      const at = Date.now();
-      if (!memo || at - memo.at >= RUNS_MEMO_MS) {
-        // Completion is advisory (spec §14.1): a corrupt or unreadable log costs the user suggestions,
-        // never the keystroke.
-        memo = {
-          at,
-          runs: createFsStore(runArtifactsDir(cwd, sessionDir))
-            .list()
-            .catch(() => []),
-        };
-      }
-      return memo.runs;
-    },
-  };
+		runs(): Promise<readonly RunSummary[]> {
+			const at = Date.now()
+			if (!memo || at - memo.at >= RUNS_MEMO_MS) {
+				// Completion is advisory (spec §14.1): a corrupt or unreadable log costs the user suggestions,
+				// never the keystroke.
+				memo = {
+					at,
+					runs: createFsStore(runArtifactsDir(cwd, sessionDir))
+						.list()
+						.catch(() => []),
+				}
+			}
+			return memo.runs
+		},
+	}
 }

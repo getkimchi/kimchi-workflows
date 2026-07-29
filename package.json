@@ -1,89 +1,91 @@
 {
-  "//name": "Scoped because unscoped `pi-workflows` is taken on npm by an unrelated package. The name is not cosmetic: it is the specifier every authored workflow imports, so it also appears in the loader's virtual-module map and in what /workflow create generates.",
-  "name": "@pmateusz/pi-workflows",
-  "version": "0.0.1",
-  "description": "Define arbitrary workflows in TypeScript and run them inside the PI coding harness.",
-  "keywords": [
-    "pi-package",
-    "pi",
-    "workflow",
-    "agent",
-    "coding-agent"
-  ],
-  "license": "MIT",
-  "author": "pmateusz",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/pmateusz/pi-workflows.git"
-  },
-  "homepage": "https://github.com/pmateusz/pi-workflows#readme",
-  "bugs": "https://github.com/pmateusz/pi-workflows/issues",
-  "type": "module",
-  "engines": {
-    "node": ">=22"
-  },
-  "//files": "BOTH, and each earns its place. `dist` is what consumers import: shipping only TypeScript makes the package unloadable by plain Node (it refuses to strip types under node_modules) and forces `allowImportingTsExtensions` on anyone type-checking it. `src` is what PI loads — the `pi` manifest below points at the TypeScript, so a git install with no build output still registers /workflow — and it is what the source maps resolve against.",
-  "files": [
-    "dist",
-    "src"
-  ],
-  "publishConfig": {
-    "access": "public"
-  },
-  "//exports": "The public surface, and the only names anything outside this repo may import. The package root IS the authoring API — that is what a workflow file imports; `./flow` names the same module for symmetry with the other layers. Directory paths (`./src/...`, `./dist/...`) are deliberately NOT exported: the layout is ours to change.",
-  "exports": {
-    ".": {
-      "types": "./dist/flow/index.d.ts",
-      "default": "./dist/flow/index.js"
-    },
-    "./flow": {
-      "types": "./dist/flow/index.d.ts",
-      "default": "./dist/flow/index.js"
-    },
-    "./engine": {
-      "types": "./dist/engine/index.d.ts",
-      "default": "./dist/engine/index.js"
-    },
-    "./host": {
-      "types": "./dist/host/index.d.ts",
-      "default": "./dist/host/index.js"
-    },
-    "./testing": {
-      "types": "./dist/testing/index.d.ts",
-      "default": "./dist/testing/index.js"
-    }
-  },
-  "//pi": "The PI package manifest (docs/packages.md), which is what makes `pi install <path|git:…>` load the /workflow command. Without it PI records the package in settings and loads NOTHING from it — a package.json with no `pi` key and no conventional `extensions/` directory contributes no resources. It points at TypeScript on purpose: PI loads extensions through jiti, and a git install never runs the publish build, so `src` is the only entry point guaranteed to exist.",
-  "pi": {
-    "extensions": [
-      "./src/host/extension.ts"
-    ]
-  },
-  "//scripts": "`prepack` (not `prepare`) builds for the tarball: `prepare` would also run for git installs, where PI installs with --omit=dev and TypeScript is therefore absent.",
-  "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "prepack": "npm run build",
-    "test": "vitest run",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
-    "typecheck": "tsc --noEmit",
-    "lint": "biome check",
-    "lint:fix": "biome check --write"
-  },
-  "//dependencies": "`jiti` only. PI does NOT provide it to extensions (verified: a package importing it with no node_modules fails to load), and workflow loading needs it at runtime.",
-  "dependencies": {
-    "jiti": "^2.7.0"
-  },
-  "//peerDependencies": "The packages PI bundles and hands to extensions itself (docs/packages.md: \"list them in peerDependencies with a \\\"*\\\" range and do not bundle them\"). PI's extension loader aliases these specifiers to its own copies and that alias WINS over the consuming project's node_modules — so a range narrower than `*` would describe a resolution we do not control.",
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "typebox": "*"
-  },
-  "//devDependencies": "`typebox` is pinned EXACTLY to the version `@earendil-works/pi-coding-agent` pins, because that is the copy the harness actually runs us on — a caret range let tests pass on 1.3.6 while every real run used PI's 1.1.38. `test/typebox-pin.test.ts` fails when a PI upgrade moves this.",
-  "devDependencies": {
-    "@biomejs/biome": "^2.5.5",
-    "@earendil-works/pi-coding-agent": "^0.80.10",
-    "typebox": "1.1.38",
-    "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
-  }
+	"//name": "Scoped under the getkimchi org. The name is not cosmetic: it is the specifier every authored workflow imports, so it also appears in the loader's virtual-module map and in what /workflow create generates.",
+	"name": "@getkimchi/kimchi-workflows",
+	"version": "0.0.1",
+	"description": "Define arbitrary workflows in TypeScript and run them inside the PI coding harness.",
+	"keywords": [
+		"pi-package",
+		"pi",
+		"workflow",
+		"agent",
+		"coding-agent"
+	],
+	"license": "Apache-2.0",
+	"author": "CAST AI Group, Inc.",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/getkimchi/kimchi-workflows.git"
+	},
+	"homepage": "https://github.com/getkimchi/kimchi-workflows#readme",
+	"bugs": "https://github.com/getkimchi/kimchi-workflows/issues",
+	"packageManager": "pnpm@10.33.0",
+	"type": "module",
+	"engines": {
+		"node": ">=22"
+	},
+	"//files": "BOTH, and each earns its place. `dist` is what consumers import: shipping only TypeScript makes the package unloadable by plain Node (it refuses to strip types under node_modules) and forces `allowImportingTsExtensions` on anyone type-checking it. `src` is what PI loads — the `pi` manifest below points at the TypeScript, so a git install with no build output still registers /workflow — and it is what the source maps resolve against.",
+	"files": [
+		"dist",
+		"src"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
+	"//exports": "The public surface, and the only names anything outside this repo may import. The package root IS the authoring API — that is what a workflow file imports; `./flow` names the same module for symmetry with the other layers. Directory paths (`./src/...`, `./dist/...`) are deliberately NOT exported: the layout is ours to change.",
+	"exports": {
+		".": {
+			"types": "./dist/flow/index.d.ts",
+			"default": "./dist/flow/index.js"
+		},
+		"./flow": {
+			"types": "./dist/flow/index.d.ts",
+			"default": "./dist/flow/index.js"
+		},
+		"./engine": {
+			"types": "./dist/engine/index.d.ts",
+			"default": "./dist/engine/index.js"
+		},
+		"./host": {
+			"types": "./dist/host/index.d.ts",
+			"default": "./dist/host/index.js"
+		},
+		"./testing": {
+			"types": "./dist/testing/index.d.ts",
+			"default": "./dist/testing/index.js"
+		}
+	},
+	"//pi": "The PI package manifest (docs/packages.md), which is what makes `pi install <path|git:…>` load the /workflow command. Without it PI records the package in settings and loads NOTHING from it — a package.json with no `pi` key and no conventional `extensions/` directory contributes no resources. It points at TypeScript on purpose: PI loads extensions through jiti, and a git install never runs the publish build, so `src` is the only entry point guaranteed to exist.",
+	"pi": {
+		"extensions": [
+			"./src/host/extension.ts"
+		]
+	},
+	"//scripts": "`prepack` (not `prepare`) builds for the tarball: `prepare` would also run for git installs, where PI installs with --omit=dev and TypeScript is therefore absent.",
+	"scripts": {
+		"build": "tsc -p tsconfig.build.json",
+		"prepack": "npm run build",
+		"test": "vitest run",
+		"test:integration": "vitest run --config vitest.integration.config.ts",
+		"typecheck": "tsc --noEmit",
+		"lint": "biome check .",
+		"lint:fix": "biome check --write .",
+		"check": "pnpm run lint && pnpm run typecheck && pnpm run test"
+	},
+	"//dependencies": "`jiti` only. PI does NOT provide it to extensions (verified: a package importing it with no node_modules fails to load), and workflow loading needs it at runtime.",
+	"dependencies": {
+		"jiti": "^2.7.0"
+	},
+	"//peerDependencies": "The packages PI bundles and hands to extensions itself (docs/packages.md: \"list them in peerDependencies with a \\\"*\\\" range and do not bundle them\"). PI's extension loader aliases these specifiers to its own copies and that alias WINS over the consuming project's node_modules — so a range narrower than `*` would describe a resolution we do not control.",
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"typebox": "*"
+	},
+	"//devDependencies": "`typebox` is pinned EXACTLY to the version `@earendil-works/pi-coding-agent` pins, because that is the copy the harness actually runs us on — a caret range let tests pass on 1.3.6 while every real run used PI's 1.1.38. `test/typebox-pin.test.ts` fails when a PI upgrade moves this.",
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.6",
+		"@earendil-works/pi-coding-agent": "^0.80.10",
+		"typebox": "1.1.38",
+		"typescript": "^7.0.2",
+		"vitest": "^4.1.10"
+	}
 }

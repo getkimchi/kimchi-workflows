@@ -48,7 +48,7 @@ structured-output validation. *(orig. R13/R14)*
 TypeScript loader and transpiled on `/workflow run` (esbuild/tsx/bun). There is
 no separate full `tsc` type-check gate; imports/dependencies resolve through PI's
 existing mechanism. The authoring API is reachable from a workflow file by package
-package name (`@pmateusz/pi-workflows`), which also resolves for files inside this
+package name (`@getkimchi/kimchi-workflows`), which also resolves for files inside this
 package itself; module resolution is relative to the importing file, so a workflow
 must be validated from the directory it will actually live in (§6.6). *(decision)*
 

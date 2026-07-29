@@ -83,18 +83,25 @@
  * literal `"pi"` silently spawns the wrong binary whenever the embedding harness is anything other
  * than vanilla `pi` itself.
  */
-import { existsSync, mkdirSync } from "node:fs";
-import path from "node:path";
-import type { ContextEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { AgentRequest, AgentSession, AgentTurn, ConversationMessage } from "../engine/types.ts";
-import { resumeSessionFile, stepSessionName, traceSessionFile } from "./naming.ts";
-import { type AgentMessages, lastAssistantText, lastAssistantUsage, type ModelRegistry, resolveModel, seedHistory } from "./pi-agent-messages.ts";
-import { runSubagent, type SubagentSpawner, subagentSpawner } from "./subagent-process.ts";
+import { existsSync, mkdirSync } from "node:fs"
+import path from "node:path"
+import type { ContextEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import type { AgentRequest, AgentSession, AgentTurn, ConversationMessage } from "../engine/types.ts"
+import { resumeSessionFile, stepSessionName, traceSessionFile } from "./naming.ts"
+import {
+	type AgentMessages,
+	lastAssistantText,
+	lastAssistantUsage,
+	type ModelRegistry,
+	resolveModel,
+	seedHistory,
+} from "./pi-agent-messages.ts"
+import { runSubagent, type SubagentSpawner, subagentSpawner } from "./subagent-process.ts"
 
-export type AgentStarter = (request: AgentRequest) => AgentSession;
+export type AgentStarter = (request: AgentRequest) => AgentSession
 
 /** What to spawn (the spawner's first two arguments) for a background subagent, given the CLI args after the binary name. */
-export type PiInvocationResolver = (args: readonly string[]) => { command: string; args: readonly string[] };
+export type PiInvocationResolver = (args: readonly string[]) => { command: string; args: readonly string[] }
 
 /**
  * Respawn the CURRENTLY RUNNING harness process itself, so a background subagent always lands in the
@@ -107,19 +114,19 @@ export type PiInvocationResolver = (args: readonly string[]) => { command: strin
  *   3. Last resort — matches the previous hardcoded behaviour: literal `"pi"` on `PATH`.
  */
 export function resolvePiInvocation(args: readonly string[]): { command: string; args: readonly string[] } {
-  const currentScript = process.argv[1];
-  const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-  if (currentScript && !isBunVirtualScript && existsSync(currentScript)) {
-    return { command: process.execPath, args: [currentScript, ...args] };
-  }
+	const currentScript = process.argv[1]
+	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/")
+	if (currentScript && !isBunVirtualScript && existsSync(currentScript)) {
+		return { command: process.execPath, args: [currentScript, ...args] }
+	}
 
-  const execName = path.basename(process.execPath).toLowerCase();
-  const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
-  if (!isGenericRuntime) {
-    return { command: process.execPath, args };
-  }
+	const execName = path.basename(process.execPath).toLowerCase()
+	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName)
+	if (!isGenericRuntime) {
+		return { command: process.execPath, args }
+	}
 
-  return { command: "pi", args };
+	return { command: "pi", args }
 }
 
 /**
@@ -141,10 +148,10 @@ export function resolvePiInvocation(args: readonly string[]): { command: string;
  * allowlist rather than a general argv passthrough — forwarding the parent's whole command line would
  * hand a subagent its `--session`, its prompt, and anything else the embedder happened to pass.
  */
-const PERMISSION_BYPASS_FLAGS = ["--dangerously-skip-permissions", "--yolo"] as const;
+const PERMISSION_BYPASS_FLAGS = ["--dangerously-skip-permissions", "--yolo"] as const
 
 export function inheritedPermissionArgs(argv: readonly string[] = process.argv): string[] {
-  return PERMISSION_BYPASS_FLAGS.filter((flag) => argv.includes(flag));
+	return PERMISSION_BYPASS_FLAGS.filter((flag) => argv.includes(flag))
 }
 
 /**
@@ -166,11 +173,11 @@ export function inheritedPermissionArgs(argv: readonly string[] = process.argv):
  *    left nothing to read.
  */
 function sessionPath(dir: string, request: AgentRequest): string {
-  mkdirSync(dir, { recursive: true });
-  const file = request.resumeKey
-    ? resumeSessionFile(request.workflowName, request.resumeKey)
-    : traceSessionFile(request.workflowName, request.runId, request.path, request.attempt);
-  return path.join(dir, file);
+	mkdirSync(dir, { recursive: true })
+	const file = request.resumeKey
+		? resumeSessionFile(request.workflowName, request.resumeKey)
+		: traceSessionFile(request.workflowName, request.runId, request.path, request.attempt)
+	return path.join(dir, file)
 }
 
 /**
@@ -186,95 +193,97 @@ function sessionPath(dir: string, request: AgentRequest): string {
  * stdout/stderr through.
  */
 export function createPiAgentBridge(
-  pi: ExtensionAPI,
-  invocationResolver: PiInvocationResolver = resolvePiInvocation,
-  spawnSubagent: SubagentSpawner = subagentSpawner,
+	pi: ExtensionAPI,
+	invocationResolver: PiInvocationResolver = resolvePiInvocation,
+	spawnSubagent: SubagentSpawner = subagentSpawner,
 ): (modelRegistry: ModelRegistry, sessionsDir: string) => AgentStarter {
-  // The ONE in-session turn currently awaiting the shared `agent_end` listener, if any (see the header
-  // comment). `token` is an identity private to the session that started the turn — not the step name,
-  // since the SAME step name can legitimately open several sessions across retries/repairs, and dispose()
-  // must only ever clear a turn it itself started, never a sibling's.
-  let inFlight: { readonly token: object; readonly stepName: string; readonly resolve: (turn: AgentTurn) => void } | undefined;
-  let lastConversation: AgentMessages = [];
-  // The one answer-resumed session (spec §8.4) currently entitled to have its stored `history` seeded
-  // into every outgoing LLM call — see the header comment. Token-guarded exactly like `inFlight`, so a
-  // session can only ever clear the seed IT set (never a sibling's), and cleared in `dispose()`.
-  let activeHistory: { readonly token: object; readonly history: AgentMessages } | undefined;
+	// The ONE in-session turn currently awaiting the shared `agent_end` listener, if any (see the header
+	// comment). `token` is an identity private to the session that started the turn — not the step name,
+	// since the SAME step name can legitimately open several sessions across retries/repairs, and dispose()
+	// must only ever clear a turn it itself started, never a sibling's.
+	let inFlight:
+		| { readonly token: object; readonly stepName: string; readonly resolve: (turn: AgentTurn) => void }
+		| undefined
+	let lastConversation: AgentMessages = []
+	// The one answer-resumed session (spec §8.4) currently entitled to have its stored `history` seeded
+	// into every outgoing LLM call — see the header comment. Token-guarded exactly like `inFlight`, so a
+	// session can only ever clear the seed IT set (never a sibling's), and cleared in `dispose()`.
+	let activeHistory: { readonly token: object; readonly history: AgentMessages } | undefined
 
-  pi.on("agent_end", (event) => {
-    lastConversation = event.messages;
-    const turn = inFlight;
-    if (!turn) return; // no in-session turn was awaiting this event (only background/isolated steps ran)
-    inFlight = undefined;
-    turn.resolve({ text: lastAssistantText(event.messages), usage: lastAssistantUsage(event.messages) });
-  });
+	pi.on("agent_end", (event) => {
+		lastConversation = event.messages
+		const turn = inFlight
+		if (!turn) return // no in-session turn was awaiting this event (only background/isolated steps ran)
+		inFlight = undefined
+		turn.resolve({ text: lastAssistantText(event.messages), usage: lastAssistantUsage(event.messages) })
+	})
 
-  pi.on("context", (event: ContextEvent) => {
-    if (!activeHistory) return; // the common case: no resumed session is currently in flight
-    const seeded = seedHistory(activeHistory.history, event.messages as AgentMessages);
-    return seeded ? { messages: seeded } : undefined;
-  });
+	pi.on("context", (event: ContextEvent) => {
+		if (!activeHistory) return // the common case: no resumed session is currently in flight
+		const seeded = seedHistory(activeHistory.history, event.messages as AgentMessages)
+		return seeded ? { messages: seeded } : undefined
+	})
 
-  return (modelRegistry, sessionsDir) => (request) => {
-    // Isolation (spec §2.2/§12.2): a `background` step, and now also any step the ENGINE decided is
-    // statically isolated (can overlap with a sibling — `.parallel`/`.foreach(concurrency>1)`, see
-    // `AgentRequest.isolated`'s doc), both run through the same one-shot subprocess path. Neither ever
-    // touches `inFlight` — there is no shared listener to correlate a subprocess's own reply with.
-    if (request.background || request.isolated) {
-      return backgroundSession(modelRegistry, request, invocationResolver, spawnSubagent, sessionsDir);
-    }
+	return (modelRegistry, sessionsDir) => (request) => {
+		// Isolation (spec §2.2/§12.2): a `background` step, and now also any step the ENGINE decided is
+		// statically isolated (can overlap with a sibling — `.parallel`/`.foreach(concurrency>1)`, see
+		// `AgentRequest.isolated`'s doc), both run through the same one-shot subprocess path. Neither ever
+		// touches `inFlight` — there is no shared listener to correlate a subprocess's own reply with.
+		if (request.background || request.isolated) {
+			return backgroundSession(modelRegistry, request, invocationResolver, spawnSubagent, sessionsDir)
+		}
 
-    const token = {}; // this session's own identity — see `inFlight`'s doc above
-    // An answer-resume (spec §8.4) arrives with its blocked step's stored conversation — seed it into
-    // this session's outgoing LLM calls via the shared `context` handler above, for the session's whole
-    // lifetime (cleared in `dispose()`). A fresh run's `request.history` is always undefined, so the
-    // overwhelmingly common case never touches `activeHistory` at all.
-    if (request.history) {
-      activeHistory = { token, history: request.history as AgentMessages };
-    }
-    return {
-      async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
-        // Safety net, not the primary mechanism (spec §2.2): static isolation is what is SUPPOSED to
-        // keep two in-session turns from ever overlapping. If it somehow fails — a bug elsewhere, a step
-        // the static analysis missed — this must fail LOUDLY and SPECIFICALLY rather than silently
-        // overwrite `inFlight` and let the eventual `agent_end` resolve the WRONG caller with the OTHER
-        // step's reply (the live cross-talk this bridge exists to rule out). Failing here also means the
-        // second `sendUserMessage` is never even issued — PI itself never sees two turns racing.
-        if (inFlight) {
-          throw new Error(
-            `pi-agent bridge: step "${request.stepName}" tried to start an in-session agent turn while step ` +
-              `"${inFlight.stepName}"'s turn is still in flight. A PI session hosts one conversation at a time ` +
-              "(spec §2.2) — this step should have been statically isolated (background subprocess); refusing " +
-              `to let the two turns cross-talk rather than resolving one with the other's reply.`,
-          );
-        }
+		const token = {} // this session's own identity — see `inFlight`'s doc above
+		// An answer-resume (spec §8.4) arrives with its blocked step's stored conversation — seed it into
+		// this session's outgoing LLM calls via the shared `context` handler above, for the session's whole
+		// lifetime (cleared in `dispose()`). A fresh run's `request.history` is always undefined, so the
+		// overwhelmingly common case never touches `activeHistory` at all.
+		if (request.history) {
+			activeHistory = { token, history: request.history as AgentMessages }
+		}
+		return {
+			async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
+				// Safety net, not the primary mechanism (spec §2.2): static isolation is what is SUPPOSED to
+				// keep two in-session turns from ever overlapping. If it somehow fails — a bug elsewhere, a step
+				// the static analysis missed — this must fail LOUDLY and SPECIFICALLY rather than silently
+				// overwrite `inFlight` and let the eventual `agent_end` resolve the WRONG caller with the OTHER
+				// step's reply (the live cross-talk this bridge exists to rule out). Failing here also means the
+				// second `sendUserMessage` is never even issued — PI itself never sees two turns racing.
+				if (inFlight) {
+					throw new Error(
+						`pi-agent bridge: step "${request.stepName}" tried to start an in-session agent turn while step ` +
+							`"${inFlight.stepName}"'s turn is still in flight. A PI session hosts one conversation at a time ` +
+							"(spec §2.2) — this step should have been statically isolated (background subprocess); refusing " +
+							`to let the two turns cross-talk rather than resolving one with the other's reply.`,
+					)
+				}
 
-        if (request.model) {
-          const model = resolveModel(modelRegistry, request.model);
-          if (!model) {
-            throw new Error(`unknown model "${request.model}" (expected provider/modelId)`);
-          }
-          const ok = await pi.setModel(model);
-          if (!ok) {
-            throw new Error(`no API key available for model "${request.model}"`);
-          }
-        }
-        return new Promise<AgentTurn>((resolve) => {
-          inFlight = { token, stepName: request.stepName, resolve };
-          pi.sendUserMessage(message);
-        });
-      },
-      getConversation(): readonly ConversationMessage[] {
-        return lastConversation;
-      },
-      dispose(): void {
-        // Only clear OUR OWN pending turn — never one a differently-identified session left in flight
-        // (should not arise given the guard above, but dispose() must stay safe regardless, spec §2.2).
-        if (inFlight?.token === token) inFlight = undefined;
-        if (activeHistory?.token === token) activeHistory = undefined;
-      },
-    };
-  };
+				if (request.model) {
+					const model = resolveModel(modelRegistry, request.model)
+					if (!model) {
+						throw new Error(`unknown model "${request.model}" (expected provider/modelId)`)
+					}
+					const ok = await pi.setModel(model)
+					if (!ok) {
+						throw new Error(`no API key available for model "${request.model}"`)
+					}
+				}
+				return new Promise<AgentTurn>((resolve) => {
+					inFlight = { token, stepName: request.stepName, resolve }
+					pi.sendUserMessage(message)
+				})
+			},
+			getConversation(): readonly ConversationMessage[] {
+				return lastConversation
+			},
+			dispose(): void {
+				// Only clear OUR OWN pending turn — never one a differently-identified session left in flight
+				// (should not arise given the guard above, but dispose() must stay safe regardless, spec §2.2).
+				if (inFlight?.token === token) inFlight = undefined
+				if (activeHistory?.token === token) activeHistory = undefined
+			},
+		}
+	}
 }
 
 /**
@@ -286,66 +295,68 @@ export function createPiAgentBridge(
  * request (see AgentRequest's doc, engine/types.ts) so there is nothing to seed it with anyway.
  */
 function backgroundSession(
-  modelRegistry: ModelRegistry,
-  request: AgentRequest,
-  invocationResolver: PiInvocationResolver,
-  spawnSubagent: SubagentSpawner,
-  sessionsDir: string,
+	modelRegistry: ModelRegistry,
+	request: AgentRequest,
+	invocationResolver: PiInvocationResolver,
+	spawnSubagent: SubagentSpawner,
+	sessionsDir: string,
 ): AgentSession {
-  return {
-    async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
-      // `--session <path>` both writes and RESUMES that file (the CLI's own wording), and stays a PATH
-      // rather than the `--session-id` this file now owns a stable id for: `--session-id` sends the CLI
-      // through `findLocalSessionByExactId` → `SessionManager.list`, which parses EVERY session in the
-      // project before it can start — on every single subagent spawn, of which a fan-out step makes many.
-      // The path form short-circuits on any argument containing `/` or ending `.jsonl`. Owning the path
-      // also means owning the whole filename (the id form prefixes a `<timestamp>_`), which is what makes
-      // `workflow-` a true prefix of everything a run writes. See {@link sessionPath} for the two shapes.
-      // `--name` costs nothing and makes the file legible if anyone ever opens it in a picker; the HOST
-      // session's name is deliberately left alone — that one belongs to the user, not to us.
-      // Permission posture is inherited, not defaulted (see `inheritedPermissionArgs`): a subagent of a
-      // run that bypasses permissions must bypass them too, or it re-arms the classifier and spends its
-      // budget arguing with a prompt no one is there to answer.
-      const args = [
-        "--mode",
-        "json",
-        "-p",
-        "--session",
-        sessionPath(sessionsDir, request),
-        "--name",
-        stepSessionName(request.workflowName, request.path, request.runId),
-        ...inheritedPermissionArgs(),
-      ];
-      if (request.model) {
-        // Resolved (and rejected) up front, same as the interactive path: a typo'd model should fail
-        // clearly here rather than surface as an opaque nonzero exit from the child process.
-        if (!resolveModel(modelRegistry, request.model)) {
-          throw new Error(`unknown model "${request.model}" (expected provider/modelId)`);
-        }
-        args.push("--model", request.model);
-      }
-      args.push(message);
+	return {
+		async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
+			// `--session <path>` both writes and RESUMES that file (the CLI's own wording), and stays a PATH
+			// rather than the `--session-id` this file now owns a stable id for: `--session-id` sends the CLI
+			// through `findLocalSessionByExactId` → `SessionManager.list`, which parses EVERY session in the
+			// project before it can start — on every single subagent spawn, of which a fan-out step makes many.
+			// The path form short-circuits on any argument containing `/` or ending `.jsonl`. Owning the path
+			// also means owning the whole filename (the id form prefixes a `<timestamp>_`), which is what makes
+			// `workflow-` a true prefix of everything a run writes. See {@link sessionPath} for the two shapes.
+			// `--name` costs nothing and makes the file legible if anyone ever opens it in a picker; the HOST
+			// session's name is deliberately left alone — that one belongs to the user, not to us.
+			// Permission posture is inherited, not defaulted (see `inheritedPermissionArgs`): a subagent of a
+			// run that bypasses permissions must bypass them too, or it re-arms the classifier and spends its
+			// budget arguing with a prompt no one is there to answer.
+			const args = [
+				"--mode",
+				"json",
+				"-p",
+				"--session",
+				sessionPath(sessionsDir, request),
+				"--name",
+				stepSessionName(request.workflowName, request.path, request.runId),
+				...inheritedPermissionArgs(),
+			]
+			if (request.model) {
+				// Resolved (and rejected) up front, same as the interactive path: a typo'd model should fail
+				// clearly here rather than surface as an opaque nonzero exit from the child process.
+				if (!resolveModel(modelRegistry, request.model)) {
+					throw new Error(`unknown model "${request.model}" (expected provider/modelId)`)
+				}
+				args.push("--model", request.model)
+			}
+			args.push(message)
 
-      const invocation = invocationResolver(args);
-      // The attempt's signal kills the child (spec §8.8/§9.4). Without that a cancelled run reports
-      // itself stopped while this process keeps spending tokens and writing files, a wall-time budget
-      // fails the attempt but orphans the process it was supposed to bound, and — with no budget, the
-      // default — an unresponsive subagent hangs the run with nothing able to interrupt it.
-      const result = await runSubagent(spawnSubagent, invocation.command, invocation.args, request.signal);
-      if (request.signal?.aborted) {
-        throw new Error(`background subagent step "${request.stepName}" was aborted`);
-      }
-      if (result.code !== 0) {
-        throw new Error(`background subagent step "${request.stepName}" exited with code ${result.code}: ${result.stderrTail.trim() || "(no stderr)"}`);
-      }
+			const invocation = invocationResolver(args)
+			// The attempt's signal kills the child (spec §8.8/§9.4). Without that a cancelled run reports
+			// itself stopped while this process keeps spending tokens and writing files, a wall-time budget
+			// fails the attempt but orphans the process it was supposed to bound, and — with no budget, the
+			// default — an unresponsive subagent hangs the run with nothing able to interrupt it.
+			const result = await runSubagent(spawnSubagent, invocation.command, invocation.args, request.signal)
+			if (request.signal?.aborted) {
+				throw new Error(`background subagent step "${request.stepName}" was aborted`)
+			}
+			if (result.code !== 0) {
+				throw new Error(
+					`background subagent step "${request.stepName}" exited with code ${result.code}: ${result.stderrTail.trim() || "(no stderr)"}`,
+				)
+			}
 
-      // Already reduced to the final assistant turn while the child was still running — nothing here
-      // ever held its stdout (see the header comment and `createAssistantTurnReader`).
-      return result.turn;
-    },
-    getConversation(): readonly ConversationMessage[] {
-      return []; // one-shot: never resumed with seeded history (spec §2.2/§10.1 — background can't ask)
-    },
-    dispose(): void {},
-  };
+			// Already reduced to the final assistant turn while the child was still running — nothing here
+			// ever held its stdout (see the header comment and `createAssistantTurnReader`).
+			return result.turn
+		},
+		getConversation(): readonly ConversationMessage[] {
+			return [] // one-shot: never resumed with seeded history (spec §2.2/§10.1 — background can't ask)
+		},
+		dispose(): void {},
+	}
 }

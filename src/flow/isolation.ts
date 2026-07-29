@@ -23,68 +23,71 @@
  * `.commit()` (create-workflow.ts) calls this once and uses its result as the committed `nodes`; the
  * engine (`execute.ts`) then just reads `step.isolated` — no runtime walk, no shape-path lookup.
  */
-import type { StepDefinition, WorkflowDefinition, WorkflowNode } from "./types.ts";
+import type { StepDefinition, WorkflowDefinition, WorkflowNode } from "./types.ts"
 
 /** Walk `nodes`, tag every isolated agent step, and reject `asks` wherever it overlaps (spec §2.2/§10.1). */
 export function resolveIsolation(workflowName: string, nodes: readonly WorkflowNode[]): WorkflowNode[] {
-  return walk(workflowName, nodes, false);
+	return walk(workflowName, nodes, false)
 }
 
 function walk(workflowName: string, nodes: readonly WorkflowNode[], isolatedHere: boolean): WorkflowNode[] {
-  return nodes.map((node) => resolveNode(workflowName, node, isolatedHere));
+	return nodes.map((node) => resolveNode(workflowName, node, isolatedHere))
 }
 
 function resolveNode(workflowName: string, node: WorkflowNode, isolatedHere: boolean): WorkflowNode {
-  switch (node.kind) {
-    case "step":
-      return { kind: "step", step: resolveStep(workflowName, node.step, isolatedHere) };
-    case "branch":
-      return { ...node, arms: node.arms.map((arm) => ({ ...arm, body: resolveBody(workflowName, arm.body, isolatedHere) })) };
-    case "loop":
-      return { ...node, body: resolveBody(workflowName, node.body, isolatedHere) };
-    case "foreach": {
-      // Overlap implies isolation for the WHOLE body once concurrency exceeds 1, and once true an
-      // inner construct's own (lower) concurrency can never turn it back off.
-      const childIsolated = isolatedHere || node.concurrency > 1;
-      return { ...node, body: resolveBody(workflowName, node.body, childIsolated) };
-    }
-    case "parallel":
-      // Arms are bare steps (not sub-workflows, spec §3.5), always concurrent — isolated unconditionally.
-      return { ...node, arms: node.arms.map((step) => resolveStep(workflowName, step, true)) };
-    case "workflow":
-      return { ...node, workflow: resolveBody(workflowName, node.workflow, isolatedHere) };
-  }
+	switch (node.kind) {
+		case "step":
+			return { kind: "step", step: resolveStep(workflowName, node.step, isolatedHere) }
+		case "branch":
+			return {
+				...node,
+				arms: node.arms.map((arm) => ({ ...arm, body: resolveBody(workflowName, arm.body, isolatedHere) })),
+			}
+		case "loop":
+			return { ...node, body: resolveBody(workflowName, node.body, isolatedHere) }
+		case "foreach": {
+			// Overlap implies isolation for the WHOLE body once concurrency exceeds 1, and once true an
+			// inner construct's own (lower) concurrency can never turn it back off.
+			const childIsolated = isolatedHere || node.concurrency > 1
+			return { ...node, body: resolveBody(workflowName, node.body, childIsolated) }
+		}
+		case "parallel":
+			// Arms are bare steps (not sub-workflows, spec §3.5), always concurrent — isolated unconditionally.
+			return { ...node, arms: node.arms.map((step) => resolveStep(workflowName, step, true)) }
+		case "workflow":
+			return { ...node, workflow: resolveBody(workflowName, node.workflow, isolatedHere) }
+	}
 }
 
 function resolveBody(workflowName: string, body: WorkflowDefinition, isolatedHere: boolean): WorkflowDefinition {
-  return { ...body, nodes: walk(workflowName, body.nodes, isolatedHere) };
+	return { ...body, nodes: walk(workflowName, body.nodes, isolatedHere) }
 }
 
 function resolveStep(workflowName: string, step: StepDefinition, isolatedHere: boolean): StepDefinition {
-  if (step.kind === "agent" && typeof step.resumable === "string" && !isValidResumeKey(step.resumable)) {
-    throw new Error(
-      `workflow "${workflowName}": agent step "${step.name}" declares resumable: "${step.resumable}", which is not a valid resume key — a shared key becomes a session filename on the host (src/host/pi-agent.ts), so it may not be empty or contain "/", "#", or "@" (all three are node-path syntax, spec §3)`,
-    );
-  }
-  if (!isolatedHere || step.kind !== "agent") return step;
-  if (step.asks) {
-    throw new Error(
-      `workflow "${workflowName}": agent step "${step.name}" declares asks but can overlap with a sibling — inside a .parallel arm, or a .foreach whose concurrency exceeds 1 (spec §2.2) — and an isolated step has no conversation to resume an answer into (spec §10.1); use a questionnaire step instead, or keep this step out of the fan-out`,
-    );
-  }
-  // A shared resume key is a shared session FILE. Two isolated executions append to it at once and the
-  // conversation interleaves into nonsense — a corruption the author would then have to debug through a
-  // model's confusion rather than an error. Same walk, same reason as `asks` above: overlap and
-  // continuity are the same fact, so they are checked in the same place (spec §2.2).
-  if (typeof step.resumable === "string") {
-    throw new Error(
-      `workflow "${workflowName}": agent step "${step.name}" shares the resume key "${step.resumable}" but can overlap with a sibling — inside a .parallel arm, or a .foreach whose concurrency exceeds 1 (spec §2.2) — and concurrent executions would append to one session file at once; use resumable: true to continue only this step's own conversation, or keep the shared key out of the fan-out`,
-    );
-  }
-  return { ...step, isolated: true };
+	if (step.kind === "agent" && typeof step.resumable === "string" && !isValidResumeKey(step.resumable)) {
+		throw new Error(
+			`workflow "${workflowName}": agent step "${step.name}" declares resumable: "${step.resumable}", which is not a valid resume key — a shared key becomes a session filename on the host (src/host/pi-agent.ts), so it may not be empty or contain "/", "#", or "@" (all three are node-path syntax, spec §3)`,
+		)
+	}
+	if (!isolatedHere || step.kind !== "agent") return step
+	if (step.asks) {
+		throw new Error(
+			`workflow "${workflowName}": agent step "${step.name}" declares asks but can overlap with a sibling — inside a .parallel arm, or a .foreach whose concurrency exceeds 1 (spec §2.2) — and an isolated step has no conversation to resume an answer into (spec §10.1); use a questionnaire step instead, or keep this step out of the fan-out`,
+		)
+	}
+	// A shared resume key is a shared session FILE. Two isolated executions append to it at once and the
+	// conversation interleaves into nonsense — a corruption the author would then have to debug through a
+	// model's confusion rather than an error. Same walk, same reason as `asks` above: overlap and
+	// continuity are the same fact, so they are checked in the same place (spec §2.2).
+	if (typeof step.resumable === "string") {
+		throw new Error(
+			`workflow "${workflowName}": agent step "${step.name}" shares the resume key "${step.resumable}" but can overlap with a sibling — inside a .parallel arm, or a .foreach whose concurrency exceeds 1 (spec §2.2) — and concurrent executions would append to one session file at once; use resumable: true to continue only this step's own conversation, or keep the shared key out of the fan-out`,
+		)
+	}
+	return { ...step, isolated: true }
 }
 
 /** A shared key becomes `<key>.jsonl` on the host, so it carries a step name's ban on path syntax (spec §3). */
 function isValidResumeKey(key: string): boolean {
-  return key.length > 0 && !key.includes("/") && !key.includes("#") && !key.includes("@");
+	return key.length > 0 && !key.includes("/") && !key.includes("#") && !key.includes("@")
 }

@@ -1,15 +1,15 @@
-import type { TSchema } from "typebox";
-import type { Questionnaire } from "./questionnaire.ts";
-import type { QuestionnaireStep } from "./types.ts";
+import type { TSchema } from "typebox"
+import type { Questionnaire } from "./questionnaire.ts"
+import type { QuestionnaireStep } from "./types.ts"
 
 export interface CreateQuestionnaireStepOptions<TOutputSchema extends TSchema> {
-  /** Unique step name — used for data-flow addressing and event-log matching (spec §3). */
-  name: string;
-  description?: string;
-  /** The annotated TypeBox target — the single source of truth for asking, rendering, and validating. */
-  output: TOutputSchema;
-  /** Explicit questionnaire batch to ask; when absent it is derived from `output`. */
-  questionnaire?: Questionnaire;
+	/** Unique step name — used for data-flow addressing and event-log matching (spec §3). */
+	name: string
+	description?: string
+	/** The annotated TypeBox target — the single source of truth for asking, rendering, and validating. */
+	output: TOutputSchema
+	/** Explicit questionnaire batch to ask; when absent it is derived from `output`. */
+	questionnaire?: Questionnaire
 }
 
 /**
@@ -21,12 +21,14 @@ export interface CreateQuestionnaireStepOptions<TOutputSchema extends TSchema> {
  * For elicitation — an agent that composes and re-batches questions until it can satisfy `output` —
  * use `createAgentStep({ asks: true })` instead.
  */
-export function createQuestionnaireStep<TOutputSchema extends TSchema>(options: CreateQuestionnaireStepOptions<TOutputSchema>): QuestionnaireStep {
-  return {
-    kind: "questionnaire",
-    name: options.name,
-    description: options.description,
-    outputSchema: options.output,
-    questionnaire: options.questionnaire,
-  };
+export function createQuestionnaireStep<TOutputSchema extends TSchema>(
+	options: CreateQuestionnaireStepOptions<TOutputSchema>,
+): QuestionnaireStep {
+	return {
+		kind: "questionnaire",
+		name: options.name,
+		description: options.description,
+		outputSchema: options.output,
+		questionnaire: options.questionnaire,
+	}
 }

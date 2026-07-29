@@ -2,13 +2,13 @@
 // `workflowModules`): it wants whole module objects, which is precisely what a namespace import is.
 // biome-ignore-all lint/performance/noNamespaceImport: virtualModules takes module objects, not bindings
 
-import { createJiti } from "jiti";
-import * as typebox from "typebox";
-import * as typeboxCompile from "typebox/compile";
-import * as typeboxValue from "typebox/value";
-import * as engine from "../engine/index.ts";
-import * as flow from "../flow/index.ts";
-import type { WorkflowDefinition } from "../flow/types.ts";
+import { createJiti } from "jiti"
+import * as typebox from "typebox"
+import * as typeboxCompile from "typebox/compile"
+import * as typeboxValue from "typebox/value"
+import * as engine from "../engine/index.ts"
+import * as flow from "../flow/index.ts"
+import type { WorkflowDefinition } from "../flow/types.ts"
 
 /**
  * What an authored workflow may import without the project installing anything.
@@ -25,7 +25,7 @@ import type { WorkflowDefinition } from "../flow/types.ts";
  *    module. There is no file on disk to point an alias at, so `require.resolve("typebox")` has
  *    nothing to find and a path-based alias would be unbuildable.
  *  - it guarantees ONE instance. The workflow's `Type.Object(...)` and the engine's `Value.Check(...)`
- *    are then provably the same typebox, and the workflow's `@pmateusz/pi-workflows` is the very module
+ *    are then provably the same typebox, and the workflow's `@getkimchi/kimchi-workflows` is the very module
  *    object running the engine — not a second copy that node resolution happened to find.
  *
  * The modules we hand out are whatever OUR imports above resolved to, so under the harness a workflow
@@ -43,16 +43,21 @@ import type { WorkflowDefinition } from "../flow/types.ts";
  * Node built-ins (`node:fs`, `node:path`, …) need no entry here; jiti resolves them natively.
  */
 const workflowModules = {
-  typebox,
-  "typebox/value": typeboxValue,
-  "typebox/compile": typeboxCompile,
-  "@pmateusz/pi-workflows": flow,
-  "@pmateusz/pi-workflows/flow": flow,
-  "@pmateusz/pi-workflows/engine": engine,
-};
+	typebox,
+	"typebox/value": typeboxValue,
+	"typebox/compile": typeboxCompile,
+	"@getkimchi/kimchi-workflows": flow,
+	"@getkimchi/kimchi-workflows/flow": flow,
+	"@getkimchi/kimchi-workflows/engine": engine,
+}
 
 function isWorkflowDefinition(value: unknown): value is WorkflowDefinition {
-  return typeof value === "object" && value !== null && typeof (value as { name?: unknown }).name === "string" && Array.isArray((value as { nodes?: unknown }).nodes);
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof (value as { name?: unknown }).name === "string" &&
+		Array.isArray((value as { nodes?: unknown }).nodes)
+	)
 }
 
 /**
@@ -66,12 +71,14 @@ function isWorkflowDefinition(value: unknown): value is WorkflowDefinition {
  * Accepts either `export default workflow` or `export const workflow = ...`.
  */
 export async function loadWorkflowFile(absolutePath: string): Promise<WorkflowDefinition> {
-  const jiti = createJiti(import.meta.url, { virtualModules: workflowModules });
-  const moduleExports = (await jiti.import(absolutePath)) as Record<string, unknown>;
+	const jiti = createJiti(import.meta.url, { virtualModules: workflowModules })
+	const moduleExports = (await jiti.import(absolutePath)) as Record<string, unknown>
 
-  const candidate = moduleExports.default ?? moduleExports.workflow;
-  if (!isWorkflowDefinition(candidate)) {
-    throw new Error(`"${absolutePath}" does not export a workflow (expected a default export or a "workflow" named export from createWorkflow(...).commit())`);
-  }
-  return candidate;
+	const candidate = moduleExports.default ?? moduleExports.workflow
+	if (!isWorkflowDefinition(candidate)) {
+		throw new Error(
+			`"${absolutePath}" does not export a workflow (expected a default export or a "workflow" named export from createWorkflow(...).commit())`,
+		)
+	}
+	return candidate
 }

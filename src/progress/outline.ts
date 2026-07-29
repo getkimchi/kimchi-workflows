@@ -20,69 +20,90 @@
  *
  * Pure — no PI, no `node:fs`, no clock (progress §2.1).
  */
-import { appendForeachItem, appendSegment, formatPath, type NodePath, parsePath } from "../engine/node-path.ts";
-import type { StepDefinition, WorkflowDefinition, WorkflowNode } from "../flow/types.ts";
-import type { Outline, OutlineNode } from "./types.ts";
+import { appendForeachItem, appendSegment, formatPath, type NodePath, parsePath } from "../engine/node-path.ts"
+import type { StepDefinition, WorkflowDefinition, WorkflowNode } from "../flow/types.ts"
+import type { Outline, OutlineNode } from "./types.ts"
 
 /** Build a workflow's static tree (progress §1, §3.4). Total: every node kind has a case. */
 export function buildOutline(definition: WorkflowDefinition): Outline {
-  return { workflowName: definition.name, nodes: outlineNodes(definition.nodes, []) };
+	return { workflowName: definition.name, nodes: outlineNodes(definition.nodes, []) }
 }
 
 function outlineNodes(nodes: readonly WorkflowNode[], parent: NodePath): OutlineNode[] {
-  return nodes.map((node) => outlineNode(node, parent));
+	return nodes.map((node) => outlineNode(node, parent))
 }
 
 function outlineNode(node: WorkflowNode, parent: NodePath): OutlineNode {
-  switch (node.kind) {
-    case "step":
-      return stepNode(node.step, parent);
-    case "branch": {
-      // Arms are PEERS of the branch's own path (spec §8.5) — see the module header.
-      const arms = node.arms.map((arm) => {
-        const armPath = appendSegment(parent, arm.name);
-        return { kind: "branch-arm" as const, name: arm.name, path: formatPath(armPath), children: outlineNodes(arm.body.nodes, armPath) };
-      });
-      return { kind: "branch", name: node.name, path: formatPath(appendSegment(parent, node.name)), children: arms };
-    }
-    case "loop": {
-      const path = appendSegment(parent, node.name);
-      // The body's paths carry NO iteration index: a loop's static key drops it (spec §5.4), so
-      // iteration 7 overwrites iteration 6 in the same row and the loop row carries `↻ 7/10` instead
-      // (progress §3.3). Nothing is lost and the tree stays bounded however long the loop runs.
-      return { kind: "loop", name: node.name, path: formatPath(path), children: outlineNodes(node.body.nodes, path), maxIterations: node.maxIterations };
-    }
-    case "foreach": {
-      const path = appendSegment(parent, node.name);
-      // A TEMPLATE: a foreach item's index IS kept in its static key (spec §5.4's exception), so these
-      // children are re-pathed per live item by `foreachItemChildren` rather than used as they stand.
-      return { kind: "foreach", name: node.name, path: formatPath(path), children: outlineNodes(node.body.nodes, path) };
-    }
-    case "parallel": {
-      const path = appendSegment(parent, node.name);
-      // A parallel's arms are bare `StepDefinition`s, not nodes, and they nest UNDER the parallel's own
-      // segment (`parallelName/armName`) — unlike a branch's arms.
-      return { kind: "parallel", name: node.name, path: formatPath(path), children: node.arms.map((arm) => stepNode(arm, path)) };
-    }
-    case "workflow": {
-      const path = appendSegment(parent, node.name);
-      // Rendered as a nested SUBTREE, not one opaque row (progress §3.5): its steps fold into the
-      // parent log by design, so hiding them would discard information the log already carries.
-      return { kind: "workflow", name: node.name, path: formatPath(path), children: outlineNodes(node.workflow.nodes, path) };
-    }
-  }
+	switch (node.kind) {
+		case "step":
+			return stepNode(node.step, parent)
+		case "branch": {
+			// Arms are PEERS of the branch's own path (spec §8.5) — see the module header.
+			const arms = node.arms.map((arm) => {
+				const armPath = appendSegment(parent, arm.name)
+				return {
+					kind: "branch-arm" as const,
+					name: arm.name,
+					path: formatPath(armPath),
+					children: outlineNodes(arm.body.nodes, armPath),
+				}
+			})
+			return { kind: "branch", name: node.name, path: formatPath(appendSegment(parent, node.name)), children: arms }
+		}
+		case "loop": {
+			const path = appendSegment(parent, node.name)
+			// The body's paths carry NO iteration index: a loop's static key drops it (spec §5.4), so
+			// iteration 7 overwrites iteration 6 in the same row and the loop row carries `↻ 7/10` instead
+			// (progress §3.3). Nothing is lost and the tree stays bounded however long the loop runs.
+			return {
+				kind: "loop",
+				name: node.name,
+				path: formatPath(path),
+				children: outlineNodes(node.body.nodes, path),
+				maxIterations: node.maxIterations,
+			}
+		}
+		case "foreach": {
+			const path = appendSegment(parent, node.name)
+			// A TEMPLATE: a foreach item's index IS kept in its static key (spec §5.4's exception), so these
+			// children are re-pathed per live item by `foreachItemChildren` rather than used as they stand.
+			return { kind: "foreach", name: node.name, path: formatPath(path), children: outlineNodes(node.body.nodes, path) }
+		}
+		case "parallel": {
+			const path = appendSegment(parent, node.name)
+			// A parallel's arms are bare `StepDefinition`s, not nodes, and they nest UNDER the parallel's own
+			// segment (`parallelName/armName`) — unlike a branch's arms.
+			return {
+				kind: "parallel",
+				name: node.name,
+				path: formatPath(path),
+				children: node.arms.map((arm) => stepNode(arm, path)),
+			}
+		}
+		case "workflow": {
+			const path = appendSegment(parent, node.name)
+			// Rendered as a nested SUBTREE, not one opaque row (progress §3.5): its steps fold into the
+			// parent log by design, so hiding them would discard information the log already carries.
+			return {
+				kind: "workflow",
+				name: node.name,
+				path: formatPath(path),
+				children: outlineNodes(node.workflow.nodes, path),
+			}
+		}
+	}
 }
 
 function stepNode(step: StepDefinition, parent: NodePath): OutlineNode {
-  return {
-    kind: "step",
-    name: step.name,
-    path: formatPath(appendSegment(parent, step.name)),
-    children: [],
-    optional: step.optional === true,
-    // `retry.maxRetry` counts attempts AFTER the first (spec §9.1), so the badge's denominator is one more.
-    maxAttempts: (step.retry?.maxRetry ?? 0) + 1,
-  };
+	return {
+		kind: "step",
+		name: step.name,
+		path: formatPath(appendSegment(parent, step.name)),
+		children: [],
+		optional: step.optional === true,
+		// `retry.maxRetry` counts attempts AFTER the first (spec §9.1), so the badge's denominator is one more.
+		maxAttempts: (step.retry?.maxRetry ?? 0) + 1,
+	}
 }
 
 /**
@@ -91,10 +112,10 @@ function stepNode(step: StepDefinition, parent: NodePath): OutlineNode {
  * than by string concatenation so the `@` separator stays declared in exactly one place (node-path.ts).
  */
 export function foreachItemPath(foreach: OutlineNode, index: number): string {
-  const path = parsePath(foreach.path);
-  const leaf = path.at(-1);
-  if (!leaf) throw new Error(`foreachItemPath: "${foreach.path}" has no leaf segment`);
-  return formatPath(appendForeachItem(path.slice(0, -1), leaf.name, index));
+	const path = parsePath(foreach.path)
+	const leaf = path.at(-1)
+	if (!leaf) throw new Error(`foreachItemPath: "${foreach.path}" has no leaf segment`)
+	return formatPath(appendForeachItem(path.slice(0, -1), leaf.name, index))
 }
 
 /**
@@ -108,12 +129,18 @@ export function foreachItemPath(foreach: OutlineNode, index: number): string {
  * the item would render as an empty todo subtree with no indication anything was wrong.
  */
 export function foreachItemChildren(foreach: OutlineNode, itemPath: string): OutlineNode[] {
-  return foreach.children.map((child) => repath(child, foreach.path, itemPath));
+	return foreach.children.map((child) => repath(child, foreach.path, itemPath))
 }
 
 function repath(node: OutlineNode, from: string, to: string): OutlineNode {
-  if (!node.path.startsWith(`${from}/`)) {
-    throw new Error(`progress outline: "${node.path}" is not addressed under foreach "${from}" (the body template is malformed)`);
-  }
-  return { ...node, path: `${to}${node.path.slice(from.length)}`, children: node.children.map((child) => repath(child, from, to)) };
+	if (!node.path.startsWith(`${from}/`)) {
+		throw new Error(
+			`progress outline: "${node.path}" is not addressed under foreach "${from}" (the body template is malformed)`,
+		)
+	}
+	return {
+		...node,
+		path: `${to}${node.path.slice(from.length)}`,
+		children: node.children.map((child) => repath(child, from, to)),
+	}
 }

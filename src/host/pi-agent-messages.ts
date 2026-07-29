@@ -3,45 +3,48 @@
  * are unit-testable offline. Every PI reference here is *type-only* (erased at runtime), so importing
  * this module pulls no PI/host/network code.
  */
-import type { AgentEndEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ConversationMessage, TokenUsage } from "../engine/types.ts";
+import type { AgentEndEvent, ExtensionContext } from "@earendil-works/pi-coding-agent"
+import type { ConversationMessage, TokenUsage } from "../engine/types.ts"
 
 /** The PI model registry (from the extension context) — referenced structurally for `find`. */
-export type ModelRegistry = ExtensionContext["modelRegistry"];
+export type ModelRegistry = ExtensionContext["modelRegistry"]
 /** The assistant/user message list carried by an `agent_end` event. */
-export type AgentMessages = AgentEndEvent["messages"];
+export type AgentMessages = AgentEndEvent["messages"]
 
 /** Resolve a `provider/modelId` string to a registry model; undefined if there is no slash or no hit. */
-export function resolveModel(modelRegistry: Pick<ModelRegistry, "find">, modelString: string): ReturnType<ModelRegistry["find"]> {
-  const slash = modelString.indexOf("/");
-  if (slash === -1) return undefined;
-  return modelRegistry.find(modelString.slice(0, slash), modelString.slice(slash + 1));
+export function resolveModel(
+	modelRegistry: Pick<ModelRegistry, "find">,
+	modelString: string,
+): ReturnType<ModelRegistry["find"]> {
+	const slash = modelString.indexOf("/")
+	if (slash === -1) return undefined
+	return modelRegistry.find(modelString.slice(0, slash), modelString.slice(slash + 1))
 }
 
 /** The last assistant message's concatenated text content (`""` when there is no assistant message). */
 export function lastAssistantText(messages: AgentMessages): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (message && "role" in message && message.role === "assistant") {
-      let text = "";
-      for (const part of message.content) {
-        if (part.type === "text") text += part.text;
-      }
-      return text;
-    }
-  }
-  return "";
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i]
+		if (message && "role" in message && message.role === "assistant") {
+			let text = ""
+			for (const part of message.content) {
+				if (part.type === "text") text += part.text
+			}
+			return text
+		}
+	}
+	return ""
 }
 
 /** The last assistant message's token usage (chat-completions `usage.totalTokens`), for token budgeting (spec §9.3). */
 export function lastAssistantUsage(messages: AgentMessages): TokenUsage | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (message && "role" in message && message.role === "assistant") {
-      return { totalTokens: message.usage.totalTokens };
-    }
-  }
-  return undefined;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i]
+		if (message && "role" in message && message.role === "assistant") {
+			return { totalTokens: message.usage.totalTokens }
+		}
+	}
+	return undefined
 }
 
 /**
@@ -55,31 +58,36 @@ export function lastAssistantUsage(messages: AgentMessages): TokenUsage | undefi
  * `turn_start`, …) this reader has no need of.
  */
 export function parseNdjsonMessages(ndjson: string): AgentMessages {
-  const messages: AgentMessages = [];
-  for (const line of ndjson.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let event: unknown;
-    try {
-      event = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    if (isMessageEndEvent(event)) messages.push(event.message as AgentMessages[number]);
-  }
-  return messages;
+	const messages: AgentMessages = []
+	for (const line of ndjson.split("\n")) {
+		const trimmed = line.trim()
+		if (!trimmed) continue
+		let event: unknown
+		try {
+			event = JSON.parse(trimmed)
+		} catch {
+			continue
+		}
+		if (isMessageEndEvent(event)) messages.push(event.message as AgentMessages[number])
+	}
+	return messages
 }
 
 function isMessageEndEvent(value: unknown): value is { type: "message_end"; message: unknown } {
-  return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "message_end" && "message" in value;
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		(value as { type?: unknown }).type === "message_end" &&
+		"message" in value
+	)
 }
 
 /** An incremental reader over a subagent's NDJSON stdout — see {@link createAssistantTurnReader}. */
 export interface AssistantTurnReader {
-  /** Feed the next decoded stdout chunk. Complete lines are read and dropped; a partial one is held. */
-  push(chunk: string): void;
-  /** Read whatever partial line is left and return the last assistant turn seen (empty if there was none). */
-  end(): { text: string; usage?: TokenUsage };
+	/** Feed the next decoded stdout chunk. Complete lines are read and dropped; a partial one is held. */
+	push(chunk: string): void
+	/** Read whatever partial line is left and return the last assistant turn seen (empty if there was none). */
+	end(): { text: string; usage?: TokenUsage }
 }
 
 /**
@@ -112,45 +120,45 @@ export interface AssistantTurnReader {
  * leaves a truncated final line.
  */
 export function createAssistantTurnReader(): AssistantTurnReader {
-  let pending = ""; // the tail of the last chunk, up to the next newline — never a whole stream
-  let last: { text: string; usage?: TokenUsage } | undefined;
+	let pending = "" // the tail of the last chunk, up to the next newline — never a whole stream
+	let last: { text: string; usage?: TokenUsage } | undefined
 
-  const readLine = (line: string): void => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    let event: unknown;
-    try {
-      event = JSON.parse(trimmed);
-    } catch {
-      return; // a partial or non-JSON line, same tolerance parseNdjsonMessages has
-    }
-    if (!isMessageEndEvent(event)) return;
-    const message = event.message as AgentMessages[number];
-    if (!(message && "role" in message && message.role === "assistant")) return;
-    // Decode to the two fields we keep and let the parsed message go — replacing the previous last,
-    // never appending to a list.
-    last = { text: lastAssistantText([message]), usage: lastAssistantUsage([message]) };
-  };
+	const readLine = (line: string): void => {
+		const trimmed = line.trim()
+		if (!trimmed) return
+		let event: unknown
+		try {
+			event = JSON.parse(trimmed)
+		} catch {
+			return // a partial or non-JSON line, same tolerance parseNdjsonMessages has
+		}
+		if (!isMessageEndEvent(event)) return
+		const message = event.message as AgentMessages[number]
+		if (!(message && "role" in message && message.role === "assistant")) return
+		// Decode to the two fields we keep and let the parsed message go — replacing the previous last,
+		// never appending to a list.
+		last = { text: lastAssistantText([message]), usage: lastAssistantUsage([message]) }
+	}
 
-  return {
-    push(chunk: string): void {
-      pending += chunk;
-      let start = 0;
-      for (let newline = pending.indexOf("\n"); newline !== -1; newline = pending.indexOf("\n", start)) {
-        readLine(pending.slice(start, newline));
-        start = newline + 1;
-      }
-      if (start > 0) pending = pending.slice(start);
-    },
-    end(): { text: string; usage?: TokenUsage } {
-      if (pending) {
-        const rest = pending;
-        pending = "";
-        readLine(rest);
-      }
-      return last ?? { text: "", usage: undefined };
-    },
-  };
+	return {
+		push(chunk: string): void {
+			pending += chunk
+			let start = 0
+			for (let newline = pending.indexOf("\n"); newline !== -1; newline = pending.indexOf("\n", start)) {
+				readLine(pending.slice(start, newline))
+				start = newline + 1
+			}
+			if (start > 0) pending = pending.slice(start)
+		},
+		end(): { text: string; usage?: TokenUsage } {
+			if (pending) {
+				const rest = pending
+				pending = ""
+				readLine(rest)
+			}
+			return last ?? { text: "", usage: undefined }
+		},
+	}
 }
 
 /**
@@ -170,7 +178,10 @@ export function createAssistantTurnReader(): AssistantTurnReader {
  * present-but-empty `history` (never actually produced today, but not ruled out by the type) behaves
  * identically to an absent one rather than degenerating into "seed with an empty prefix".
  */
-export function seedHistory(history: readonly ConversationMessage[] | undefined, messages: AgentMessages): AgentMessages | undefined {
-  if (!history || history.length === 0) return undefined;
-  return [...(history as AgentMessages), ...messages];
+export function seedHistory(
+	history: readonly ConversationMessage[] | undefined,
+	messages: AgentMessages,
+): AgentMessages | undefined {
+	if (!history || history.length === 0) return undefined
+	return [...(history as AgentMessages), ...messages]
 }

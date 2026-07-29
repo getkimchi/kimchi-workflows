@@ -1,11 +1,11 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import { createJiti } from "jiti";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadWorkflowFile } from "../src/host/load-workflow.ts";
-import { workflowsDir } from "../src/host/project-dir.ts";
-import { createTestRun } from "../src/testing/index.ts";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import path from "node:path"
+import { createJiti } from "jiti"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { loadWorkflowFile } from "../src/host/load-workflow.ts"
+import { workflowsDir } from "../src/host/project-dir.ts"
+import { createTestRun } from "../src/testing/index.ts"
 
 /**
  * Authoring a workflow OUTSIDE this repo, in a project that has installed nothing.
@@ -18,8 +18,8 @@ import { createTestRun } from "../src/testing/index.ts";
  */
 const SOURCE = `import { basename } from "node:path";
 import { Type } from "typebox";
-import { isValidNodeName } from "@pmateusz/pi-workflows/engine";
-import { createStep, createWorkflow } from "@pmateusz/pi-workflows";
+import { isValidNodeName } from "@getkimchi/kimchi-workflows/engine";
+import { createStep, createWorkflow } from "@getkimchi/kimchi-workflows";
 
 const greet = createStep({
   name: "greet",
@@ -28,53 +28,57 @@ const greet = createStep({
 });
 
 export default createWorkflow({ name: "greet", description: "Authored in another project" }).then(greet).commit();
-`;
+`
 
 describe("authoring outside this repo", () => {
-  let projectRoot: string;
-  let workflowFile: string;
+	let projectRoot: string
+	let workflowFile: string
 
-  beforeEach(async () => {
-    // os.tmpdir(), deliberately: nothing above it resolves `typebox` or `pi-workflows`.
-    projectRoot = await mkdtemp(path.join(tmpdir(), "pi-workflows-external-"));
-    await mkdir(workflowsDir(projectRoot), { recursive: true });
-    workflowFile = path.join(workflowsDir(projectRoot), "greet.workflow.ts");
-    await writeFile(workflowFile, SOURCE, "utf8");
-  });
+	beforeEach(async () => {
+		// os.tmpdir(), deliberately: nothing above it resolves `typebox` or `pi-workflows`.
+		projectRoot = await mkdtemp(path.join(tmpdir(), "pi-workflows-external-"))
+		await mkdir(workflowsDir(projectRoot), { recursive: true })
+		workflowFile = path.join(workflowsDir(projectRoot), "greet.workflow.ts")
+		await writeFile(workflowFile, SOURCE, "utf8")
+	})
 
-  afterEach(async () => {
-    await rm(projectRoot, { recursive: true, force: true });
-  });
+	afterEach(async () => {
+		await rm(projectRoot, { recursive: true, force: true })
+	})
 
-  it("loads a workflow whose project installed neither typebox nor pi-workflows", async () => {
-    const workflow = await loadWorkflowFile(workflowFile);
+	it("loads a workflow whose project installed neither typebox nor pi-workflows", async () => {
+		const workflow = await loadWorkflowFile(workflowFile)
 
-    expect(workflow.name).toBe("greet");
-    expect(workflow.nodes).toHaveLength(1);
-  });
+		expect(workflow.name).toBe("greet")
+		expect(workflow.nodes).toHaveLength(1)
+	})
 
-  it("runs it, so the schema it built validates against the engine's typebox", async () => {
-    // The real assertion is instance sharing: `Type.Object` came from the modules the loader handed
-    // out, and the engine's `Value.Check` must accept the result — two typeboxes would not agree.
-    const run = await createTestRun(await loadWorkflowFile(workflowFile));
+	it("runs it, so the schema it built validates against the engine's typebox", async () => {
+		// The real assertion is instance sharing: `Type.Object` came from the modules the loader handed
+		// out, and the engine's `Value.Check` must accept the result — two typeboxes would not agree.
+		const run = await createTestRun(await loadWorkflowFile(workflowFile))
 
-    expect(run.status).toBe("completed");
-    // `named` proves the engine subpath resolved, `file` that node built-ins still do.
-    expect(run.output).toEqual({ greeting: "hello from outside the repo", named: true, file: "greet.workflow.ts" });
-  });
+		expect(run.status).toBe("completed")
+		// `named` proves the engine subpath resolved, `file` that node built-ins still do.
+		expect(run.output).toEqual({ greeting: "hello from outside the repo", named: true, file: "greet.workflow.ts" })
+	})
 
-  it("does not answer for the package's internal layout", async () => {
-    // Only the published names resolve. A directory path is not a supported import, and failing here
-    // is the point: it cannot work after a real `npm install` either, since `exports` omits it.
-    const byPath = path.join(workflowsDir(projectRoot), "by-path.workflow.ts");
-    await writeFile(byPath, SOURCE.replace('from "@pmateusz/pi-workflows"', 'from "@pmateusz/pi-workflows/src/flow"'), "utf8");
+	it("does not answer for the package's internal layout", async () => {
+		// Only the published names resolve. A directory path is not a supported import, and failing here
+		// is the point: it cannot work after a real `npm install` either, since `exports` omits it.
+		const byPath = path.join(workflowsDir(projectRoot), "by-path.workflow.ts")
+		await writeFile(
+			byPath,
+			SOURCE.replace('from "@getkimchi/kimchi-workflows"', 'from "@getkimchi/kimchi-workflows/src/flow"'),
+			"utf8",
+		)
 
-    await expect(loadWorkflowFile(byPath)).rejects.toThrow(/Cannot find module/);
-  });
+		await expect(loadWorkflowFile(byPath)).rejects.toThrow(/Cannot find module/)
+	})
 
-  it("negative control: a loader that does not supply the modules cannot load the same file", async () => {
-    const bare = createJiti(import.meta.url);
+	it("negative control: a loader that does not supply the modules cannot load the same file", async () => {
+		const bare = createJiti(import.meta.url)
 
-    await expect(bare.import(workflowFile)).rejects.toThrow(/Cannot find module 'typebox'/);
-  });
-});
+		await expect(bare.import(workflowFile)).rejects.toThrow(/Cannot find module 'typebox'/)
+	})
+})

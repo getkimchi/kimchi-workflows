@@ -1,0 +1,29 @@
+Kimchi Workflows
+Copyright 2024-2026 CAST AI Group, Inc.
+
+Kimchi Workflows is an open-source project stewarded by CAST AI Group, Inc. (https://cast.ai).
+
+================================================================================
+THIRD-PARTY COMPONENTS
+================================================================================
+
+This project bundles or references the following third-party software under
+their respective licenses:
+
+1. Pi coding agent SDK
+   Location: npm dependency (pi packages)
+   License: MIT
+   Copyright (c) 2024-2025 Mario Zechner (Earendil Works)
+   https://github.com/earendil-works/pi
+
+2. jiti
+   Location: npm dependency
+   License: MIT
+   Copyright (c) Pooya Parsa
+   https://github.com/unjs/jiti
+
+3. TypeBox
+   Location: npm dependency
+   License: MIT
+   Copyright (c) sinclairzx81
+   https://github.com/sinclairzx81/typebox

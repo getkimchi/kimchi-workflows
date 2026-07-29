@@ -6,7 +6,7 @@
  * machine does not take four times longer because the budget is four times bigger), and a share of
  * REMAINING time for the work itself, so rounds shrink toward the deadline instead of colliding with it.
  */
-export const BUDGET_SEC = Math.max(60, Number(process.env.TB_AGENT_TIMEOUT_SEC ?? 900));
+export const BUDGET_SEC = Math.max(60, Number(process.env.TB_AGENT_TIMEOUT_SEC ?? 900))
 
 /**
  * Recon is sized from what it MEASURABLY COSTS, and that turns out not to depend on the budget at all.
@@ -28,7 +28,7 @@ export const BUDGET_SEC = Math.max(60, Number(process.env.TB_AGENT_TIMEOUT_SEC ?
  *
  * 225s covers 98.8% of surveys that completed; 150s covered 88.8%.
  */
-export const SURVEY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.25, 180), 240) * 1000);
+export const SURVEY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.25, 180), 240) * 1000)
 /**
  * The 12% stays and so does the ceiling — checking is paid ONCE PER ROUND, so a generous cap compounds
  * over the rounds a long budget buys. Both BOUNDS move, because they were set below what checking costs.
@@ -48,7 +48,7 @@ export const SURVEY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.25, 180
  * already took 28% of the wall clock — to rescue a case the evidence says would not be rescued. The
  * landing instruction in `verifyPrompt` is the fix for that end of the distribution, and it is free.
  */
-export const VERIFY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.12, 120), 240) * 1000);
+export const VERIFY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.12, 120), 240) * 1000)
 
 /**
  * `implement` takes a share of the time ACTUALLY LEFT, resolved fresh on every round (spec §9.3's
@@ -64,9 +64,9 @@ export const VERIFY_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.12, 120
  * agent's actual strength, each later round is necessarily smaller, and the 30% held back always covers
  * `verify` plus the margin — so the loop shrinks toward its deadline instead of colliding with it.
  */
-export const IMPLEMENT_SHARE_OF_REMAINING = 0.5;
+export const IMPLEMENT_SHARE_OF_REMAINING = 0.5
 /** Never hand a round less than this; below it a subagent cannot finish a single useful edit. */
-export const IMPLEMENT_FLOOR_MS = 90_000;
+export const IMPLEMENT_FLOOR_MS = 90_000
 
 /**
  * What a round may spend on implementation, given the seconds left when it opened. This is the ONE
@@ -80,17 +80,18 @@ export const IMPLEMENT_FLOOR_MS = 90_000;
  * because half of a small remainder is never worth starting).
  */
 export const implementBoxMs = (remainingSec: number): number => {
-  const remainingMs = remainingSec * 1000;
-  // Everything physically available once this round's check and the settle margin are paid for.
-  const spendableMs = remainingMs - VERIFY_CAP_MS - ROUND_MARGIN_SEC * 1000;
-  const shareMs = remainingMs * IMPLEMENT_SHARE_OF_REMAINING;
-  // Holding back half only makes sense if a further round can actually use it. Ask whether one would
-  // still fit after this round took its share; when it would not, this IS the last round, so it takes
-  // everything instead of leaving a remainder too small to start anything with. Without this a 900s
-  // task stopped with 233 of 855 seconds unspent — a reserve kept for a round that could never happen.
-  const anotherRoundFits = remainingMs - shareMs - VERIFY_CAP_MS - VERIFY_CAP_MS - ROUND_MARGIN_SEC * 1000 >= IMPLEMENT_FLOOR_MS;
-  return Math.max(IMPLEMENT_FLOOR_MS, Math.round(anotherRoundFits ? Math.min(shareMs, spendableMs) : spendableMs));
-};
+	const remainingMs = remainingSec * 1000
+	// Everything physically available once this round's check and the settle margin are paid for.
+	const spendableMs = remainingMs - VERIFY_CAP_MS - ROUND_MARGIN_SEC * 1000
+	const shareMs = remainingMs * IMPLEMENT_SHARE_OF_REMAINING
+	// Holding back half only makes sense if a further round can actually use it. Ask whether one would
+	// still fit after this round took its share; when it would not, this IS the last round, so it takes
+	// everything instead of leaving a remainder too small to start anything with. Without this a 900s
+	// task stopped with 233 of 855 seconds unspent — a reserve kept for a round that could never happen.
+	const anotherRoundFits =
+		remainingMs - shareMs - VERIFY_CAP_MS - VERIFY_CAP_MS - ROUND_MARGIN_SEC * 1000 >= IMPLEMENT_FLOOR_MS
+	return Math.max(IMPLEMENT_FLOOR_MS, Math.round(anotherRoundFits ? Math.min(shareMs, spendableMs) : spendableMs))
+}
 
 /**
  * The audit is NOT `verify` run twice, and pricing it as though it were killed every trial of it: both
@@ -104,7 +105,7 @@ export const implementBoxMs = (remainingSec: number): number => {
  * 20% floored at 240s and capped at 360s: roughly the sum of the two boxes whose work it actually does,
  * so the step has room to reach a verdict rather than dying on the way to one.
  */
-export const AUDIT_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.2, 240), 360) * 1000);
+export const AUDIT_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.2, 240), 360) * 1000)
 
 /**
  * Whether a second opinion on a "done" verdict is worth buying yet.
@@ -124,23 +125,24 @@ export const AUDIT_CAP_MS = Math.round(Math.min(Math.max(BUDGET_SEC * 0.2, 240),
  * 32 correct verdicts (what it costs) and reach all 13 of the wrong ones (what it buys) — and the gate is
  * only ever as generous as the audit is cheap. An audit that cannot finish reaches none of them.
  */
-export const auditIsAffordable = (remainingSec: number): boolean => remainingSec * 1000 >= AUDIT_CAP_MS + IMPLEMENT_FLOOR_MS + VERIFY_CAP_MS + ROUND_MARGIN_SEC * 1000;
+export const auditIsAffordable = (remainingSec: number): boolean =>
+	remainingSec * 1000 >= AUDIT_CAP_MS + IMPLEMENT_FLOOR_MS + VERIFY_CAP_MS + ROUND_MARGIN_SEC * 1000
 
 /**
  * A later recon pass only WRITES DOWN what the first one already found — it does not look again, so it
  * needs room to emit JSON and nothing more. Keeping it small is what makes the recon loop affordable:
  * a second full-sized box would put a third of a short run into reconnaissance.
  */
-export const SURVEY_LANDING_MS = 60_000;
+export const SURVEY_LANDING_MS = 60_000
 /** How many recon passes before we accept whatever we have. Two is the useful case; the third is a guard. */
-export const RECON_MAX_PASSES = 3;
+export const RECON_MAX_PASSES = 3
 
 /** Slack kept back so the last round settles instead of being cut off mid-write. */
-export const ROUND_MARGIN_SEC = 60;
+export const ROUND_MARGIN_SEC = 60
 /**
  * A safety valve, NOT the policy — the clock decides when rounds end. This exists for the pathological
  * case the clock cannot catch: rounds so cheap they never consume the budget (every attempt failing in
  * seconds), which would otherwise spin until the loop's `maxIterations` guard CRASHED the run and
  * skipped the final report. Set far above any round count a real budget can pay for.
  */
-export const ROUND_SAFETY_VALVE = 15;
+export const ROUND_SAFETY_VALVE = 15

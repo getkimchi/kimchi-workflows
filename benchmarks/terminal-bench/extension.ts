@@ -14,28 +14,28 @@
  * expansion, and can consume it. It also sees the raw string, which matters because terminal-bench
  * instructions routinely begin with `-` (the reason the harbor adapter pipes them via stdin at all).
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { runWorkflow } from "../../src/engine/run-workflow.ts";
-import type { AgentRequest, AgentSession } from "../../src/engine/types.ts";
-import type { WorkflowDefinition } from "../../src/flow/index.ts";
-import { createFsStore } from "../../src/host/fs-store.ts";
-import { createHostPort } from "../../src/host/host-port.ts";
-import { createPiAgentBridge } from "../../src/host/pi-agent.ts";
-import { runArtifactsDir } from "../../src/host/project-dir.ts";
-import fermentOneshot from "./ferment/ferment-oneshot.workflow.ts";
-import tbSolver from "./tb-solver.workflow.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { runWorkflow } from "../../src/engine/run-workflow.ts"
+import type { AgentRequest, AgentSession } from "../../src/engine/types.ts"
+import type { WorkflowDefinition } from "../../src/flow/index.ts"
+import { createFsStore } from "../../src/host/fs-store.ts"
+import { createHostPort } from "../../src/host/host-port.ts"
+import { createPiAgentBridge } from "../../src/host/pi-agent.ts"
+import { runArtifactsDir } from "../../src/host/project-dir.ts"
+import fermentOneshot from "./ferment/ferment-oneshot.workflow.ts"
+import tbSolver from "./tb-solver.workflow.ts"
 
 /** Agent-phase budget in seconds (harbor's `[agent] timeout_sec`); the adapter passes it through. */
-const DEFAULT_TIMEOUT_SEC = 900;
+const DEFAULT_TIMEOUT_SEC = 900
 /**
  * Stop this much before the harness would kill us. The last round needs room to land, and a run torn
  * down mid-write is strictly worse than one that stopped early — the container is graded either way.
  */
-const SAFETY_MARGIN_SEC = 45;
+const SAFETY_MARGIN_SEC = 45
 
 function readTimeoutSec(): number {
-  const raw = Number(process.env.TB_AGENT_TIMEOUT_SEC ?? DEFAULT_TIMEOUT_SEC);
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_SEC;
+	const raw = Number(process.env.TB_AGENT_TIMEOUT_SEC ?? DEFAULT_TIMEOUT_SEC)
+	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_SEC
 }
 
 /**
@@ -47,21 +47,22 @@ function readTimeoutSec(): number {
  * terminal-bench's own measured failures; `ferment-oneshot` is kimchi's one-shot ferment rendered as a
  * workflow, so a comparison between them is a comparison of designs rather than of harnesses.
  */
-const WORKFLOWS: Record<string, WorkflowDefinition> = { solver: tbSolver, ferment: fermentOneshot };
-const DEFAULT_WORKFLOW = "solver";
+const WORKFLOWS: Record<string, WorkflowDefinition> = { solver: tbSolver, ferment: fermentOneshot }
+const DEFAULT_WORKFLOW = "solver"
 
 function selectWorkflow(): WorkflowDefinition {
-  const requested = (process.env.TB_WORKFLOW ?? DEFAULT_WORKFLOW).trim().toLowerCase();
-  const selected = WORKFLOWS[requested];
-  if (selected) return selected;
-  log(`unknown TB_WORKFLOW="${requested}" (known: ${Object.keys(WORKFLOWS).join(", ")}) — falling back to ${DEFAULT_WORKFLOW}`);
-  return WORKFLOWS[DEFAULT_WORKFLOW] as WorkflowDefinition;
+	const requested = (process.env.TB_WORKFLOW ?? DEFAULT_WORKFLOW).trim().toLowerCase()
+	const selected = WORKFLOWS[requested]
+	if (selected) return selected
+	log(
+		`unknown TB_WORKFLOW="${requested}" (known: ${Object.keys(WORKFLOWS).join(", ")}) — falling back to ${DEFAULT_WORKFLOW}`,
+	)
+	return WORKFLOWS[DEFAULT_WORKFLOW] as WorkflowDefinition
 }
 
 /** Progress goes to stderr: harbor captures it per trial, and in `--print` mode `ui.notify` has nowhere to render. */
 function log(message: string): void {
-  // biome-ignore lint/suspicious/noConsole: stderr is the only channel a --print run has; harbor captures it per trial
-  console.error(`[tb-workflow] ${message}`);
+	console.error(`[tb-workflow] ${message}`)
 }
 
 /**
@@ -72,61 +73,70 @@ function log(message: string): void {
  * little before the harness's and aborts the run itself, which the engine propagates into every
  * in-flight subagent (`AgentRequest.signal`), leaving the machine in a settled state.
  */
-async function solve(instruction: string, startAgent: (request: AgentRequest) => AgentSession, cwd: string, runDir: string): Promise<void> {
-  const budgetSec = Math.max(30, readTimeoutSec() - SAFETY_MARGIN_SEC);
-  const deadlineIso = new Date(Date.now() + budgetSec * 1000).toISOString();
+async function solve(
+	instruction: string,
+	startAgent: (request: AgentRequest) => AgentSession,
+	cwd: string,
+	runDir: string,
+): Promise<void> {
+	const budgetSec = Math.max(30, readTimeoutSec() - SAFETY_MARGIN_SEC)
+	const deadlineIso = new Date(Date.now() + budgetSec * 1000).toISOString()
 
-  const controller = new AbortController();
-  const deadline = setTimeout(() => {
-    log(`deadline reached after ${budgetSec}s — aborting; in-flight subagents are stopped with it`);
-    controller.abort();
-  }, budgetSec * 1000);
-  // A process-group kill (harbor's timeout path) still gives us a moment to stop cleanly.
-  const onSignal = () => controller.abort();
-  process.once("SIGTERM", onSignal);
-  process.once("SIGINT", onSignal);
+	const controller = new AbortController()
+	const deadline = setTimeout(() => {
+		log(`deadline reached after ${budgetSec}s — aborting; in-flight subagents are stopped with it`)
+		controller.abort()
+	}, budgetSec * 1000)
+	// A process-group kill (harbor's timeout path) still gives us a moment to stop cleanly.
+	const onSignal = () => controller.abort()
+	process.once("SIGTERM", onSignal)
+	process.once("SIGINT", onSignal)
 
-  try {
-    const store = createFsStore(runDir);
-    const host = createHostPort(store, { startAgent });
-    const workflow = selectWorkflow();
+	try {
+		const store = createFsStore(runDir)
+		const host = createHostPort(store, { startAgent })
+		const workflow = selectWorkflow()
 
-    log(`starting: workflow ${workflow.name}, budget ${budgetSec}s, model ${process.env.TB_MODEL ?? "(workflow default)"}, cwd ${cwd}`);
-    const result = await runWorkflow(workflow, { instruction, deadlineIso }, host, { signal: controller.signal });
-    log(`run ${result.runId} ${result.status} ${result.status === "completed" ? JSON.stringify(result.output) : (result.error ?? "")}`);
-  } catch (err) {
-    // Never let a workflow failure surface as a harness crash: the container still holds whatever work
-    // landed before the failure, and that is what gets graded.
-    log(`run failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
-  } finally {
-    clearTimeout(deadline);
-    process.off("SIGTERM", onSignal);
-    process.off("SIGINT", onSignal);
-  }
+		log(
+			`starting: workflow ${workflow.name}, budget ${budgetSec}s, model ${process.env.TB_MODEL ?? "(workflow default)"}, cwd ${cwd}`,
+		)
+		const result = await runWorkflow(workflow, { instruction, deadlineIso }, host, { signal: controller.signal })
+		log(
+			`run ${result.runId} ${result.status} ${result.status === "completed" ? JSON.stringify(result.output) : (result.error ?? "")}`,
+		)
+	} catch (err) {
+		// Never let a workflow failure surface as a harness crash: the container still holds whatever work
+		// landed before the failure, and that is what gets graded.
+		log(`run failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`)
+	} finally {
+		clearTimeout(deadline)
+		process.off("SIGTERM", onSignal)
+		process.off("SIGINT", onSignal)
+	}
 }
 
 export default function terminalBenchAgent(pi: ExtensionAPI): void {
-  const bindAgentStarter = createPiAgentBridge(pi);
-  let running = false;
+	const bindAgentStarter = createPiAgentBridge(pi)
+	let running = false
 
-  pi.on("input", async (event, ctx) => {
-    // Only the harness's own inbound instruction starts a run: a message this extension itself injected
-    // (or a second prompt while a run is in flight) must fall through untouched.
-    if (event.source === "extension" || running) return { action: "continue" };
-    const instruction = event.text.trim();
-    if (instruction.length === 0) return { action: "continue" };
+	pi.on("input", async (event, ctx) => {
+		// Only the harness's own inbound instruction starts a run: a message this extension itself injected
+		// (or a second prompt while a run is in flight) must fall through untouched.
+		if (event.source === "extension" || running) return { action: "continue" }
+		const instruction = event.text.trim()
+		if (instruction.length === 0) return { action: "continue" }
 
-    running = true;
-    try {
-      // One directory for everything this run writes — its event log and every step session (spec
-      // §8.9/§2.2). `ctx` is where the harness's session directory becomes knowable, so it is resolved
-      // here and bound into both the store and the agent starter. `TB_LOG_DIR` still overrides it
-      // outright, so a trial can park the whole record somewhere harbor collects.
-      const runDir = process.env.TB_LOG_DIR ?? runArtifactsDir(ctx.cwd, ctx.sessionManager.getSessionDir());
-      await solve(instruction, bindAgentStarter(ctx.modelRegistry, runDir), ctx.cwd, runDir);
-    } finally {
-      running = false;
-    }
-    return { action: "handled" };
-  });
+		running = true
+		try {
+			// One directory for everything this run writes — its event log and every step session (spec
+			// §8.9/§2.2). `ctx` is where the harness's session directory becomes knowable, so it is resolved
+			// here and bound into both the store and the agent starter. `TB_LOG_DIR` still overrides it
+			// outright, so a trial can park the whole record somewhere harbor collects.
+			const runDir = process.env.TB_LOG_DIR ?? runArtifactsDir(ctx.cwd, ctx.sessionManager.getSessionDir())
+			await solve(instruction, bindAgentStarter(ctx.modelRegistry, runDir), ctx.cwd, runDir)
+		} finally {
+			running = false
+		}
+		return { action: "handled" }
+	})
 }

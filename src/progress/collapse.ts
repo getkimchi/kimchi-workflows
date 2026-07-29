@@ -17,34 +17,47 @@
  *
  * Pure — no PI, no `node:fs`, no clock (progress §2.1).
  */
-import type { ProgressKind, ProgressNode, ProgressRow, ProgressView } from "./types.ts";
+import type { ProgressKind, ProgressNode, ProgressRow, ProgressView } from "./types.ts"
 
 /** Kinds that are containers rather than units of work — the ones §6.1/§6.3 fold and unfold. */
-const CONSTRUCTS: ReadonlySet<ProgressKind> = new Set<ProgressKind>(["branch", "branch-arm", "loop", "foreach", "foreach-item", "parallel", "workflow"]);
+const CONSTRUCTS: ReadonlySet<ProgressKind> = new Set<ProgressKind>([
+	"branch",
+	"branch-arm",
+	"loop",
+	"foreach",
+	"foreach-item",
+	"parallel",
+	"workflow",
+])
 
 /** Flatten a view into the rows a render draws, applying progress §6.1–§6.3. */
 export function collapse(view: ProgressView): ProgressRow[] {
-  const rows: ProgressRow[] = [];
-  emit(view.nodes, [], 0, rows);
-  return rows;
+	const rows: ProgressRow[] = []
+	emit(view.nodes, [], 0, rows)
+	return rows
 }
 
-function emit(nodes: readonly ProgressNode[], parentGuides: readonly boolean[], depth: number, rows: ProgressRow[]): void {
-  nodes.forEach((node, index) => {
-    const hasNextSibling = index < nodes.length - 1;
-    // Depth 0 draws no connector at all, so it contributes no guide; every deeper level contributes
-    // exactly one, and the node's own is always the last (progress §4.3).
-    const guides = depth === 0 ? [] : [...parentGuides, hasNextSibling];
-    const collapsed = isCollapsed(node);
-    const expanded = !collapsed && isExpanded(node);
-    rows.push({ node, depth, guides, collapsed, expanded });
-    if (expanded) emit(node.children, guides, depth + 1, rows);
-  });
+function emit(
+	nodes: readonly ProgressNode[],
+	parentGuides: readonly boolean[],
+	depth: number,
+	rows: ProgressRow[],
+): void {
+	nodes.forEach((node, index) => {
+		const hasNextSibling = index < nodes.length - 1
+		// Depth 0 draws no connector at all, so it contributes no guide; every deeper level contributes
+		// exactly one, and the node's own is always the last (progress §4.3).
+		const guides = depth === 0 ? [] : [...parentGuides, hasNextSibling]
+		const collapsed = isCollapsed(node)
+		const expanded = !collapsed && isExpanded(node)
+		rows.push({ node, depth, guides, collapsed, expanded })
+		if (expanded) emit(node.children, guides, depth + 1, rows)
+	})
 }
 
 /** Progress §6.1: a construct that finished folds to a summary row carrying its counters and cost. */
 function isCollapsed(node: ProgressNode): boolean {
-  return !isInlined(node) && CONSTRUCTS.has(node.kind) && node.children.length > 0 && node.state === "completed";
+	return !isInlined(node) && CONSTRUCTS.has(node.kind) && node.children.length > 0 && node.state === "completed"
 }
 
 /**
@@ -55,7 +68,7 @@ function isCollapsed(node: ProgressNode): boolean {
  * row that stands in for it.
  */
 function isInlined(node: ProgressNode): boolean {
-  return node.kind === "foreach-item" && node.children.length === 1 && node.children[0]?.kind === "step";
+	return node.kind === "foreach-item" && node.children.length === 1 && node.children[0]?.kind === "step"
 }
 
 /**
@@ -67,5 +80,5 @@ function isInlined(node: ProgressNode): boolean {
  * would fill the panel with `todo` rows for work that is already decided against.
  */
 function isExpanded(node: ProgressNode): boolean {
-  return !isInlined(node) && node.children.length > 0 && node.state !== "todo" && node.state !== "skipped";
+	return !isInlined(node) && node.children.length > 0 && node.state !== "todo" && node.state !== "skipped"
 }

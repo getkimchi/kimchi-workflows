@@ -6,32 +6,38 @@
  * node's output is the array of per-item outputs in ITEM order, regardless of completion order —
  * unlike `batch.workflow.ts`'s default `concurrency: 1`, this one genuinely overlaps.
  */
-import { Type } from "typebox";
-import { createStep, createWorkflow } from "../src/flow/index.ts";
+import { Type } from "typebox"
+import { createStep, createWorkflow } from "../src/flow/index.ts"
 
-export const itemSchema = Type.Object({ n: Type.Integer() });
-export const squaredSchema = Type.Object({ squared: Type.Integer() });
+export const itemSchema = Type.Object({ n: Type.Integer() })
+export const squaredSchema = Type.Object({ squared: Type.Integer() })
 
 const seed = createStep({
-  name: "seed",
-  output: Type.Object({ numbers: Type.Array(Type.Integer()) }),
-  run: () => ({ numbers: [1, 2, 3, 4, 5] }),
-});
+	name: "seed",
+	output: Type.Object({ numbers: Type.Array(Type.Integer()) }),
+	run: () => ({ numbers: [1, 2, 3, 4, 5] }),
+})
 
 const squareBody = createWorkflow({ name: "square-body" })
-  .then(
-    createStep({
-      name: "square-item",
-      input: itemSchema,
-      output: squaredSchema,
-      run: ({ input }) => ({ squared: input.n * input.n }),
-    }),
-  )
-  .commit();
+	.then(
+		createStep({
+			name: "square-item",
+			input: itemSchema,
+			output: squaredSchema,
+			run: ({ input }) => ({ squared: input.n * input.n }),
+		}),
+	)
+	.commit()
 
-const foreachConcurrentWorkflow = createWorkflow({ name: "foreach-concurrent", description: "Square each number, up to 3 items at once via .foreach concurrency (P3)" })
-  .then(seed)
-  .foreach(squareBody, (ctx) => (ctx.getStepResult<{ numbers: number[] }>("seed")?.numbers ?? []).map((n) => ({ n })), { name: "square-each", concurrency: 3 })
-  .commit();
+const foreachConcurrentWorkflow = createWorkflow({
+	name: "foreach-concurrent",
+	description: "Square each number, up to 3 items at once via .foreach concurrency (P3)",
+})
+	.then(seed)
+	.foreach(squareBody, (ctx) => (ctx.getStepResult<{ numbers: number[] }>("seed")?.numbers ?? []).map((n) => ({ n })), {
+		name: "square-each",
+		concurrency: 3,
+	})
+	.commit()
 
-export default foreachConcurrentWorkflow;
+export default foreachConcurrentWorkflow

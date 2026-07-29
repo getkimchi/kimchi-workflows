@@ -1,12 +1,12 @@
-import type { AgentEndEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
-import { createPiAgentBridge } from "../src/host/pi-agent.ts";
-import type { ModelRegistry } from "../src/host/pi-agent-messages.ts";
-import { scriptedSubagent } from "./fake-subagent.ts";
-import { agentRequest, tempSessionsDir } from "./helpers.ts";
+import type { AgentEndEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { describe, expect, it } from "vitest"
+import { createPiAgentBridge } from "../src/host/pi-agent.ts"
+import type { ModelRegistry } from "../src/host/pi-agent-messages.ts"
+import { scriptedSubagent } from "./fake-subagent.ts"
+import { agentRequest, tempSessionsDir } from "./helpers.ts"
 
 /** Where the bridge under test writes its step sessions (the real host binds the harness's own session dir). */
-const sessionsDir = tempSessionsDir();
+const sessionsDir = tempSessionsDir()
 
 /**
  * The bridge's cross-talk safety (spec §2.2), driven directly against a fake PI — no engine, no
@@ -21,133 +21,137 @@ const sessionsDir = tempSessionsDir();
  */
 
 /** The shape of a fired `context` event's result — same as `ContextEventResult` (`{ messages?: AgentMessage[] }`). */
-type ContextResult = { messages?: unknown[] } | undefined;
+type ContextResult = { messages?: unknown[] } | undefined
 
 function fakePi(): {
-  pi: ExtensionAPI;
-  fireAgentEnd: (text: string) => void;
-  fireContext: (messages: unknown[]) => ContextResult;
-  sentMessages: string[];
+	pi: ExtensionAPI
+	fireAgentEnd: (text: string) => void
+	fireContext: (messages: unknown[]) => ContextResult
+	sentMessages: string[]
 } {
-  let endHandler: ((event: AgentEndEvent) => void) | undefined;
-  let contextHandler: ((event: { type: "context"; messages: unknown[] }) => ContextResult) | undefined;
-  const sentMessages: string[] = [];
-  const pi = {
-    on: (event: string, h: (event: AgentEndEvent | { type: "context"; messages: unknown[] }) => unknown) => {
-      if (event === "agent_end") endHandler = h as (event: AgentEndEvent) => void;
-      if (event === "context") contextHandler = h as (event: { type: "context"; messages: unknown[] }) => ContextResult;
-    },
-    sendUserMessage: (message: string) => {
-      sentMessages.push(message);
-    },
-    setModel: async () => true,
-  } as unknown as ExtensionAPI;
+	let endHandler: ((event: AgentEndEvent) => void) | undefined
+	let contextHandler: ((event: { type: "context"; messages: unknown[] }) => ContextResult) | undefined
+	const sentMessages: string[] = []
+	const pi = {
+		on: (event: string, h: (event: AgentEndEvent | { type: "context"; messages: unknown[] }) => unknown) => {
+			if (event === "agent_end") endHandler = h as (event: AgentEndEvent) => void
+			if (event === "context") contextHandler = h as (event: { type: "context"; messages: unknown[] }) => ContextResult
+		},
+		sendUserMessage: (message: string) => {
+			sentMessages.push(message)
+		},
+		setModel: async () => true,
+	} as unknown as ExtensionAPI
 
-  return {
-    pi,
-    fireAgentEnd: (text: string) => {
-      if (!endHandler) throw new Error("test bug: no agent_end handler was registered");
-      endHandler({
-        type: "agent_end",
-        messages: [{ role: "assistant", content: [{ type: "text", text }], usage: { totalTokens: 1 } }],
-      } as unknown as AgentEndEvent);
-    },
-    fireContext: (messages: unknown[]) => {
-      if (!contextHandler) throw new Error("test bug: no context handler was registered");
-      return contextHandler({ type: "context", messages });
-    },
-    sentMessages,
-  };
+	return {
+		pi,
+		fireAgentEnd: (text: string) => {
+			if (!endHandler) throw new Error("test bug: no agent_end handler was registered")
+			endHandler({
+				type: "agent_end",
+				messages: [{ role: "assistant", content: [{ type: "text", text }], usage: { totalTokens: 1 } }],
+			} as unknown as AgentEndEvent)
+		},
+		fireContext: (messages: unknown[]) => {
+			if (!contextHandler) throw new Error("test bug: no context handler was registered")
+			return contextHandler({ type: "context", messages })
+		},
+		sentMessages,
+	}
 }
 
 function fakeModelRegistry(): ModelRegistry {
-  return { find: () => undefined } as unknown as ModelRegistry;
+	return { find: () => undefined } as unknown as ModelRegistry
 }
 
 describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent turns can never cross-talk", () => {
-  it("a second in-session turn attempted while one is in flight is rejected loudly and specifically, never silently swapped in", async () => {
-    const { pi, fireAgentEnd, sentMessages } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
+	it("a second in-session turn attempted while one is in flight is rejected loudly and specifically, never silently swapped in", async () => {
+		const { pi, fireAgentEnd, sentMessages } = fakePi()
+		const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir)
 
-    const stepA = startAgent(agentRequest({ stepName: "step-a" }));
-    const stepB = startAgent(agentRequest({ stepName: "step-b" }));
+		const stepA = startAgent(agentRequest({ stepName: "step-a" }))
+		const stepB = startAgent(agentRequest({ stepName: "step-b" }))
 
-    // Step A starts its in-session turn: goes through to `pi.sendUserMessage`, stays pending.
-    const turnA = stepA.sendAndAwaitEnd("prompt from A");
+		// Step A starts its in-session turn: goes through to `pi.sendUserMessage`, stays pending.
+		const turnA = stepA.sendAndAwaitEnd("prompt from A")
 
-    // Step B attempts a SECOND in-session turn while A's is still in flight — the exact interleaving the
-    // old shared `pending` variable could not survive.
-    await expect(stepB.sendAndAwaitEnd("prompt from B")).rejects.toThrow(/step "step-b".*step "step-a".*in flight/s);
+		// Step B attempts a SECOND in-session turn while A's is still in flight — the exact interleaving the
+		// old shared `pending` variable could not survive.
+		await expect(stepB.sendAndAwaitEnd("prompt from B")).rejects.toThrow(/step "step-b".*step "step-a".*in flight/s)
 
-    // B's message was never sent to PI at all — the rejection happens before any side effect, so PI
-    // itself never sees a second concurrent `sendUserMessage`.
-    expect(sentMessages).toEqual(["prompt from A"]);
+		// B's message was never sent to PI at all — the rejection happens before any side effect, so PI
+		// itself never sees a second concurrent `sendUserMessage`.
+		expect(sentMessages).toEqual(["prompt from A"])
 
-    // A's turn is completely unaffected: firing the ONE real `agent_end` resolves A with A's OWN reply.
-    fireAgentEnd("reply for A");
-    await expect(turnA).resolves.toEqual({ text: "reply for A", usage: { totalTokens: 1 } });
-  });
+		// A's turn is completely unaffected: firing the ONE real `agent_end` resolves A with A's OWN reply.
+		fireAgentEnd("reply for A")
+		await expect(turnA).resolves.toEqual({ text: "reply for A", usage: { totalTokens: 1 } })
+	})
 
-  it("never resolves one step's turn with another step's reply, regardless of send order", async () => {
-    const { pi, fireAgentEnd } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
+	it("never resolves one step's turn with another step's reply, regardless of send order", async () => {
+		const { pi, fireAgentEnd } = fakePi()
+		const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir)
 
-    const stepA = startAgent(agentRequest({ stepName: "step-a" }));
-    const stepB = startAgent(agentRequest({ stepName: "step-b" }));
+		const stepA = startAgent(agentRequest({ stepName: "step-a" }))
+		const stepB = startAgent(agentRequest({ stepName: "step-b" }))
 
-    const turnA = stepA.sendAndAwaitEnd("prompt from A");
-    const rejectedTurnB = stepB.sendAndAwaitEnd("prompt from B").catch((err: Error) => err);
+		const turnA = stepA.sendAndAwaitEnd("prompt from A")
+		const rejectedTurnB = stepB.sendAndAwaitEnd("prompt from B").catch((err: Error) => err)
 
-    fireAgentEnd("reply for A");
+		fireAgentEnd("reply for A")
 
-    const [resolvedA, resultB] = await Promise.all([turnA, rejectedTurnB]);
-    expect(resolvedA).toEqual({ text: "reply for A", usage: { totalTokens: 1 } });
-    expect(resultB).toBeInstanceOf(Error); // B never got A's reply — it got its own clear rejection instead
-  });
+		const [resolvedA, resultB] = await Promise.all([turnA, rejectedTurnB])
+		expect(resolvedA).toEqual({ text: "reply for A", usage: { totalTokens: 1 } })
+		expect(resultB).toBeInstanceOf(Error) // B never got A's reply — it got its own clear rejection instead
+	})
 
-  it("after A's turn settles, a fresh in-session turn is accepted normally (the guard is not sticky)", async () => {
-    const { pi, fireAgentEnd, sentMessages } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
+	it("after A's turn settles, a fresh in-session turn is accepted normally (the guard is not sticky)", async () => {
+		const { pi, fireAgentEnd, sentMessages } = fakePi()
+		const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir)
 
-    const stepA = startAgent(agentRequest({ stepName: "step-a" }));
-    const turnA = stepA.sendAndAwaitEnd("prompt from A");
-    fireAgentEnd("reply for A");
-    await expect(turnA).resolves.toEqual({ text: "reply for A", usage: { totalTokens: 1 } });
+		const stepA = startAgent(agentRequest({ stepName: "step-a" }))
+		const turnA = stepA.sendAndAwaitEnd("prompt from A")
+		fireAgentEnd("reply for A")
+		await expect(turnA).resolves.toEqual({ text: "reply for A", usage: { totalTokens: 1 } })
 
-    const stepB = startAgent(agentRequest({ stepName: "step-b" }));
-    const turnB = stepB.sendAndAwaitEnd("prompt from B");
-    fireAgentEnd("reply for B");
-    await expect(turnB).resolves.toEqual({ text: "reply for B", usage: { totalTokens: 1 } });
+		const stepB = startAgent(agentRequest({ stepName: "step-b" }))
+		const turnB = stepB.sendAndAwaitEnd("prompt from B")
+		fireAgentEnd("reply for B")
+		await expect(turnB).resolves.toEqual({ text: "reply for B", usage: { totalTokens: 1 } })
 
-    expect(sentMessages).toEqual(["prompt from A", "prompt from B"]);
-  });
+		expect(sentMessages).toEqual(["prompt from A", "prompt from B"])
+	})
 
-  it("dispose() only clears a session's OWN in-flight turn, never a sibling's", async () => {
-    const { pi, fireAgentEnd } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
+	it("dispose() only clears a session's OWN in-flight turn, never a sibling's", async () => {
+		const { pi, fireAgentEnd } = fakePi()
+		const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir)
 
-    const stepA = startAgent(agentRequest({ stepName: "step-a" }));
-    const stepB = startAgent(agentRequest({ stepName: "step-b" })); // never starts a turn
+		const stepA = startAgent(agentRequest({ stepName: "step-a" }))
+		const stepB = startAgent(agentRequest({ stepName: "step-b" })) // never starts a turn
 
-    const turnA = stepA.sendAndAwaitEnd("prompt from A");
-    stepB.dispose(); // must be a no-op w.r.t. A's in-flight turn
+		const turnA = stepA.sendAndAwaitEnd("prompt from A")
+		stepB.dispose() // must be a no-op w.r.t. A's in-flight turn
 
-    fireAgentEnd("reply for A");
-    await expect(turnA).resolves.toEqual({ text: "reply for A", usage: { totalTokens: 1 } });
-  });
+		fireAgentEnd("reply for A")
+		await expect(turnA).resolves.toEqual({ text: "reply for A", usage: { totalTokens: 1 } })
+	})
 
-  it("background and isolated requests never touch the shared in-session guard (both go through the subprocess path)", async () => {
-    const { pi, sentMessages } = fakePi();
-    const { spawn, calls } = scriptedSubagent("");
-    const startAgent = createPiAgentBridge(pi, (args) => ({ command: "pi", args }), spawn)(fakeModelRegistry(), sessionsDir);
+	it("background and isolated requests never touch the shared in-session guard (both go through the subprocess path)", async () => {
+		const { pi, sentMessages } = fakePi()
+		const { spawn, calls } = scriptedSubagent("")
+		const startAgent = createPiAgentBridge(
+			pi,
+			(args) => ({ command: "pi", args }),
+			spawn,
+		)(fakeModelRegistry(), sessionsDir)
 
-    await startAgent(agentRequest({ stepName: "bg", background: true })).sendAndAwaitEnd("go");
-    await startAgent(agentRequest({ stepName: "fan", isolated: true })).sendAndAwaitEnd("go");
+		await startAgent(agentRequest({ stepName: "bg", background: true })).sendAndAwaitEnd("go")
+		await startAgent(agentRequest({ stepName: "fan", isolated: true })).sendAndAwaitEnd("go")
 
-    expect(calls).toHaveLength(2); // both routed to the subprocess path
-    expect(sentMessages).toEqual([]); // neither ever called `pi.sendUserMessage`
-  });
-});
+		expect(calls).toHaveLength(2) // both routed to the subprocess path
+		expect(sentMessages).toEqual([]) // neither ever called `pi.sendUserMessage`
+	})
+})
 
 /**
  * Cross-restart history seeding (spec §8.4), driven the same way: no engine, no real PI — just the
@@ -156,77 +160,77 @@ describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent tur
  * into PI's `context` event for the right session, and only for the right session.
  */
 describe("createPiAgentBridge history seeding (spec §8.4): an answer-resume's stored conversation reaches the model", () => {
-  const history = [
-    { role: "user", content: [{ type: "text", text: "original prompt" }] },
-    { role: "assistant", content: [{ type: "text", text: "what backend?" }] },
-  ];
+	const history = [
+		{ role: "user", content: [{ type: "text", text: "original prompt" }] },
+		{ role: "assistant", content: [{ type: "text", text: "what backend?" }] },
+	]
 
-  it("prepends the resumed session's history onto every outgoing `context` call, across repeated turns in that session", async () => {
-    const { pi, fireContext, fireAgentEnd } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
+	it("prepends the resumed session's history onto every outgoing `context` call, across repeated turns in that session", async () => {
+		const { pi, fireContext, fireAgentEnd } = fakePi()
+		const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir)
 
-    const resumed = startAgent(agentRequest({ stepName: "plan", history }));
+		const resumed = startAgent(agentRequest({ stepName: "plan", history }))
 
-    const turnA = resumed.sendAndAwaitEnd("answered: Redis");
-    expect(fireContext([{ role: "user", content: "answered: Redis" }])).toEqual({
-      messages: [...history, { role: "user", content: "answered: Redis" }],
-    });
-    fireAgentEnd("planning with Redis");
-    await turnA;
+		const turnA = resumed.sendAndAwaitEnd("answered: Redis")
+		expect(fireContext([{ role: "user", content: "answered: Redis" }])).toEqual({
+			messages: [...history, { role: "user", content: "answered: Redis" }],
+		})
+		fireAgentEnd("planning with Redis")
+		await turnA
 
-    // A second turn in the SAME session (e.g. a steering repair) still gets the seed — PI's own
-    // accumulated session state does not fold the injected prefix back in, so it must be re-applied.
-    const turnB = resumed.sendAndAwaitEnd("please reply as JSON");
-    expect(fireContext([{ role: "user", content: "please reply as JSON" }])).toEqual({
-      messages: [...history, { role: "user", content: "please reply as JSON" }],
-    });
-    fireAgentEnd('{"steps":["a"]}');
-    await turnB;
-  });
+		// A second turn in the SAME session (e.g. a steering repair) still gets the seed — PI's own
+		// accumulated session state does not fold the injected prefix back in, so it must be re-applied.
+		const turnB = resumed.sendAndAwaitEnd("please reply as JSON")
+		expect(fireContext([{ role: "user", content: "please reply as JSON" }])).toEqual({
+			messages: [...history, { role: "user", content: "please reply as JSON" }],
+		})
+		fireAgentEnd('{"steps":["a"]}')
+		await turnB
+	})
 
-  it("leaves a fresh (no-history) session's `context` calls untouched — no regression to the common in-process path", async () => {
-    const { pi, fireContext, fireAgentEnd } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
+	it("leaves a fresh (no-history) session's `context` calls untouched — no regression to the common in-process path", async () => {
+		const { pi, fireContext, fireAgentEnd } = fakePi()
+		const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir)
 
-    const fresh = startAgent(agentRequest({ stepName: "plan" })); // no `history` — the ordinary fresh-run request
-    const turn = fresh.sendAndAwaitEnd("fresh prompt");
+		const fresh = startAgent(agentRequest({ stepName: "plan" })) // no `history` — the ordinary fresh-run request
+		const turn = fresh.sendAndAwaitEnd("fresh prompt")
 
-    expect(fireContext([{ role: "user", content: "fresh prompt" }])).toBeUndefined();
+		expect(fireContext([{ role: "user", content: "fresh prompt" }])).toBeUndefined()
 
-    fireAgentEnd("reply");
-    await turn;
-  });
+		fireAgentEnd("reply")
+		await turn
+	})
 
-  it("stops seeding once the session disposes, so a later fresh session is never contaminated by a stale seed", async () => {
-    const { pi, fireContext, fireAgentEnd } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
+	it("stops seeding once the session disposes, so a later fresh session is never contaminated by a stale seed", async () => {
+		const { pi, fireContext, fireAgentEnd } = fakePi()
+		const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir)
 
-    const resumed = startAgent(agentRequest({ stepName: "plan", history }));
-    const turnA = resumed.sendAndAwaitEnd("answered: Redis");
-    fireAgentEnd("planning with Redis");
-    await turnA;
-    resumed.dispose();
+		const resumed = startAgent(agentRequest({ stepName: "plan", history }))
+		const turnA = resumed.sendAndAwaitEnd("answered: Redis")
+		fireAgentEnd("planning with Redis")
+		await turnA
+		resumed.dispose()
 
-    const next = startAgent(agentRequest({ stepName: "plan" })); // a later, unrelated fresh session
-    const turnB = next.sendAndAwaitEnd("next prompt");
-    expect(fireContext([{ role: "user", content: "next prompt" }])).toBeUndefined(); // no leftover seed
-    fireAgentEnd("reply");
-    await turnB;
-  });
+		const next = startAgent(agentRequest({ stepName: "plan" })) // a later, unrelated fresh session
+		const turnB = next.sendAndAwaitEnd("next prompt")
+		expect(fireContext([{ role: "user", content: "next prompt" }])).toBeUndefined() // no leftover seed
+		fireAgentEnd("reply")
+		await turnB
+	})
 
-  it("dispose() only clears a session's OWN history seed, never a sibling's (mirrors the in-flight guard)", async () => {
-    const { pi, fireContext, fireAgentEnd } = fakePi();
-    const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir);
+	it("dispose() only clears a session's OWN history seed, never a sibling's (mirrors the in-flight guard)", async () => {
+		const { pi, fireContext, fireAgentEnd } = fakePi()
+		const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir)
 
-    const resumed = startAgent(agentRequest({ stepName: "plan", history }));
-    const other = startAgent(agentRequest({ stepName: "other" })); // never starts a turn, has no history of its own
-    other.dispose(); // must be a no-op w.r.t. `resumed`'s active seed
+		const resumed = startAgent(agentRequest({ stepName: "plan", history }))
+		const other = startAgent(agentRequest({ stepName: "other" })) // never starts a turn, has no history of its own
+		other.dispose() // must be a no-op w.r.t. `resumed`'s active seed
 
-    const turn = resumed.sendAndAwaitEnd("answered: Redis");
-    expect(fireContext([{ role: "user", content: "answered: Redis" }])).toEqual({
-      messages: [...history, { role: "user", content: "answered: Redis" }],
-    });
-    fireAgentEnd("planning with Redis");
-    await turn;
-  });
-});
+		const turn = resumed.sendAndAwaitEnd("answered: Redis")
+		expect(fireContext([{ role: "user", content: "answered: Redis" }])).toEqual({
+			messages: [...history, { role: "user", content: "answered: Redis" }],
+		})
+		fireAgentEnd("planning with Redis")
+		await turn
+	})
+})

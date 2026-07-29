@@ -2,11 +2,11 @@
  * Run-status derivation (spec §5.2, §5.3): no status field is authoritative on its own — the event
  * log decides, with step states (step-state.ts) as the intermediate view. Pure function over the log.
  */
-import { deriveStepStates, type StepState, type StepStateKey } from "./step-state.ts";
-import type { RunEvent } from "./types.ts";
+import { deriveStepStates, type StepState, type StepStateKey } from "./step-state.ts"
+import type { RunEvent } from "./types.ts"
 
 /** A run's derived status (spec §5.2). */
-export type RunStatus = "in_progress" | "blocked" | "completed" | "cancelled" | "crashed";
+export type RunStatus = "in_progress" | "blocked" | "completed" | "cancelled" | "crashed"
 
 /**
  * Derive a run's status from its event log (spec §5.3), in precedence order:
@@ -30,27 +30,27 @@ export type RunStatus = "in_progress" | "blocked" | "completed" | "cancelled" | 
  *  5. otherwise `in_progress` — `run-started` recorded, nothing else yet.
  */
 export function deriveRunStatus(events: readonly RunEvent[]): RunStatus | undefined {
-  if (!events.some((event) => event.type === "run-started")) return undefined;
+	if (!events.some((event) => event.type === "run-started")) return undefined
 
-  const states = deriveStepStates(events);
-  if (hasState(states, "in_progress")) return "in_progress";
-  if (hasState(states, "blocked")) return "blocked";
+	const states = deriveStepStates(events)
+	if (hasState(states, "in_progress")) return "in_progress"
+	if (hasState(states, "blocked")) return "blocked"
 
-  let terminal: RunStatus | undefined;
-  for (const event of events) {
-    if (event.type === "run-completed") terminal = "completed";
-    else if (event.type === "run-cancelled") terminal = "cancelled";
-    else if (event.type === "run-crashed") terminal = "crashed";
-  }
-  if (terminal) return terminal;
+	let terminal: RunStatus | undefined
+	for (const event of events) {
+		if (event.type === "run-completed") terminal = "completed"
+		else if (event.type === "run-cancelled") terminal = "cancelled"
+		else if (event.type === "run-crashed") terminal = "crashed"
+	}
+	if (terminal) return terminal
 
-  if (hasState(states, "crashed")) return "crashed";
-  return "in_progress";
+	if (hasState(states, "crashed")) return "crashed"
+	return "in_progress"
 }
 
 function hasState(states: ReadonlyMap<StepStateKey, StepState>, target: StepState): boolean {
-  for (const value of states.values()) if (value === target) return true;
-  return false;
+	for (const value of states.values()) if (value === target) return true
+	return false
 }
 
 /**
@@ -62,9 +62,9 @@ function hasState(states: ReadonlyMap<StepStateKey, StepState>, target: StepStat
  * `pendingQuestionCount`/`deriveStepStates` directly rather than this single-name convenience.
  */
 export function currentStepName(status: RunStatus, states: ReadonlyMap<StepStateKey, StepState>): string | undefined {
-  if (status === "completed") return undefined;
-  for (const [key, value] of states) if (value === status) return key;
-  return undefined;
+	if (status === "completed") return undefined
+	for (const [key, value] of states) if (value === status) return key
+	return undefined
 }
 
 /**
@@ -72,7 +72,7 @@ export function currentStepName(status: RunStatus, states: ReadonlyMap<StepState
  * one executing step reads `in_progress` (§5.3), so without this a waiting question is invisible.
  */
 export function pendingQuestionCount(states: ReadonlyMap<StepStateKey, StepState>): number {
-  let count = 0;
-  for (const value of states.values()) if (value === "blocked") count += 1;
-  return count;
+	let count = 0
+	for (const value of states.values()) if (value === "blocked") count += 1
+	return count
 }

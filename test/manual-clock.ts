@@ -7,48 +7,48 @@
  * finishes within budget cleanly cancels its timer.
  */
 export interface ManualClock {
-  sleep(ms: number, signal?: AbortSignal): Promise<void>;
-  /** Resolves once at least one timer is pending (waiting for the engine to register the budget timer). */
-  waitForTimer(): Promise<void>;
-  /** Fire (resolve) all currently-pending timers. */
-  fireAll(): void;
-  /** Count of currently-pending timers. */
-  readonly pendingCount: number;
+	sleep(ms: number, signal?: AbortSignal): Promise<void>
+	/** Resolves once at least one timer is pending (waiting for the engine to register the budget timer). */
+	waitForTimer(): Promise<void>
+	/** Fire (resolve) all currently-pending timers. */
+	fireAll(): void
+	/** Count of currently-pending timers. */
+	readonly pendingCount: number
 }
 
 export function createManualClock(): ManualClock {
-  let pending: Array<() => void> = [];
-  let notifyRegistered: (() => void) | undefined;
+	let pending: Array<() => void> = []
+	let notifyRegistered: (() => void) | undefined
 
-  const sleep = (_ms: number, signal?: AbortSignal): Promise<void> =>
-    new Promise<void>((resolve) => {
-      if (signal?.aborted) return resolve();
-      pending.push(resolve);
-      signal?.addEventListener("abort", () => resolve(), { once: true });
-      const notify = notifyRegistered;
-      notifyRegistered = undefined;
-      notify?.();
-    });
+	const sleep = (_ms: number, signal?: AbortSignal): Promise<void> =>
+		new Promise<void>((resolve) => {
+			if (signal?.aborted) return resolve()
+			pending.push(resolve)
+			signal?.addEventListener("abort", () => resolve(), { once: true })
+			const notify = notifyRegistered
+			notifyRegistered = undefined
+			notify?.()
+		})
 
-  const waitForTimer = (): Promise<void> => {
-    if (pending.length > 0) return Promise.resolve();
-    return new Promise<void>((resolve) => {
-      notifyRegistered = resolve;
-    });
-  };
+	const waitForTimer = (): Promise<void> => {
+		if (pending.length > 0) return Promise.resolve()
+		return new Promise<void>((resolve) => {
+			notifyRegistered = resolve
+		})
+	}
 
-  const fireAll = (): void => {
-    const timers = pending;
-    pending = [];
-    for (const resolve of timers) resolve();
-  };
+	const fireAll = (): void => {
+		const timers = pending
+		pending = []
+		for (const resolve of timers) resolve()
+	}
 
-  return {
-    sleep,
-    waitForTimer,
-    fireAll,
-    get pendingCount() {
-      return pending.length;
-    },
-  };
+	return {
+		sleep,
+		waitForTimer,
+		fireAll,
+		get pendingCount() {
+			return pending.length
+		},
+	}
 }

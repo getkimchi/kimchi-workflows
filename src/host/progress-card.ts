@@ -19,25 +19,25 @@
  * place. One shape for all five outcomes (§7.6): a run that succeeded is the one a user later wants the
  * duration and the token total of.
  */
-import type { RunStatus } from "../engine/run-status.ts";
-import { formatClock, formatTokens } from "../progress/render.ts";
-import type { ProgressView } from "../progress/types.ts";
+import type { RunStatus } from "../engine/run-status.ts"
+import { formatClock, formatTokens } from "../progress/render.ts"
+import type { ProgressView } from "../progress/types.ts"
 
 /** How a summary should be announced — `notify`'s own severity vocabulary. */
-export type SummaryLevel = "info" | "warning" | "error";
+export type SummaryLevel = "info" | "warning" | "error"
 
 /** Status glyph plus the severity it is announced at, in the same vocabulary as the tree (progress §4.4). */
 const STATUS: Readonly<Record<RunStatus, readonly [string, SummaryLevel]>> = {
-  completed: ["✓", "info"],
-  crashed: ["✗", "error"],
-  cancelled: ["■", "warning"],
-  blocked: ["?", "info"],
-  in_progress: ["…", "info"],
-};
+	completed: ["✓", "info"],
+	crashed: ["✗", "error"],
+	cancelled: ["■", "warning"],
+	blocked: ["?", "info"],
+	in_progress: ["…", "info"],
+}
 
 export interface RunSummaryText {
-  readonly message: string;
-  readonly level: SummaryLevel;
+	readonly message: string
+	readonly level: SummaryLevel
 }
 
 /**
@@ -47,24 +47,24 @@ export interface RunSummaryText {
  * wrap to — the host draws it. That also makes this trivially testable, which the themed card was not.
  */
 export function runSummaryText(view: ProgressView, runLabel: string, workflowFilePath?: string): RunSummaryText {
-  const status = view.status ?? "in_progress";
-  const [glyph, level] = STATUS[status];
+	const status = view.status ?? "in_progress"
+	const [glyph, level] = STATUS[status]
 
-  const facts = [
-    `${view.stepsSettled} of ${view.stepsTotal} steps`,
-    formatClock(view.elapsedMs ?? 0),
-    view.tokens > 0 ? `${formatTokens(view.tokens)} tok` : undefined,
-    runLabel,
-  ].filter((fact): fact is string => fact !== undefined);
+	const facts = [
+		`${view.stepsSettled} of ${view.stepsTotal} steps`,
+		formatClock(view.elapsedMs ?? 0),
+		view.tokens > 0 ? `${formatTokens(view.tokens)} tok` : undefined,
+		runLabel,
+	].filter((fact): fact is string => fact !== undefined)
 
-  const lines = [`${glyph} workflow "${view.workflowName}" ${status} · ${facts.join(" · ")}`];
-  // The failure reason is the one thing a crashed run is opened for, so it goes on its own line rather
-  // than being truncated into the first one.
-  if (status === "crashed" && view.failureReason) lines.push(`  ${view.failureReason}`);
-  if (workflowFilePath) lines.push(`  ${workflowFilePath}`);
-  // `/workflow status` is where the fully expanded tree lives (§11.4, §6.6) — say so, since the panel
-  // that was showing it has just been cleared.
-  lines.push(`  /workflow status ${runLabel} for the full tree`);
+	const lines = [`${glyph} workflow "${view.workflowName}" ${status} · ${facts.join(" · ")}`]
+	// The failure reason is the one thing a crashed run is opened for, so it goes on its own line rather
+	// than being truncated into the first one.
+	if (status === "crashed" && view.failureReason) lines.push(`  ${view.failureReason}`)
+	if (workflowFilePath) lines.push(`  ${workflowFilePath}`)
+	// `/workflow status` is where the fully expanded tree lives (§11.4, §6.6) — say so, since the panel
+	// that was showing it has just been cleared.
+	lines.push(`  /workflow status ${runLabel} for the full tree`)
 
-  return { message: lines.join("\n"), level };
+	return { message: lines.join("\n"), level }
 }

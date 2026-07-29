@@ -31,24 +31,24 @@
  * made by the orchestrator itself, 0 agent spawns — so the worker is gone and both props went with it.
  * A turn that does its own work has no report to land and no diff to be handed.
  */
-import type { Static } from "typebox";
+import type { Static } from "typebox"
 import {
-  type BudgetTier,
-  FERMENT_WORKER_BUDGETS,
-  type judgeAnswersSchema,
-  PHASE_GATES,
-  type PhaseGrade,
-  PLAN_GATES,
-  type PlannedStep,
-  type planSchema,
-  renderGateGuidance,
-  SHIP_GATES,
-  STEP_GATES,
-} from "./contract.ts";
-import type { DiffEvidence } from "./verify.ts";
+	type BudgetTier,
+	FERMENT_WORKER_BUDGETS,
+	type judgeAnswersSchema,
+	PHASE_GATES,
+	type PhaseGrade,
+	PLAN_GATES,
+	type PlannedStep,
+	type planSchema,
+	renderGateGuidance,
+	SHIP_GATES,
+	STEP_GATES,
+} from "./contract.ts"
+import type { DiffEvidence } from "./verify.ts"
 
-type Plan = Static<typeof planSchema>;
-type JudgeAnswers = Static<typeof judgeAnswersSchema>;
+type Plan = Static<typeof planSchema>
+type JudgeAnswers = Static<typeof judgeAnswersSchema>
 
 /** Verbatim from kimchi's src/shared/planning/shared-planning-process.ts. */
 export const SHARED_PLANNING_PROCESS = `Follow five steps IN ORDER. Do NOT get stuck on any step.
@@ -172,7 +172,7 @@ Common plan anti-patterns to avoid:
 - Accept When criteria that are just "it works" or "tests pass" without naming the specific test
 - Every chunk depending on the previous one when some could be parallel
 - Exploration or discovery as an implementation chunk — that belongs in Steps 1/4, not in the plan
-- Verification Strategy that is identical for every chunk instead of chunk-specific`;
+- Verification Strategy that is identical for every chunk instead of chunk-specific`
 
 /**
  * The planner, i.e. kimchi's one-shot envelope.
@@ -183,27 +183,31 @@ Common plan anti-patterns to avoid:
  * job to drive it. And the whole "## Turn discipline" section is gone: it exists to stop a single session
  * from halting between lifecycle calls, which cannot happen when each stage is its own step.
  */
-export function planPrompt(args: { intent: string; answers?: JudgeAnswers; questionsAsked?: readonly { id: string; question: string }[] }): string {
-  const { intent, answers, questionsAsked } = args;
+export function planPrompt(args: {
+	intent: string
+	answers?: JudgeAnswers
+	questionsAsked?: readonly { id: string; question: string }[]
+}): string {
+	const { intent, answers, questionsAsked } = args
 
-  const answered =
-    answers && answers.answers.length > 0
-      ? [
-          "",
-          "## Answers from the judge",
-          "",
-          "You asked for a decision and it has been made — these answers are final; do not ask them again.",
-          ...answers.answers.map((answer) => {
-            const asked = questionsAsked?.find((question) => question.id === answer.id);
-            return `- ${asked ? asked.question : answer.id}: ${answer.value}`;
-          }),
-          `Rationale: ${answers.rationale}`,
-          "",
-          "Fold them into the plan and return it now. Ask only NEW decision-blocking questions; never repeat answered ones.",
-        ].join("\n")
-      : "";
+	const answered =
+		answers && answers.answers.length > 0
+			? [
+					"",
+					"## Answers from the judge",
+					"",
+					"You asked for a decision and it has been made — these answers are final; do not ask them again.",
+					...answers.answers.map((answer) => {
+						const asked = questionsAsked?.find((question) => question.id === answer.id)
+						return `- ${asked ? asked.question : answer.id}: ${answer.value}`
+					}),
+					`Rationale: ${answers.rationale}`,
+					"",
+					"Fold them into the plan and return it now. Ask only NEW decision-blocking questions; never repeat answered ones.",
+				].join("\n")
+			: ""
 
-  return `You are running a one-shot ferment.
+	return `You are running a one-shot ferment.
 
 User intent: "${intent}"
 
@@ -245,7 +249,7 @@ ${renderGateGuidance(PLAN_GATES)}
 
 This step PLANS; it does not implement. Use read-only research tools only — read, grep, find, ls, and
 non-mutating shell commands. Do not edit, create, delete, move, or install anything: the work belongs to
-the steps, and anything done here is work no gate ever sees.${answered}`;
+the steps, and anything done here is work no gate ever sees.${answered}`
 }
 
 /** Verbatim from kimchi's `ASK_USER_FORM_SYSTEM` (src/extensions/ferment/ask-user.ts). */
@@ -262,46 +266,52 @@ For multi questions, "value" MUST be a comma-separated list of provided option i
 For text questions, "value" MUST be a concise directly usable string.
 Every question must be answered.
 
-Decide from what you are shown. In kimchi this judge is a single model call with no tools at all, so do not run commands or read files — answer the form.`;
+Decide from what you are shown. In kimchi this judge is a single model call with no tools at all, so do not run commands or read files — answer the form.`
 
 /** kimchi's `buildAskJudgeFormUserMsg`, with the ferment record replaced by the plan draft. */
 export function judgePrompt(args: { intent: string; plan: Plan | undefined }): string {
-  const { intent, plan } = args;
-  const questions = plan?.questions ?? [];
-  return [
-    judgeSystemPrompt,
-    "",
-    `Ferment: "${plan?.title ?? "(untitled)"}"`,
-    `Goal: ${plan?.goal ?? "(none specified)"}`,
-    `Success criteria: ${plan?.success_criteria?.join("; ") || "(none specified)"}`,
-    `User intent: "${intent}"`,
-    "",
-    "Questions:",
-    JSON.stringify(questions, null, 2),
-    "",
-    "Answer every question with the id it was asked under.",
-  ].join("\n");
+	const { intent, plan } = args
+	const questions = plan?.questions ?? []
+	return [
+		judgeSystemPrompt,
+		"",
+		`Ferment: "${plan?.title ?? "(untitled)"}"`,
+		`Goal: ${plan?.goal ?? "(none specified)"}`,
+		`Success criteria: ${plan?.success_criteria?.join("; ") || "(none specified)"}`,
+		`User intent: "${intent}"`,
+		"",
+		"Questions:",
+		JSON.stringify(questions, null, 2),
+		"",
+		"Answer every question with the id it was asked under.",
+	].join("\n")
 }
 
 /** engine.ts's `refine` action prose, plus the step-shape rules from `RefineParams`. */
-export function refinePrompt(args: { intent: string; plan: Plan | undefined; phaseIndex: number; phaseCount: number; phase: { name: string; goal: string } }): string {
-  const { intent, plan, phaseIndex, phaseCount, phase } = args;
-  return [
-    `Break phase ${phaseIndex} "${phase.name}" into 3–6 concrete steps.`,
-    "",
-    `Phase ${phaseIndex}/${phaseCount}: ${phase.name} — ${phase.goal}`,
-    `Ferment: ${plan?.title ?? "(untitled)"}`,
-    `Goal: ${plan?.goal ?? intent}`,
-    plan?.success_criteria?.length ? `Criteria: ${plan.success_criteria.join("; ")}` : "",
-    "",
-    "Each step needs a description that can be acted on without anything else being spelled out, and a",
-    "verify bash command that exits 0 on success wherever one is possible. Steps run in the order you",
-    "give them; a step's budget_tier says what shape of work it is.",
-    "",
-    "This step PLANS; it does not implement. Read-only commands only.",
-  ]
-    .filter((line) => line !== "")
-    .join("\n");
+export function refinePrompt(args: {
+	intent: string
+	plan: Plan | undefined
+	phaseIndex: number
+	phaseCount: number
+	phase: { name: string; goal: string }
+}): string {
+	const { intent, plan, phaseIndex, phaseCount, phase } = args
+	return [
+		`Break phase ${phaseIndex} "${phase.name}" into 3–6 concrete steps.`,
+		"",
+		`Phase ${phaseIndex}/${phaseCount}: ${phase.name} — ${phase.goal}`,
+		`Ferment: ${plan?.title ?? "(untitled)"}`,
+		`Goal: ${plan?.goal ?? intent}`,
+		plan?.success_criteria?.length ? `Criteria: ${plan.success_criteria.join("; ")}` : "",
+		"",
+		"Each step needs a description that can be acted on without anything else being spelled out, and a",
+		"verify bash command that exits 0 on success wherever one is possible. Steps run in the order you",
+		"give them; a step's budget_tier says what shape of work it is.",
+		"",
+		"This step PLANS; it does not implement. Read-only commands only.",
+	]
+		.filter((line) => line !== "")
+		.join("\n")
 }
 
 /**
@@ -337,108 +347,123 @@ export function refinePrompt(args: { intent: string; plan: Plan | undefined; pha
  * a kimchi tool error says.
  */
 export function stepTurnPrompt(args: {
-  plan: Plan | undefined;
-  phaseIndex: number;
-  phaseCount: number;
-  phase: { name: string; goal: string; constraints?: readonly string[] };
-  stepIndex: number;
-  stepCount: number;
-  step: PlannedStep;
-  tier: BudgetTier;
-  priorSteps: readonly { index: number; description: string; summary: string }[];
-  /** The commit this step started from, so `git diff <ref>` is one call away — kimchi's `stepStartRef`. */
-  startRef?: string;
-  /**
-   * Why this step was not accepted last time, when it wasn't. Two shapes, and kimchi distinguishes them:
-   * a flagged gate is a refusal of the completion CALL, raised before anything was recorded; anything
-   * else — a verification the triage judge called real, a turn that produced nothing — is the step
-   * itself coming back. Both land in the same session, which is the point.
-   */
-  previous?: {
-    reason: string;
-    flags: readonly { id: string; rationale: string; evidence: string }[];
-    verify?: { command: string; exitCode: number; stdout: string; stderr: string };
-  };
+	plan: Plan | undefined
+	phaseIndex: number
+	phaseCount: number
+	phase: { name: string; goal: string; constraints?: readonly string[] }
+	stepIndex: number
+	stepCount: number
+	step: PlannedStep
+	tier: BudgetTier
+	priorSteps: readonly { index: number; description: string; summary: string }[]
+	/** The commit this step started from, so `git diff <ref>` is one call away — kimchi's `stepStartRef`. */
+	startRef?: string
+	/**
+	 * Why this step was not accepted last time, when it wasn't. Two shapes, and kimchi distinguishes them:
+	 * a flagged gate is a refusal of the completion CALL, raised before anything was recorded; anything
+	 * else — a verification the triage judge called real, a turn that produced nothing — is the step
+	 * itself coming back. Both land in the same session, which is the point.
+	 */
+	previous?: {
+		reason: string
+		flags: readonly { id: string; rationale: string; evidence: string }[]
+		verify?: { command: string; exitCode: number; stdout: string; stderr: string }
+	}
 }): string {
-  const { plan, phaseIndex, phaseCount, phase, stepIndex, stepCount, step, tier, priorSteps, startRef, previous } = args;
-  const limits = FERMENT_WORKER_BUDGETS[tier];
+	const { plan, phaseIndex, phaseCount, phase, stepIndex, stepCount, step, tier, priorSteps, startRef, previous } = args
+	const limits = FERMENT_WORKER_BUDGETS[tier]
 
-  // kimchi's refusal for a self-flagged completion, and it means here exactly what it means there: this
-  // one call is refused, nothing was recorded, and the agent that flagged has to resolve the underlying
-  // issue and call again (tools/steps.ts:427). It is the SAME session, still holding the work it did, so
-  // "resolve it yourself" is an instruction it can actually carry out.
-  if (previous && previous.flags.length > 0) {
-    return [
-      gateRefusalText({ what: `Step ${stepIndex}: "${step.description}"`, flags: previous.flags, recall: "complete the step again" }),
-      "",
-      "You did this work and you flagged it, in this conversation. Nothing else has moved: no other agent",
-      "ran, and the machine is exactly as you left it. So resolving what you flagged is your own turn, and",
-      "it is the only way this step can still land.",
-      "",
-      "Do one of these, then answer the gates again:",
-      "  - fix the underlying issue with your tools, then vote 'pass' citing what you changed;",
-      "  - look again, and vote 'pass' if the machine does not actually have the problem you named;",
-      "  - vote 'omitted' with a rationale, when the gate genuinely does not apply to this step.",
-      "",
-      "Flagging a gate that does not apply keeps finished work from ever being recorded.",
-      "",
-      renderGateGuidance(STEP_GATES),
-    ].join("\n");
-  }
+	// kimchi's refusal for a self-flagged completion, and it means here exactly what it means there: this
+	// one call is refused, nothing was recorded, and the agent that flagged has to resolve the underlying
+	// issue and call again (tools/steps.ts:427). It is the SAME session, still holding the work it did, so
+	// "resolve it yourself" is an instruction it can actually carry out.
+	if (previous && previous.flags.length > 0) {
+		return [
+			gateRefusalText({
+				what: `Step ${stepIndex}: "${step.description}"`,
+				flags: previous.flags,
+				recall: "complete the step again",
+			}),
+			"",
+			"You did this work and you flagged it, in this conversation. Nothing else has moved: no other agent",
+			"ran, and the machine is exactly as you left it. So resolving what you flagged is your own turn, and",
+			"it is the only way this step can still land.",
+			"",
+			"Do one of these, then answer the gates again:",
+			"  - fix the underlying issue with your tools, then vote 'pass' citing what you changed;",
+			"  - look again, and vote 'pass' if the machine does not actually have the problem you named;",
+			"  - vote 'omitted' with a rationale, when the gate genuinely does not apply to this step.",
+			"",
+			"Flagging a gate that does not apply keeps finished work from ever being recorded.",
+			"",
+			renderGateGuidance(STEP_GATES),
+		].join("\n")
+	}
 
-  // The step itself coming back: the verification ran and failed, or the turn produced nothing. kimchi's
-  // rule for a continuation is the one it gives for an exhausted worker, and it survives the merge intact
-  // because it was never about the box — "do not raise the limits and retry the same broad task".
-  if (previous) {
-    const ran = previous.verify;
-    return [
-      "THIS STEP WAS NOT ACCEPTED, AND THIS IS A BOUNDED CONTINUATION OF YOUR OWN EARLIER ATTEMPT.",
-      `Reason: ${previous.reason}`,
-      ...(ran ? [`  $ ${ran.command}`, `  exit ${ran.exitCode}`, `  stdout: ${clip(ran.stdout)}`, `  stderr: ${clip(ran.stderr)}`] : []),
-      "",
-      "Fix the underlying cause and finish the remaining work — do not widen the task, and do not start over.",
-      "Then answer the three step-scope gates again, on what the step now leaves behind.",
-      "",
-      renderGateGuidance(STEP_GATES),
-    ].join("\n");
-  }
+	// The step itself coming back: the verification ran and failed, or the turn produced nothing. kimchi's
+	// rule for a continuation is the one it gives for an exhausted worker, and it survives the merge intact
+	// because it was never about the box — "do not raise the limits and retry the same broad task".
+	if (previous) {
+		const ran = previous.verify
+		return [
+			"THIS STEP WAS NOT ACCEPTED, AND THIS IS A BOUNDED CONTINUATION OF YOUR OWN EARLIER ATTEMPT.",
+			`Reason: ${previous.reason}`,
+			...(ran
+				? [
+						`  $ ${ran.command}`,
+						`  exit ${ran.exitCode}`,
+						`  stdout: ${clip(ran.stdout)}`,
+						`  stderr: ${clip(ran.stderr)}`,
+					]
+				: []),
+			"",
+			"Fix the underlying cause and finish the remaining work — do not widen the task, and do not start over.",
+			"Then answer the three step-scope gates again, on what the step now leaves behind.",
+			"",
+			renderGateGuidance(STEP_GATES),
+		].join("\n")
+	}
 
-  const prior =
-    priorSteps.length > 0 ? `Prior: ${priorSteps.map((s) => (s.summary ? `✓${s.index} "${s.description}" — ${s.summary}` : `✓${s.index} "${s.description}"`)).join("; ")}` : "";
+	const prior =
+		priorSteps.length > 0
+			? `Prior: ${priorSteps.map((s) => (s.summary ? `✓${s.index} "${s.description}" — ${s.summary}` : `✓${s.index} "${s.description}"`)).join("; ")}`
+			: ""
 
-  const context = [
-    "## Worker Context",
-    `Ferment: ${plan?.title ?? "(untitled)"}`,
-    `Phase ${phaseIndex}/${phaseCount}: ${phase.name} — ${phase.goal}`,
-    `Step ${stepIndex}/${stepCount}: ${step.description}`,
-    step.verify ? `verify: ${step.verify}` : "",
-    "",
-    "Write no reports, notes, or scratch files: return decision-ready findings in your summary instead. Do NOT create ad-hoc project-root scratch folders unless the task explicitly asked for a product artifact.",
-    plan?.goal ? `\nGoal: ${plan.goal}` : "",
-    plan?.success_criteria?.length ? `Criteria: ${plan.success_criteria.join("; ")}` : "",
-    phase.constraints?.length ? `Constraints: ${phase.constraints.join("; ")}` : "",
-    prior,
-  ]
-    .filter((line) => line !== "")
-    .join("\n");
+	const context = [
+		"## Worker Context",
+		`Ferment: ${plan?.title ?? "(untitled)"}`,
+		`Phase ${phaseIndex}/${phaseCount}: ${phase.name} — ${phase.goal}`,
+		`Step ${stepIndex}/${stepCount}: ${step.description}`,
+		step.verify ? `verify: ${step.verify}` : "",
+		"",
+		"Write no reports, notes, or scratch files: return decision-ready findings in your summary instead. Do NOT create ad-hoc project-root scratch folders unless the task explicitly asked for a product artifact.",
+		plan?.goal ? `\nGoal: ${plan.goal}` : "",
+		plan?.success_criteria?.length ? `Criteria: ${plan.success_criteria.join("; ")}` : "",
+		phase.constraints?.length ? `Constraints: ${phase.constraints.join("; ")}` : "",
+		prior,
+	]
+		.filter((line) => line !== "")
+		.join("\n")
 
-  const planFirst = [
-    "📋 Plan first (every start of this step):",
-    "• Write a brief 2-4 bullet inline plan for this step's work.",
-    "• Include a verification sub-task that checks exact expected output, not just substring grep. Match the verify command's precision.",
-    "• If the step compiles or builds artifacts, include a cleanup sub-task to remove intermediate files from output directories.",
-    priorSteps.length > 0 ? `• Prior steps: ${priorSteps.map((s) => `✓${s.index} "${s.description}"`).join("; ")}. Build on their output.` : "",
-  ]
-    .filter((line) => line !== "")
-    .join("\n");
+	const planFirst = [
+		"📋 Plan first (every start of this step):",
+		"• Write a brief 2-4 bullet inline plan for this step's work.",
+		"• Include a verification sub-task that checks exact expected output, not just substring grep. Match the verify command's precision.",
+		"• If the step compiles or builds artifacts, include a cleanup sub-task to remove intermediate files from output directories.",
+		priorSteps.length > 0
+			? `• Prior steps: ${priorSteps.map((s) => `✓${s.index} "${s.description}"`).join("; ")}. Build on their output.`
+			: "",
+	]
+		.filter((line) => line !== "")
+		.join("\n")
 
-  // kimchi's `stepStartRef`, and the whole of what a step turn is given about its own diff. S1 asks for
-  // the diff line behind every claim; naming the ref makes that one command instead of an archaeology.
-  const ref = startRef
-    ? `This step starts at git ref ${startRef}. \`git diff ${startRef}\` is exactly what it changed — S1 wants the line behind each claim, and that is where to cite it from.`
-    : "This working directory is not a git repository (or git could not read it), so there is no diff to cite. Say so in your S1 evidence and cite what you can show instead.";
+	// kimchi's `stepStartRef`, and the whole of what a step turn is given about its own diff. S1 asks for
+	// the diff line behind every claim; naming the ref makes that one command instead of an archaeology.
+	const ref = startRef
+		? `This step starts at git ref ${startRef}. \`git diff ${startRef}\` is exactly what it changed — S1 wants the line behind each claim, and that is where to cite it from.`
+		: "This working directory is not a git repository (or git could not read it), so there is no diff to cite. Say so in your S1 evidence and cite what you can show instead."
 
-  return `${planFirst}
+	return `${planFirst}
 
 ${context}
 
@@ -452,7 +477,7 @@ Then answer for what you did. You must produce verdicts for the three step-scope
 
 ${renderGateGuidance(STEP_GATES)}
 
-And write the summary the following steps in this phase will read: what was actually accomplished, in one or two sentences.`;
+And write the summary the following steps in this phase will read: what was actually accomplished, in one or two sentences.`
 }
 
 /**
@@ -472,70 +497,87 @@ And write the summary the following steps in this phase will read: what was actu
  * `recall` is the one substitution the medium forces: kimchi says "re-call complete_ferment_step", and
  * there is no tool here to re-call. The caller names the equivalent act ("complete the step again").
  */
-export function gateRefusalText(args: { what: string; flags: readonly { id: string; rationale: string; evidence: string }[]; recall: string }): string {
-  const { what, flags, recall } = args;
-  const flagLines = flags.map((flag) => `  ⛔ Gate ${flag.id}: ${flag.rationale}\n     evidence: ${flag.evidence}`).join("\n");
-  return [
-    `${what} cannot complete - agent self-flagged on ${flags.length} step gate(s):`,
-    "",
-    flagLines,
-    "",
-    `Resolve the underlying issue and ${recall} with verdicts of 'pass' (or 'omitted' with rationale if a gate truly does not apply).`,
-  ].join("\n");
+export function gateRefusalText(args: {
+	what: string
+	flags: readonly { id: string; rationale: string; evidence: string }[]
+	recall: string
+}): string {
+	const { what, flags, recall } = args
+	const flagLines = flags
+		.map((flag) => `  ⛔ Gate ${flag.id}: ${flag.rationale}\n     evidence: ${flag.evidence}`)
+		.join("\n")
+	return [
+		`${what} cannot complete - agent self-flagged on ${flags.length} step gate(s):`,
+		"",
+		flagLines,
+		"",
+		`Resolve the underlying issue and ${recall} with verdicts of 'pass' (or 'omitted' with rationale if a gate truly does not apply).`,
+	].join("\n")
 }
 
 /** kimchi's `complete_ferment_phase` description + the phase-scope gate guidance. */
 export function phaseGatesPrompt(args: {
-  plan: Plan | undefined;
-  phaseIndex: number;
-  phaseCount: number;
-  phase: { name: string; goal: string };
-  steps: readonly { index: number; description: string; summary: string; verdicts: string; verified: string }[];
+	plan: Plan | undefined
+	phaseIndex: number
+	phaseCount: number
+	phase: { name: string; goal: string }
+	steps: readonly { index: number; description: string; summary: string; verdicts: string; verified: string }[]
 }): string {
-  const { plan, phaseIndex, phaseCount, phase, steps } = args;
-  return [
-    `Phase ${phaseIndex}/${phaseCount} "${phase.name}" has finished its steps. Decide whether it may be marked completed.`,
-    "",
-    `Ferment: ${plan?.title ?? "(untitled)"}`,
-    `Goal: ${plan?.goal ?? "(none specified)"}`,
-    plan?.success_criteria?.length ? `Success criteria: ${plan.success_criteria.join("; ")}` : "",
-    `Phase goal: ${phase.goal}`,
-    "",
-    "What its steps did:",
-    ...steps.map((step) => `  ${step.index}. "${step.description}"\n     summary: ${step.summary}\n     step gates: ${step.verdicts}\n     verification: ${step.verified}`),
-    "",
-    "The machine is not in your context — read it where the record above is thin. Do not fix anything.",
-    "",
-    'You must produce verdicts for the three phase-scope gates below. A "flag" verdict refuses advancement.',
-    "",
-    renderGateGuidance(PHASE_GATES),
-  ]
-    .filter((line) => line !== "")
-    .join("\n");
+	const { plan, phaseIndex, phaseCount, phase, steps } = args
+	return [
+		`Phase ${phaseIndex}/${phaseCount} "${phase.name}" has finished its steps. Decide whether it may be marked completed.`,
+		"",
+		`Ferment: ${plan?.title ?? "(untitled)"}`,
+		`Goal: ${plan?.goal ?? "(none specified)"}`,
+		plan?.success_criteria?.length ? `Success criteria: ${plan.success_criteria.join("; ")}` : "",
+		`Phase goal: ${phase.goal}`,
+		"",
+		"What its steps did:",
+		...steps.map(
+			(step) =>
+				`  ${step.index}. "${step.description}"\n     summary: ${step.summary}\n     step gates: ${step.verdicts}\n     verification: ${step.verified}`,
+		),
+		"",
+		"The machine is not in your context — read it where the record above is thin. Do not fix anything.",
+		"",
+		'You must produce verdicts for the three phase-scope gates below. A "flag" verdict refuses advancement.',
+		"",
+		renderGateGuidance(PHASE_GATES),
+	]
+		.filter((line) => line !== "")
+		.join("\n")
 }
 
 /** kimchi's `complete_ferment` description + the ferment-scope gate guidance. */
-export function shipPrompt(args: { intent: string; plan: Plan | undefined; phases: readonly { index: number; name: string; summary: string; verdicts: string }[] }): string {
-  const { intent, plan, phases } = args;
-  return [
-    "All phases of this ferment are terminal. Decide whether it ships.",
-    "",
-    `User intent: "${intent}"`,
-    `Ferment: ${plan?.title ?? "(untitled)"}`,
-    `Goal: ${plan?.goal ?? "(none specified)"}`,
-    plan?.success_criteria?.length ? `Success criteria (the P3 checklist):\n${plan.success_criteria.map((criterion) => `  - ${criterion}`).join("\n")}` : "",
-    "",
-    "What each phase reported:",
-    ...phases.map((phase) => `  ${phase.index}. ${phase.name}\n     summary: ${phase.summary}\n     phase gates: ${phase.verdicts}`),
-    "",
-    "The machine is not in your context — C1 and C3 both ask for evidence, so go and look. Do not fix anything.",
-    "",
-    'You must produce verdicts for the three ferment-scope gates below. A "flag" verdict refuses ship.',
-    "",
-    renderGateGuidance(SHIP_GATES),
-  ]
-    .filter((line) => line !== "")
-    .join("\n");
+export function shipPrompt(args: {
+	intent: string
+	plan: Plan | undefined
+	phases: readonly { index: number; name: string; summary: string; verdicts: string }[]
+}): string {
+	const { intent, plan, phases } = args
+	return [
+		"All phases of this ferment are terminal. Decide whether it ships.",
+		"",
+		`User intent: "${intent}"`,
+		`Ferment: ${plan?.title ?? "(untitled)"}`,
+		`Goal: ${plan?.goal ?? "(none specified)"}`,
+		plan?.success_criteria?.length
+			? `Success criteria (the P3 checklist):\n${plan.success_criteria.map((criterion) => `  - ${criterion}`).join("\n")}`
+			: "",
+		"",
+		"What each phase reported:",
+		...phases.map(
+			(phase) => `  ${phase.index}. ${phase.name}\n     summary: ${phase.summary}\n     phase gates: ${phase.verdicts}`,
+		),
+		"",
+		"The machine is not in your context — C1 and C3 both ask for evidence, so go and look. Do not fix anything.",
+		"",
+		'You must produce verdicts for the three ferment-scope gates below. A "flag" verdict refuses ship.',
+		"",
+		renderGateGuidance(SHIP_GATES),
+	]
+		.filter((line) => line !== "")
+		.join("\n")
 }
 
 /**
@@ -546,51 +588,51 @@ export function shipPrompt(args: { intent: string; plan: Plan | undefined; phase
  * a concession. Its grade drives advancement: A/B advance, C/D/F refuse.
  */
 export function phaseGraderPrompt(args: {
-  plan: Plan | undefined;
-  phase: { name: string; goal: string };
-  phaseSummary: string;
-  stepSummaries: string;
-  gateVerdicts: readonly { id: string; verdict: string; rationale: string }[];
-  diff: DiffEvidence;
-  cwd: string;
+	plan: Plan | undefined
+	phase: { name: string; goal: string }
+	phaseSummary: string
+	stepSummaries: string
+	gateVerdicts: readonly { id: string; verdict: string; rationale: string }[]
+	diff: DiffEvidence
+	cwd: string
 }): string {
-  const { plan, phase, phaseSummary, stepSummaries, gateVerdicts, diff, cwd } = args;
-  const parts: string[] = [];
-  parts.push("You are grading a completed phase of an autonomous coding ferment.");
-  parts.push("Verify the agent's claims independently using your tools, then produce a grade as JSON.");
-  parts.push("");
-  parts.push(`Ferment: "${plan?.title ?? "(untitled)"}"`);
-  parts.push(`Phase: "${phase.name}"`);
-  parts.push(`Phase goal: ${phase.goal || "(none specified)"}`);
-  parts.push(`Phase summary: ${phaseSummary || "(none)"}`);
-  if (stepSummaries.trim().length > 0) {
-    parts.push("");
-    parts.push("Step summaries:");
-    parts.push(stepSummaries);
-  }
-  parts.push("");
-  parts.push("Phase-scope gate verdicts (agent self-reported — verify independently):");
-  for (const verdict of gateVerdicts) parts.push(`  ${verdict.id} (${verdict.verdict}): ${verdict.rationale}`);
-  if (diff.available) {
-    parts.push("");
-    parts.push("--- PHASE DIFF ---");
-    parts.push(`Files changed:\n${diff.filesChanged || "(none recorded)"}`);
-    if (diff.diffSnippet) parts.push(`\nDiff snippet:\n\`\`\`diff\n${diff.diffSnippet}\n\`\`\``);
-    // A byte cap read as an absence of work is a phase refused for the wrong reason, so the snippet says
-    // how much of itself is missing. The grader has tools and is told to verify independently; this tells
-    // it where it must.
-    if (diff.elidedBytes > 0) {
-      parts.push(
-        `\n(This snippet is truncated: ${diff.elidedBytes} bytes were elided from the middle. Work you cannot see here may still exist — check it rather than grading it absent.)`,
-      );
-    }
-  } else {
-    parts.push("");
-    parts.push("(No diff available — use your tools to inspect files directly.)");
-  }
-  parts.push("");
-  parts.push(`Working directory: ${cwd}`);
-  return parts.join("\n");
+	const { plan, phase, phaseSummary, stepSummaries, gateVerdicts, diff, cwd } = args
+	const parts: string[] = []
+	parts.push("You are grading a completed phase of an autonomous coding ferment.")
+	parts.push("Verify the agent's claims independently using your tools, then produce a grade as JSON.")
+	parts.push("")
+	parts.push(`Ferment: "${plan?.title ?? "(untitled)"}"`)
+	parts.push(`Phase: "${phase.name}"`)
+	parts.push(`Phase goal: ${phase.goal || "(none specified)"}`)
+	parts.push(`Phase summary: ${phaseSummary || "(none)"}`)
+	if (stepSummaries.trim().length > 0) {
+		parts.push("")
+		parts.push("Step summaries:")
+		parts.push(stepSummaries)
+	}
+	parts.push("")
+	parts.push("Phase-scope gate verdicts (agent self-reported — verify independently):")
+	for (const verdict of gateVerdicts) parts.push(`  ${verdict.id} (${verdict.verdict}): ${verdict.rationale}`)
+	if (diff.available) {
+		parts.push("")
+		parts.push("--- PHASE DIFF ---")
+		parts.push(`Files changed:\n${diff.filesChanged || "(none recorded)"}`)
+		if (diff.diffSnippet) parts.push(`\nDiff snippet:\n\`\`\`diff\n${diff.diffSnippet}\n\`\`\``)
+		// A byte cap read as an absence of work is a phase refused for the wrong reason, so the snippet says
+		// how much of itself is missing. The grader has tools and is told to verify independently; this tells
+		// it where it must.
+		if (diff.elidedBytes > 0) {
+			parts.push(
+				`\n(This snippet is truncated: ${diff.elidedBytes} bytes were elided from the middle. Work you cannot see here may still exist — check it rather than grading it absent.)`,
+			)
+		}
+	} else {
+		parts.push("")
+		parts.push("(No diff available — use your tools to inspect files directly.)")
+	}
+	parts.push("")
+	parts.push(`Working directory: ${cwd}`)
+	return parts.join("\n")
 }
 
 /**
@@ -599,49 +641,55 @@ export function phaseGraderPrompt(args: {
  * then dispatches the rework; here it is the rework worker's own prompt.
  */
 export function phaseReworkPrompt(args: {
-  plan: Plan | undefined;
-  phase: { name: string; goal: string };
-  grade: PhaseGrade | undefined;
-  flags: readonly { id: string; rationale: string; evidence: string }[];
-  minimum: string;
-  retry: number;
-  maxRetries: number;
+	plan: Plan | undefined
+	phase: { name: string; goal: string }
+	grade: PhaseGrade | undefined
+	flags: readonly { id: string; rationale: string; evidence: string }[]
+	minimum: string
+	retry: number
+	maxRetries: number
 }): string {
-  const { plan, phase, grade, flags, minimum, retry, maxRetries } = args;
+	const { plan, phase, grade, flags, minimum, retry, maxRetries } = args
 
-  // A phase is refused for either reason, and kimchi checks them in this order: a flagged F gate feeds
-  // the retry pipeline before the grader is ever consulted, so a flagged phase has no grade to report.
-  if (flags.length > 0) {
-    return [
-      gateRefusalText({ what: `Phase "${phase.name}"`, flags, recall: "complete the phase again" }),
-      "",
-      `Ferment: ${plan?.title ?? "(untitled)"}`,
-      `Phase goal: ${phase.goal}`,
-      `Retry ${retry}/${maxRetries}.`,
-      "",
-      "Change the machine so the flagged gates hold — the phase is judged again on what it finds.",
-    ].join("\n");
-  }
+	// A phase is refused for either reason, and kimchi checks them in this order: a flagged F gate feeds
+	// the retry pipeline before the grader is ever consulted, so a flagged phase has no grade to report.
+	if (flags.length > 0) {
+		return [
+			gateRefusalText({ what: `Phase "${phase.name}"`, flags, recall: "complete the phase again" }),
+			"",
+			`Ferment: ${plan?.title ?? "(untitled)"}`,
+			`Phase goal: ${phase.goal}`,
+			`Retry ${retry}/${maxRetries}.`,
+			"",
+			"Change the machine so the flagged gates hold — the phase is judged again on what it finds.",
+		].join("\n")
+	}
 
-  return [
-    `**Phase "${phase.name}"** cannot complete — the grader assigned grade ${grade?.grade ?? "?"}, minimum required is ${minimum} (retry ${retry}/${maxRetries}).`,
-    "",
-    `Ferment: ${plan?.title ?? "(untitled)"}`,
-    `Phase goal: ${phase.goal}`,
-    `Grader's rationale: ${grade?.rationale ?? "(none)"}`,
-    "",
-    "Recommendations:",
-    ...(grade?.recommendations ?? []).map((rec, index) => `  ${index + 1}. ${rec}`),
-    "",
-    "Address the recommendations above. Change the machine — the phase is graded again on what it finds,",
-    "not on what you say you did.",
-  ].join("\n");
+	return [
+		`**Phase "${phase.name}"** cannot complete — the grader assigned grade ${grade?.grade ?? "?"}, minimum required is ${minimum} (retry ${retry}/${maxRetries}).`,
+		"",
+		`Ferment: ${plan?.title ?? "(untitled)"}`,
+		`Phase goal: ${phase.goal}`,
+		`Grader's rationale: ${grade?.rationale ?? "(none)"}`,
+		"",
+		"Recommendations:",
+		...(grade?.recommendations ?? []).map((rec, index) => `  ${index + 1}. ${rec}`),
+		"",
+		"Address the recommendations above. Change the machine — the phase is graded again on what it finds,",
+		"not on what you say you did.",
+	].join("\n")
 }
 
 /** Verbatim from kimchi's `STEP_VERIFICATION_SYSTEM`, plus its user message (`judgeStepVerification`). */
-export function verifyTriagePrompt(args: { step: PlannedStep; command: string; exitCode: number; stdout: string; stderr: string }): string {
-  const { step, command, exitCode, stdout, stderr } = args;
-  return `You are a strict verification triage judge. A step's verification command exited non-zero. You will decide:
+export function verifyTriagePrompt(args: {
+	step: PlannedStep
+	command: string
+	exitCode: number
+	stdout: string
+	stderr: string
+}): string {
+	const { step, command, exitCode, stdout, stderr } = args
+	return `You are a strict verification triage judge. A step's verification command exited non-zero. You will decide:
 - "pass":  the non-zero exit is benign (grep matched nothing as expected, linter warnings only, etc.). The work is acceptable.
 - "retry": the failure looks transient (network blip, race, missing setup file that should exist next try).
 - "fail":  the failure is a real implementation defect that must be fixed.
@@ -656,10 +704,10 @@ Exit: ${exitCode}
 stdout:
 ${stdout.slice(0, 1200)}
 stderr:
-${stderr.slice(0, 1200)}`;
+${stderr.slice(0, 1200)}`
 }
 
 /** kimchi truncates judge inputs at 1200 chars; the same cap applies to what a retry is shown. */
 function clip(text: string, max = 1200): string {
-  return text.length > max ? `${text.slice(0, max)}…` : text;
+	return text.length > max ? `${text.slice(0, max)}…` : text
 }

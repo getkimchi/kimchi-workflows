@@ -1,4 +1,4 @@
-# PI Workflows
+# Kimchi Workflows
 
 Define **arbitrary workflows in TypeScript** and run them inside the [PI coding harness](https://www.npmjs.com/package/@earendil-works/pi-coding-agent).
 
@@ -10,7 +10,7 @@ Define **arbitrary workflows in TypeScript** and run them inside the [PI coding 
 
 Coding agents are good at doing one thing when you ask. They are bad at reliably executing a **multi-step process**. If you want an agent to "review this code, fix what it finds, re-review, and repeat until it passes," the outcome is unpredictable. Every run is a little different. Agent drifts, forgets steps, loops forever, or quits early.
 
-**PI Workflows** makes the process explicit. You describe it — the steps, the loops, the branches, the stopping conditions — as a plain TypeScript file. A harness-side **engine** drives the transitions between steps **deterministically**, so control flow never depends on the model "deciding" to move on. The LLM is called only *inside* a step, to do the actual work. The result is a workflow that:
+**Kimchi Workflows** makes the process explicit. You describe it — the steps, the loops, the branches, the stopping conditions — as a plain TypeScript file. A harness-side **engine** drives the transitions between steps **deterministically**, so control flow never depends on the model "deciding" to move on. The LLM is called only *inside* a step, to do the actual work. The result is a workflow that:
 
 - **always terminates** — loops have guards; conditions are pure, side-effect-free predicates the engine evaluates itself, so there are no infinite "the agent kept going" runs;
 - **can stop and resume** — every completed step is checkpointed to a durable event log, so a crashed, cancelled, or blocked run picks up from the last checkpoint — across sessions and harness restarts;
@@ -101,22 +101,22 @@ There are two separate installs, and most people only need the first:
 `package.json` declares `src/host/extension.ts` under the `pi` key, so PI's package machinery installs it directly:
 
 ```bash
-pi install npm:@pmateusz/pi-workflows        # user-wide (~/.pi/agent/settings.json)
-pi install -l npm:@pmateusz/pi-workflows     # this project only (.pi/settings.json)
+pi install npm:@getkimchi/kimchi-workflows        # user-wide (~/.pi/agent/settings.json)
+pi install -l npm:@getkimchi/kimchi-workflows     # this project only (.pi/settings.json)
 ```
 
 `-l` writes project settings, which makes the project untrusted until you approve it once — pass `-a`, or accept the prompt on the next interactive start. Other routes, all equivalent:
 
 ```bash
-pi install git:github.com/pmateusz/pi-workflows   # straight from the repo, no npm
-pi install /path/to/pi-workflows                  # a local checkout, for development
-pi -e /path/to/pi-workflows/src/host/extension.ts # one-off, this run only
+pi install git:github.com/getkimchi/kimchi-workflows   # straight from the repo, no npm
+pi install /path/to/kimchi-workflows                  # a local checkout, for development
+pi -e /path/to/kimchi-workflows/src/host/extension.ts # one-off, this run only
 ```
 
 A local path is recorded rather than copied, so that checkout keeps its own `node_modules` — which it needs, because PI supplies `typebox` to extensions but not `jiti`. Dropping a re-export into `~/.pi/agent/extensions/` or `.pi/extensions/` also works and is what makes `/reload` pick up edits. For a custom host, register the factory by hand:
 
 ```ts
-import { piWorkflowsExtension } from "@pmateusz/pi-workflows/host";
+import { piWorkflowsExtension } from "@getkimchi/kimchi-workflows/host";
 piWorkflowsExtension(pi);
 ```
 
@@ -127,7 +127,7 @@ piWorkflowsExtension(pi);
 Only if you want autocomplete, `tsc`, or your own tests over the workflows you author — none of it is needed to *run* them:
 
 ```bash
-npm install -D @pmateusz/pi-workflows typebox     # or pnpm add -D
+npm install -D @getkimchi/kimchi-workflows typebox     # or pnpm add -D
 ```
 
 `typebox` comes along because your editor needs its types on disk; at run time PI's own copy is used regardless of what you install. The published package ships built JavaScript with `.d.ts`, so an ordinary `tsconfig.json` type-checks it with no special flags.
@@ -154,24 +154,24 @@ Only one run executes **per project** at a time, enforced by a lock in the run s
 
 ### Authoring in another project
 
-Workflows belong to the project you run PI in, not to this repo: everything keys off the session's cwd, so any repo with a `.pi/workflows/*.workflow.ts` is an authoring home. **Running one requires that project to install nothing.** A workflow file is imported from its own directory, where `typebox` and `pi-workflows` would ordinarily be unresolvable, so `src/host/load-workflow.ts` hands the loader those modules directly (jiti `virtualModules`, the same device PI's extension loader uses for its own bundled packages). `test/load-workflow-external.test.ts` runs a workflow from a temp directory with no `node_modules` to keep that true, and a negative control asserts the bare loader still fails there.
+Workflows belong to the project you run PI in, not to this repo: everything keys off the session's cwd, so any repo with a `.pi/workflows/*.workflow.ts` is an authoring home. **Running one requires that project to install nothing.** A workflow file is imported from its own directory, where `typebox` and `kimchi-workflows` would ordinarily be unresolvable, so `src/host/load-workflow.ts` hands the loader those modules directly (jiti `virtualModules`, the same device PI's extension loader uses for its own bundled packages). `test/load-workflow-external.test.ts` runs a workflow from a temp directory with no `node_modules` to keep that true, and a negative control asserts the bare loader still fails there.
 
 A useful side effect: the workflow and the engine share **one** typebox instance — under the harness, PI's bundled copy — so a schema built in the workflow is validated by the very module that built it.
 
 Editors are the one thing jiti cannot help with, because `tsc` resolves from disk. Add the package as a dev dependency (step 2 above) and an ordinary `tsconfig.json` type-checks an authored workflow with no special flags:
 
 ```bash
-npm install -D @pmateusz/pi-workflows typebox
+npm install -D @getkimchi/kimchi-workflows typebox
 ```
 
-Working against a local checkout instead of the registry? `npm install -D file:/path/to/pi-workflows typebox` behaves the same, as long as that checkout has been built (`pnpm build`) — `exports` points at `dist`.
+Working against a local checkout instead of the registry? `npm install -D file:/path/to/kimchi-workflows typebox` behaves the same, as long as that checkout has been built (`pnpm build`) — `exports` points at `dist`.
 
 Biome needs nothing either way: it does no type-aware resolution, and the only two rules that would object to an import it cannot resolve — `noUndeclaredDependencies` and `noUnresolvedImports` — are off in this repo's `biome.json` for that reason.
 
 Testing your workflows is the same story — a dev dependency and any runner:
 
 ```ts
-import { createTestRun, reply } from "@pmateusz/pi-workflows/testing";
+import { createTestRun, reply } from "@getkimchi/kimchi-workflows/testing";
 
 const run = await createTestRun(myWorkflow, { agents: { draft: [reply({ summary: "…" })] } });
 expect(run.status).toBe("completed");
@@ -197,7 +197,7 @@ A minimal function-step workflow:
 
 ```ts
 import { Type } from "typebox";
-import { createStep, createWorkflow } from "@pmateusz/pi-workflows";
+import { createStep, createWorkflow } from "@getkimchi/kimchi-workflows";
 
 const sayHello = createStep({
   name: "say-hello",
@@ -277,7 +277,7 @@ Function-only and questionnaire examples run with no network; agent examples use
 A workflow's behaviour is pinned by three things: the agents' replies, the answers given to questions, and what its steps do. `src/testing` supplies all three — no PI, no filesystem, no network, and no runner-specific matchers, so it works under Vitest, Jest, or `node:test`.
 
 ```ts
-import { ask, createTestRun, reply } from "@pmateusz/pi-workflows/testing";
+import { ask, createTestRun, reply } from "@getkimchi/kimchi-workflows/testing";
 
 const blocked = await createTestRun(planningWorkflow, {
   agents: {

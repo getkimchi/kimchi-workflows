@@ -8,10 +8,10 @@
  * whole file is exercisable offline through the {@link SubagentSpawner} seam. Why any of this is a
  * subprocess at all, and why it streams rather than buffering, is recorded in pi-agent.ts's header.
  */
-import { spawn } from "node:child_process";
-import type { Readable } from "node:stream";
-import type { AgentTurn } from "../engine/types.ts";
-import { createAssistantTurnReader } from "./pi-agent-messages.ts";
+import { spawn } from "node:child_process"
+import type { Readable } from "node:stream"
+import type { AgentTurn } from "../engine/types.ts"
+import { createAssistantTurnReader } from "./pi-agent-messages.ts"
 
 /**
  * The part of a `child_process.ChildProcess` a background subagent needs: two pipes to drain, an exit to
@@ -19,18 +19,19 @@ import { createAssistantTurnReader } from "./pi-agent-messages.ts";
  * test fake built from two streams, with no cast and no real binary.
  */
 export interface SubagentProcess {
-  readonly stdout: Readable | null;
-  readonly stderr: Readable | null;
-  on(event: "exit" | "close", listener: (code: number | null) => void): unknown;
-  on(event: "error", listener: (error: Error) => void): unknown;
-  kill(signal?: NodeJS.Signals): boolean;
+	readonly stdout: Readable | null
+	readonly stderr: Readable | null
+	on(event: "exit" | "close", listener: (code: number | null) => void): unknown
+	on(event: "error", listener: (error: Error) => void): unknown
+	kill(signal?: NodeJS.Signals): boolean
 }
 
 /** How a background subagent's process is started; injectable so the streaming/abort wiring is testable offline. */
-export type SubagentSpawner = (command: string, args: readonly string[]) => SubagentProcess;
+export type SubagentSpawner = (command: string, args: readonly string[]) => SubagentProcess
 
 /** The default spawner: a real child process with stdin closed and both output pipes ours to drain. */
-export const subagentSpawner: SubagentSpawner = (command, args) => spawn(command, [...args], { shell: false, stdio: ["ignore", "pipe", "pipe"] });
+export const subagentSpawner: SubagentSpawner = (command, args) =>
+	spawn(command, [...args], { shell: false, stdio: ["ignore", "pipe", "pipe"] })
 
 /**
  * How much of a failing subagent's stderr to keep for its error message.
@@ -42,10 +43,10 @@ export const subagentSpawner: SubagentSpawner = (command, args) => spawn(command
  * 8KiB is comfortably more than the deepest stack or CLI usage dump anyone reads out of a thrown error,
  * and small enough that the cap can never itself be a memory problem across concurrent subagents.
  */
-const STDERR_TAIL_CHARS = 8 * 1024;
+const STDERR_TAIL_CHARS = 8 * 1024
 
 /** How long a subagent gets to honour SIGTERM before it is killed outright — see {@link killOnAbort}. */
-const SIGKILL_GRACE_MS = 5000;
+const SIGKILL_GRACE_MS = 5000
 
 /**
  * How long after a subagent has exited its pipes may stay quiet before they are given up on.
@@ -59,14 +60,14 @@ const SIGKILL_GRACE_MS = 5000;
  * `waitForChildProcess` (utils/child-process.ts, and its issue #5303), which is what `pi.exec` used to
  * apply on our behalf — the same 100ms it uses, for the same reason.
  */
-const PIPE_IDLE_GRACE_MS = 100;
+const PIPE_IDLE_GRACE_MS = 100
 
 /** Everything a finished subagent process leaves behind — all of it bounded, none of it its stdout. */
 export interface SubagentResult {
-  readonly code: number;
-  readonly turn: AgentTurn;
-  /** The last {@link STDERR_TAIL_CHARS} of stderr — enough to name a failure, capped so it cannot be one. */
-  readonly stderrTail: string;
+	readonly code: number
+	readonly turn: AgentTurn
+	/** The last {@link STDERR_TAIL_CHARS} of stderr — enough to name a failure, capped so it cannot be one. */
+	readonly stderrTail: string
 }
 
 /**
@@ -80,26 +81,31 @@ export interface SubagentResult {
  * ourselves is on abort, and pi-agent.ts's `backgroundSession` checks `signal.aborted` before it looks
  * at the code at all.
  */
-export async function runSubagent(spawnSubagent: SubagentSpawner, command: string, args: readonly string[], signal: AbortSignal | undefined): Promise<SubagentResult> {
-  const child = spawnSubagent(command, args);
-  const reader = createAssistantTurnReader();
-  let stderrTail = "";
+export async function runSubagent(
+	spawnSubagent: SubagentSpawner,
+	command: string,
+	args: readonly string[],
+	signal: AbortSignal | undefined,
+): Promise<SubagentResult> {
+	const child = spawnSubagent(command, args)
+	const reader = createAssistantTurnReader()
+	let stderrTail = ""
 
-  // Listeners first, abort wiring second: an ALREADY-aborted attempt kills the child on the next line,
-  // and nothing about that exit may happen before there is something watching for it.
-  const exited = waitForExit(child, {
-    stdout: (chunk) => reader.push(chunk),
-    stderr: (chunk) => {
-      stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_CHARS);
-    },
-  });
-  const stopWatchingAbort = killOnAbort(child, signal);
+	// Listeners first, abort wiring second: an ALREADY-aborted attempt kills the child on the next line,
+	// and nothing about that exit may happen before there is something watching for it.
+	const exited = waitForExit(child, {
+		stdout: (chunk) => reader.push(chunk),
+		stderr: (chunk) => {
+			stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_CHARS)
+		},
+	})
+	const stopWatchingAbort = killOnAbort(child, signal)
 
-  try {
-    return { code: (await exited) ?? 0, turn: reader.end(), stderrTail };
-  } finally {
-    stopWatchingAbort();
-  }
+	try {
+		return { code: (await exited) ?? 0, turn: reader.end(), stderrTail }
+	} finally {
+		stopWatchingAbort()
+	}
 }
 
 /**
@@ -111,18 +117,18 @@ export async function runSubagent(spawnSubagent: SubagentSpawner, command: strin
  * outlive the run that was supposed to bound it, with nothing left holding a reference to it.
  */
 function killOnAbort(child: SubagentProcess, signal: AbortSignal | undefined): () => void {
-  if (!signal) return () => {};
-  let escalation: NodeJS.Timeout | undefined;
-  const kill = (): void => {
-    child.kill("SIGTERM");
-    escalation ??= setTimeout(() => child.kill("SIGKILL"), SIGKILL_GRACE_MS).unref();
-  };
-  if (signal.aborted) kill();
-  else signal.addEventListener("abort", kill, { once: true });
-  return () => {
-    if (escalation) clearTimeout(escalation);
-    signal.removeEventListener("abort", kill);
-  };
+	if (!signal) return () => {}
+	let escalation: NodeJS.Timeout | undefined
+	const kill = (): void => {
+		child.kill("SIGTERM")
+		escalation ??= setTimeout(() => child.kill("SIGKILL"), SIGKILL_GRACE_MS).unref()
+	}
+	if (signal.aborted) kill()
+	else signal.addEventListener("abort", kill, { once: true })
+	return () => {
+		if (escalation) clearTimeout(escalation)
+		signal.removeEventListener("abort", kill)
+	}
 }
 
 /**
@@ -133,59 +139,62 @@ function killOnAbort(child: SubagentProcess, signal: AbortSignal | undefined): (
  * {@link PIPE_IDLE_GRACE_MS}). So `exit` is what starts the countdown and an idle pipe is what ends it,
  * with `close` short-circuiting the ordinary case where the child simply finished.
  */
-function waitForExit(child: SubagentProcess, sink: { stdout: (chunk: string) => void; stderr: (chunk: string) => void }): Promise<number | null> {
-  return new Promise<number | null>((resolve, reject) => {
-    let settled = false;
-    let exited = false;
-    let exitCode: number | null = null;
-    let openPipes = (child.stdout ? 1 : 0) + (child.stderr ? 1 : 0);
-    let idle: NodeJS.Timeout | undefined;
+function waitForExit(
+	child: SubagentProcess,
+	sink: { stdout: (chunk: string) => void; stderr: (chunk: string) => void },
+): Promise<number | null> {
+	return new Promise<number | null>((resolve, reject) => {
+		let settled = false
+		let exited = false
+		let exitCode: number | null = null
+		let openPipes = (child.stdout ? 1 : 0) + (child.stderr ? 1 : 0)
+		let idle: NodeJS.Timeout | undefined
 
-    const finish = (code: number | null): void => {
-      if (settled) return;
-      settled = true;
-      if (idle) clearTimeout(idle);
-      child.stdout?.destroy(); // let go of a handle a descendant is still holding open
-      child.stderr?.destroy();
-      resolve(code);
-    };
-    const armIdle = (): void => {
-      if (idle) clearTimeout(idle);
-      idle = setTimeout(() => finish(exitCode), PIPE_IDLE_GRACE_MS);
-    };
-    const drain = (pipe: Readable | null, consume: (chunk: string) => void): void => {
-      if (!pipe) return;
-      // `setEncoding` hands over decoded strings and, more to the point, holds back the trailing bytes of
-      // a multi-byte character split across two reads — a chunk boundary must not corrupt a reply.
-      pipe.setEncoding("utf8");
-      pipe.on("data", (chunk: string) => {
-        consume(chunk);
-        if (exited) armIdle(); // still talking after exiting: keep reading rather than cut it off
-      });
-      // A pipe can fail on its own (EPIPE/ECONNRESET), most often because we just killed the child.
-      // Unhandled that is an uncaught exception taking the harness down; the exit is what decides here.
-      pipe.on("error", () => {});
-      pipe.once("end", () => {
-        openPipes--;
-        if (exited && openPipes === 0) finish(exitCode);
-      });
-    };
+		const finish = (code: number | null): void => {
+			if (settled) return
+			settled = true
+			if (idle) clearTimeout(idle)
+			child.stdout?.destroy() // let go of a handle a descendant is still holding open
+			child.stderr?.destroy()
+			resolve(code)
+		}
+		const armIdle = (): void => {
+			if (idle) clearTimeout(idle)
+			idle = setTimeout(() => finish(exitCode), PIPE_IDLE_GRACE_MS)
+		}
+		const drain = (pipe: Readable | null, consume: (chunk: string) => void): void => {
+			if (!pipe) return
+			// `setEncoding` hands over decoded strings and, more to the point, holds back the trailing bytes of
+			// a multi-byte character split across two reads — a chunk boundary must not corrupt a reply.
+			pipe.setEncoding("utf8")
+			pipe.on("data", (chunk: string) => {
+				consume(chunk)
+				if (exited) armIdle() // still talking after exiting: keep reading rather than cut it off
+			})
+			// A pipe can fail on its own (EPIPE/ECONNRESET), most often because we just killed the child.
+			// Unhandled that is an uncaught exception taking the harness down; the exit is what decides here.
+			pipe.on("error", () => {})
+			pipe.once("end", () => {
+				openPipes--
+				if (exited && openPipes === 0) finish(exitCode)
+			})
+		}
 
-    drain(child.stdout, sink.stdout);
-    drain(child.stderr, sink.stderr);
+		drain(child.stdout, sink.stdout)
+		drain(child.stderr, sink.stderr)
 
-    child.on("error", (error: Error) => {
-      if (settled) return;
-      settled = true;
-      if (idle) clearTimeout(idle);
-      reject(error); // the spawn itself failed (a missing binary); there was never a process to read
-    });
-    child.on("exit", (code: number | null) => {
-      exited = true;
-      exitCode = code;
-      if (openPipes === 0) finish(code);
-      else armIdle();
-    });
-    child.on("close", (code: number | null) => finish(code));
-  });
+		child.on("error", (error: Error) => {
+			if (settled) return
+			settled = true
+			if (idle) clearTimeout(idle)
+			reject(error) // the spawn itself failed (a missing binary); there was never a process to read
+		})
+		child.on("exit", (code: number | null) => {
+			exited = true
+			exitCode = code
+			if (openPipes === 0) finish(code)
+			else armIdle()
+		})
+		child.on("close", (code: number | null) => finish(code))
+	})
 }

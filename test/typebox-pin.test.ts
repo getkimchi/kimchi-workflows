@@ -11,17 +11,17 @@
  * Hence the exact pin, and hence this test: a PI upgrade that moves typebox fails here, which is the
  * signal to re-pin `devDependencies.typebox` to match rather than to widen the range.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
-import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { existsSync, readFileSync } from "node:fs"
+import { createRequire } from "node:module"
+import path from "node:path"
+import { describe, expect, it } from "vitest"
 
-const require = createRequire(import.meta.url);
+const require = createRequire(import.meta.url)
 
 interface PackageManifest {
-  name: string;
-  version: string;
-  dependencies?: Record<string, string>;
+	name: string
+	version: string
+	dependencies?: Record<string, string>
 }
 
 /**
@@ -30,30 +30,36 @@ interface PackageManifest {
  * both defeat `require.resolve`. The `node_modules` search path does not care about either.
  */
 function manifestOf(packageName: string): PackageManifest {
-  for (const dir of require.resolve.paths(packageName) ?? []) {
-    const candidate = path.join(dir, packageName, "package.json");
-    if (!existsSync(candidate)) continue;
-    return JSON.parse(readFileSync(candidate, "utf8")) as PackageManifest;
-  }
-  throw new Error(`could not locate the package.json of "${packageName}"`);
+	for (const dir of require.resolve.paths(packageName) ?? []) {
+		const candidate = path.join(dir, packageName, "package.json")
+		if (!existsSync(candidate)) continue
+		return JSON.parse(readFileSync(candidate, "utf8")) as PackageManifest
+	}
+	throw new Error(`could not locate the package.json of "${packageName}"`)
 }
 
 /** What PI hands to extensions: the version its own package.json pins. */
 function piBundledTypeboxVersion(): string {
-  const pinned = manifestOf("@earendil-works/pi-coding-agent").dependencies?.typebox;
-  if (!pinned) throw new Error("@earendil-works/pi-coding-agent no longer declares a typebox dependency — check how it provides typebox to extensions now");
-  return pinned;
+	const pinned = manifestOf("@earendil-works/pi-coding-agent").dependencies?.typebox
+	if (!pinned)
+		throw new Error(
+			"@earendil-works/pi-coding-agent no longer declares a typebox dependency — check how it provides typebox to extensions now",
+		)
+	return pinned
 }
 
 describe("typebox pin", () => {
-  it("matches the copy PI bundles for extensions", () => {
-    expect(manifestOf("typebox").version).toBe(piBundledTypeboxVersion());
-  });
+	it("matches the copy PI bundles for extensions", () => {
+		expect(manifestOf("typebox").version).toBe(piBundledTypeboxVersion())
+	})
 
-  it("is pinned exactly, so a range can never reintroduce the drift", () => {
-    const self = require("../package.json") as { devDependencies: Record<string, string>; dependencies?: Record<string, string> };
-    expect(self.devDependencies.typebox).toMatch(/^\d+\.\d+\.\d+$/);
-    // PI provides typebox at runtime (docs/packages.md), so shipping our own copy would be dead weight.
-    expect(self.dependencies?.typebox).toBeUndefined();
-  });
-});
+	it("is pinned exactly, so a range can never reintroduce the drift", () => {
+		const self = require("../package.json") as {
+			devDependencies: Record<string, string>
+			dependencies?: Record<string, string>
+		}
+		expect(self.devDependencies.typebox).toMatch(/^\d+\.\d+\.\d+$/)
+		// PI provides typebox at runtime (docs/packages.md), so shipping our own copy would be dead weight.
+		expect(self.dependencies?.typebox).toBeUndefined()
+	})
+})

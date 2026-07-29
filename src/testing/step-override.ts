@@ -17,88 +17,98 @@
  * `src/testing` stays a pure consumer of `src/flow` — no engine internals are touched, keeping the
  * override mechanism entirely a testing-layer concern (spec §13.1).
  */
-import type { FunctionStep, StepDefinition, StepRunArgs, WorkflowDefinition, WorkflowNode } from "../flow/types.ts";
-import { forEachNode } from "../flow/types.ts";
+import type { FunctionStep, StepDefinition, StepRunArgs, WorkflowDefinition, WorkflowNode } from "../flow/types.ts"
+import { forEachNode } from "../flow/types.ts"
 
 /** A step stub (spec §13.2): same shape as a function step's `run`, so a thrown error drives retry/crash/resume. */
-export type StepOverride = (args: StepRunArgs<unknown>) => unknown | Promise<unknown>;
+export type StepOverride = (args: StepRunArgs<unknown>) => unknown | Promise<unknown>
 
 /** Per-step stubs, keyed by step name — any step, of any kind, anywhere in the tree. */
-export type StepOverrides = Readonly<Record<string, StepOverride>>;
+export type StepOverrides = Readonly<Record<string, StepOverride>>
 
 /**
  * Splice `overrides` into `workflow`'s node tree, returning a new `WorkflowDefinition`. Returns
  * `workflow` unchanged when there is nothing to override. Throws immediately when an override names a
  * step the workflow does not contain (spec §13.3).
  */
-export function applyStepOverrides(workflow: WorkflowDefinition, overrides: StepOverrides | undefined): WorkflowDefinition {
-  const names = overrides ? Object.keys(overrides) : [];
-  if (names.length === 0) return workflow;
+export function applyStepOverrides(
+	workflow: WorkflowDefinition,
+	overrides: StepOverrides | undefined,
+): WorkflowDefinition {
+	const names = overrides ? Object.keys(overrides) : []
+	if (names.length === 0) return workflow
 
-  const consumed = new Set<string>();
-  const nodes = rewriteNodes(workflow.nodes, overrides as StepOverrides, consumed);
+	const consumed = new Set<string>()
+	const nodes = rewriteNodes(workflow.nodes, overrides as StepOverrides, consumed)
 
-  const unknown = names.filter((name) => !consumed.has(name));
-  if (unknown.length > 0) {
-    const known = [...collectStepNames(workflow.nodes)].sort();
-    throw new Error(
-      `step override(s) ${unknown.map((name) => `"${name}"`).join(", ")}: workflow "${workflow.name}" has no step with that name (steps: ${known.join(", ") || "none"})`,
-    );
-  }
+	const unknown = names.filter((name) => !consumed.has(name))
+	if (unknown.length > 0) {
+		const known = [...collectStepNames(workflow.nodes)].sort()
+		throw new Error(
+			`step override(s) ${unknown.map((name) => `"${name}"`).join(", ")}: workflow "${workflow.name}" has no step with that name (steps: ${known.join(", ") || "none"})`,
+		)
+	}
 
-  return { ...workflow, nodes };
+	return { ...workflow, nodes }
 }
 
 function rewriteNodes(nodes: readonly WorkflowNode[], overrides: StepOverrides, consumed: Set<string>): WorkflowNode[] {
-  return nodes.map((node) => rewriteNode(node, overrides, consumed));
+	return nodes.map((node) => rewriteNode(node, overrides, consumed))
 }
 
 function rewriteNode(node: WorkflowNode, overrides: StepOverrides, consumed: Set<string>): WorkflowNode {
-  switch (node.kind) {
-    case "step":
-      return { kind: "step", step: rewriteStep(node.step, overrides, consumed) };
-    case "branch":
-      return { ...node, arms: node.arms.map((arm) => ({ ...arm, body: rewriteWorkflow(arm.body, overrides, consumed) })) };
-    case "loop":
-    case "foreach":
-      return { ...node, body: rewriteWorkflow(node.body, overrides, consumed) };
-    case "parallel":
-      return { ...node, arms: node.arms.map((step) => rewriteStep(step, overrides, consumed)) };
-    case "workflow":
-      return { ...node, workflow: rewriteWorkflow(node.workflow, overrides, consumed) };
-  }
+	switch (node.kind) {
+		case "step":
+			return { kind: "step", step: rewriteStep(node.step, overrides, consumed) }
+		case "branch":
+			return {
+				...node,
+				arms: node.arms.map((arm) => ({ ...arm, body: rewriteWorkflow(arm.body, overrides, consumed) })),
+			}
+		case "loop":
+		case "foreach":
+			return { ...node, body: rewriteWorkflow(node.body, overrides, consumed) }
+		case "parallel":
+			return { ...node, arms: node.arms.map((step) => rewriteStep(step, overrides, consumed)) }
+		case "workflow":
+			return { ...node, workflow: rewriteWorkflow(node.workflow, overrides, consumed) }
+	}
 }
 
-function rewriteWorkflow(workflow: WorkflowDefinition, overrides: StepOverrides, consumed: Set<string>): WorkflowDefinition {
-  return { ...workflow, nodes: rewriteNodes(workflow.nodes, overrides, consumed) };
+function rewriteWorkflow(
+	workflow: WorkflowDefinition,
+	overrides: StepOverrides,
+	consumed: Set<string>,
+): WorkflowDefinition {
+	return { ...workflow, nodes: rewriteNodes(workflow.nodes, overrides, consumed) }
 }
 
 function rewriteStep(step: StepDefinition, overrides: StepOverrides, consumed: Set<string>): StepDefinition {
-  const override = overrides[step.name];
-  if (!override) return step;
-  consumed.add(step.name);
-  return asFunctionStep(step, override);
+	const override = overrides[step.name]
+	if (!override) return step
+	consumed.add(step.name)
+	return asFunctionStep(step, override)
 }
 
 /** Replace `step` with a plain function step running `override`, preserving everything the engine keys its policies on. */
 function asFunctionStep(step: StepDefinition, run: StepOverride): FunctionStep {
-  return {
-    kind: "function",
-    name: step.name,
-    description: step.description,
-    inputSchema: step.inputSchema,
-    outputSchema: step.outputSchema,
-    retry: step.retry,
-    maxDurationMs: step.maxDurationMs,
-    run,
-  };
+	return {
+		kind: "function",
+		name: step.name,
+		description: step.description,
+		inputSchema: step.inputSchema,
+		outputSchema: step.outputSchema,
+		retry: step.retry,
+		maxDurationMs: step.maxDurationMs,
+		run,
+	}
 }
 
 /** Every step (of any kind) in the tree, by name — mirrors testing/agent-double.ts's collectAgentSteps. */
 function collectStepNames(nodes: readonly WorkflowNode[]): Set<string> {
-  const names = new Set<string>();
-  forEachNode(nodes, (node) => {
-    if (node.kind === "step") names.add(node.step.name);
-  });
-  return names;
+	const names = new Set<string>()
+	forEachNode(nodes, (node) => {
+		if (node.kind === "step") names.add(node.step.name)
+	})
+	return names
 }

@@ -1,4 +1,4 @@
-import type { FunctionStep, MapFn } from "./types.ts";
+import type { FunctionStep, MapFn } from "./types.ts"
 
 /**
  * Build the internal step that backs a `.map()` construct (spec §3.7).
@@ -11,9 +11,9 @@ import type { FunctionStep, MapFn } from "./types.ts";
  * Its output becomes the next step's input via the normal linear hand-off.
  */
 export function createMapStep(name: string, transform: MapFn): FunctionStep {
-  return {
-    kind: "function",
-    name,
-    run: ({ ctx }) => transform(ctx),
-  };
+	return {
+		kind: "function",
+		name,
+		run: ({ ctx }) => transform(ctx),
+	}
 }

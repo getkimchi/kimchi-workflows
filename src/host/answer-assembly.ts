@@ -9,32 +9,32 @@
  * The only PI reference here is a *type* — the run mode for the capability gate — a type-only import,
  * fully erased at runtime, so this module stays offline-testable.
  */
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Question, Questionnaire, QuestionOption } from "../flow/questionnaire.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
+import type { Question, Questionnaire, QuestionOption } from "../flow/questionnaire.ts"
 
 /** PI run mode (`"tui" | "rpc" | "json" | "print"`), derived from the exported context type. */
-export type ExtensionMode = ExtensionContext["mode"];
+export type ExtensionMode = ExtensionContext["mode"]
 
 /** Sentinel option value meaning "the user took the implicit Other choice and typed free text". */
-export const OTHER_VALUE = "__other__";
+export const OTHER_VALUE = "__other__"
 
 /** Display label for the implicit "Other" choice appended to a single-choice question. */
-export const OTHER_LABEL = "Other…";
+export const OTHER_LABEL = "Other…"
 
 /** Display label for the "finish selecting" entry of the rich multi-select loop. */
-export const DONE_LABEL = "Done";
+export const DONE_LABEL = "Done"
 
 /**
  * A renderer's raw capture for one question, before typing. Both render paths (the rich `ctx.ui.custom`
  * form and the native-dialog fallback) produce this shape; {@link assembleAnswers} types it.
  */
 export interface RawSelection {
-  /** single: the picked option value, or {@link OTHER_VALUE} when the implicit "Other" choice was taken. */
-  readonly option?: string;
-  /** multi: the picked option values. */
-  readonly options?: readonly string[];
-  /** text/chat: the entered string; also the free text when `option === OTHER_VALUE`. */
-  readonly text?: string;
+	/** single: the picked option value, or {@link OTHER_VALUE} when the implicit "Other" choice was taken. */
+	readonly option?: string
+	/** multi: the picked option values. */
+	readonly options?: readonly string[]
+	/** text/chat: the entered string; also the free text when `option === OTHER_VALUE`. */
+	readonly text?: string
 }
 
 /**
@@ -42,45 +42,48 @@ export interface RawSelection {
  * (pure). single → the chosen value, or the "Other" free text; multi → an array; text/chat → a string.
  * A question with no capture collapses to the empty value of its shape (`""` / `[]`).
  */
-export function assembleAnswers(questionnaire: Questionnaire, raw: Readonly<Record<string, RawSelection>>): Record<string, unknown> {
-  const answers: Record<string, unknown> = {};
-  for (const question of questionnaire.questions) {
-    answers[question.key] = assembleOne(question, raw[question.key] ?? {});
-  }
-  return answers;
+export function assembleAnswers(
+	questionnaire: Questionnaire,
+	raw: Readonly<Record<string, RawSelection>>,
+): Record<string, unknown> {
+	const answers: Record<string, unknown> = {}
+	for (const question of questionnaire.questions) {
+		answers[question.key] = assembleOne(question, raw[question.key] ?? {})
+	}
+	return answers
 }
 
 function assembleOne(question: Question, selection: RawSelection): unknown {
-  switch (question.kind) {
-    case "single":
-      return selection.option === OTHER_VALUE ? (selection.text ?? "") : (selection.option ?? "");
-    case "multi":
-      return [...(selection.options ?? [])];
-    case "text":
-    case "chat":
-      return selection.text ?? "";
-  }
+	switch (question.kind) {
+		case "single":
+			return selection.option === OTHER_VALUE ? (selection.text ?? "") : (selection.option ?? "")
+		case "multi":
+			return [...(selection.options ?? [])]
+		case "text":
+		case "chat":
+			return selection.text ?? ""
+	}
 }
 
 /** A question's options ordered for display: recommended first (stable), original order otherwise. */
 export function orderedOptions(question: Question): QuestionOption[] {
-  return [...(question.options ?? [])].sort((a, b) => optionRank(b) - optionRank(a));
+	return [...(question.options ?? [])].sort((a, b) => optionRank(b) - optionRank(a))
 }
 
 function optionRank(option: QuestionOption): number {
-  return option.recommended ? 1 : 0;
+	return option.recommended ? 1 : 0
 }
 
 /** A question's prompt title: `"<section> — <question>"` when the question belongs to a section. */
 export function questionTitle(question: Question): string {
-  return question.section ? `${question.section} — ${question.question}` : question.question;
+	return question.section ? `${question.section} — ${question.question}` : question.question
 }
 
 /** A single option's display label: `label` + `(recommended)` marker + ` — description` when present. */
 export function optionLabel(option: QuestionOption): string {
-  const recommended = option.recommended ? " (recommended)" : "";
-  const description = option.description ? ` — ${option.description}` : "";
-  return `${option.label}${recommended}${description}`;
+	const recommended = option.recommended ? " (recommended)" : ""
+	const description = option.description ? ` — ${option.description}` : ""
+	return `${option.label}${recommended}${description}`
 }
 
 /**
@@ -89,7 +92,7 @@ export function optionLabel(option: QuestionOption): string {
  * RPC, where `custom` cannot render.
  */
 export function useRichForm(mode: ExtensionMode, hasUI: boolean): boolean {
-  return hasUI && mode === "tui";
+	return hasUI && mode === "tui"
 }
 
 /**
@@ -98,8 +101,8 @@ export function useRichForm(mode: ExtensionMode, hasUI: boolean): boolean {
  * "Other"-handling business logic below lives in exactly one place. `undefined` means the user dismissed.
  */
 export interface Picker {
-  pick(title: string, labels: string[]): Promise<string | undefined>;
-  text(title: string, placeholder?: string): Promise<string | undefined>;
+	pick(title: string, labels: string[]): Promise<string | undefined>
+	text(title: string, placeholder?: string): Promise<string | undefined>
 }
 
 /**
@@ -108,19 +111,19 @@ export interface Picker {
  * seam; returns a {@link RawSelection}, or `undefined` when the user dismisses.
  */
 export async function collectSingle(picker: Picker, question: Question): Promise<RawSelection | undefined> {
-  const options = orderedOptions(question);
-  const labels = options.map(optionLabel);
-  if (question.allowOther) labels.push(OTHER_LABEL);
+	const options = orderedOptions(question)
+	const labels = options.map(optionLabel)
+	if (question.allowOther) labels.push(OTHER_LABEL)
 
-  const picked = await picker.pick(questionTitle(question), labels);
-  if (picked === undefined) return undefined;
-  if (question.allowOther && picked === OTHER_LABEL) {
-    const text = await picker.text(`${question.header}: other`, "type your answer");
-    if (text === undefined) return undefined;
-    return { option: OTHER_VALUE, text };
-  }
-  const chosen = options[labels.indexOf(picked)];
-  return { option: chosen ? chosen.value : picked };
+	const picked = await picker.pick(questionTitle(question), labels)
+	if (picked === undefined) return undefined
+	if (question.allowOther && picked === OTHER_LABEL) {
+		const text = await picker.text(`${question.header}: other`, "type your answer")
+		if (text === undefined) return undefined
+		return { option: OTHER_VALUE, text }
+	}
+	const chosen = options[labels.indexOf(picked)]
+	return { option: chosen ? chosen.value : picked }
 }
 
 /**
@@ -128,9 +131,9 @@ export async function collectSingle(picker: Picker, question: Question): Promise
  * a {@link RawSelection}, or `undefined` when the user dismisses.
  */
 export async function collectText(picker: Picker, question: Question): Promise<RawSelection | undefined> {
-  const text = await picker.text(questionTitle(question), question.header);
-  if (text === undefined) return undefined;
-  return { text };
+	const text = await picker.text(questionTitle(question), question.header)
+	if (text === undefined) return undefined
+	return { text }
 }
 
 /**
@@ -144,27 +147,31 @@ export async function collectText(picker: Picker, question: Question): Promise<R
  * selector loop), so it stays with the render path and arrives here as `collectMulti`.
  */
 export async function collectQuestionnaire(
-  questionnaire: Questionnaire,
-  picker: Picker,
-  collectMulti: (question: Question) => Promise<RawSelection | undefined>,
+	questionnaire: Questionnaire,
+	picker: Picker,
+	collectMulti: (question: Question) => Promise<RawSelection | undefined>,
 ): Promise<Record<string, unknown> | undefined> {
-  const raw: Record<string, RawSelection> = {};
-  for (const question of questionnaire.questions) {
-    const selection = await collectOne(question, picker, collectMulti);
-    if (selection === undefined) return undefined;
-    raw[question.key] = selection;
-  }
-  return assembleAnswers(questionnaire, raw);
+	const raw: Record<string, RawSelection> = {}
+	for (const question of questionnaire.questions) {
+		const selection = await collectOne(question, picker, collectMulti)
+		if (selection === undefined) return undefined
+		raw[question.key] = selection
+	}
+	return assembleAnswers(questionnaire, raw)
 }
 
-function collectOne(question: Question, picker: Picker, collectMulti: (question: Question) => Promise<RawSelection | undefined>): Promise<RawSelection | undefined> {
-  switch (question.kind) {
-    case "single":
-      return collectSingle(picker, question);
-    case "multi":
-      return collectMulti(question);
-    case "text":
-    case "chat":
-      return collectText(picker, question);
-  }
+function collectOne(
+	question: Question,
+	picker: Picker,
+	collectMulti: (question: Question) => Promise<RawSelection | undefined>,
+): Promise<RawSelection | undefined> {
+	switch (question.kind) {
+		case "single":
+			return collectSingle(picker, question)
+		case "multi":
+			return collectMulti(question)
+		case "text":
+		case "chat":
+			return collectText(picker, question)
+	}
 }

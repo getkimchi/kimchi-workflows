@@ -25,40 +25,40 @@
 
 /** A run-wide semaphore (spec §3.6): at most `limit` holders at once, FIFO wake order. */
 export interface ConcurrencyGate {
-  /** The ceiling this gate was sized to — also what a `.parallel` (which declares no cap of its own) uses as its lane count. */
-  readonly limit: number;
-  /** Resolve once a slot is free (immediately if one already is). */
-  acquire(): Promise<void>;
-  /** Release a held slot, waking the longest-waiting queued acquirer, if any. */
-  release(): void;
+	/** The ceiling this gate was sized to — also what a `.parallel` (which declares no cap of its own) uses as its lane count. */
+	readonly limit: number
+	/** Resolve once a slot is free (immediately if one already is). */
+	acquire(): Promise<void>
+	/** Release a held slot, waking the longest-waiting queued acquirer, if any. */
+	release(): void
 }
 
 /** Create a fresh gate sized to a run's concurrency ceiling (spec §3.6). */
 export function createConcurrencyGate(limit: number): ConcurrencyGate {
-  const capacity = Math.max(1, limit);
-  let active = 0;
-  const queue: Array<() => void> = [];
+	const capacity = Math.max(1, limit)
+	let active = 0
+	const queue: Array<() => void> = []
 
-  return {
-    limit: capacity,
-    acquire(): Promise<void> {
-      if (active < capacity) {
-        active += 1;
-        return Promise.resolve();
-      }
-      return new Promise<void>((resolve) => {
-        queue.push(() => {
-          active += 1;
-          resolve();
-        });
-      });
-    },
-    release(): void {
-      active -= 1;
-      const next = queue.shift();
-      if (next) next();
-    },
-  };
+	return {
+		limit: capacity,
+		acquire(): Promise<void> {
+			if (active < capacity) {
+				active += 1
+				return Promise.resolve()
+			}
+			return new Promise<void>((resolve) => {
+				queue.push(() => {
+					active += 1
+					resolve()
+				})
+			})
+		},
+		release(): void {
+			active -= 1
+			const next = queue.shift()
+			if (next) next()
+		},
+	}
 }
 
 /**
@@ -75,32 +75,32 @@ export function createConcurrencyGate(limit: number): ConcurrencyGate {
  * caller distinguishes "ran" from "never started" itself, e.g. via a discriminated `TResult`).
  */
 export async function runConcurrent<TItem, TResult>(
-  items: readonly TItem[],
-  worker: (item: TItem, index: number) => Promise<TResult>,
-  localLimit: number,
-  shouldStop: (result: TResult) => boolean,
+	items: readonly TItem[],
+	worker: (item: TItem, index: number) => Promise<TResult>,
+	localLimit: number,
+	shouldStop: (result: TResult) => boolean,
 ): Promise<(TResult | undefined)[]> {
-  const results: (TResult | undefined)[] = new Array(items.length);
-  if (items.length === 0) return results;
+	const results: (TResult | undefined)[] = new Array(items.length)
+	if (items.length === 0) return results
 
-  let nextIndex = 0;
-  let stopped = false;
-  const claimNext = (): number | undefined => {
-    if (stopped || nextIndex >= items.length) return undefined;
-    const claimed = nextIndex;
-    nextIndex += 1;
-    return claimed;
-  };
+	let nextIndex = 0
+	let stopped = false
+	const claimNext = (): number | undefined => {
+		if (stopped || nextIndex >= items.length) return undefined
+		const claimed = nextIndex
+		nextIndex += 1
+		return claimed
+	}
 
-  const lane = async (): Promise<void> => {
-    for (let index = claimNext(); index !== undefined; index = claimNext()) {
-      const result = await worker(items[index] as TItem, index);
-      results[index] = result;
-      if (shouldStop(result)) stopped = true;
-    }
-  };
+	const lane = async (): Promise<void> => {
+		for (let index = claimNext(); index !== undefined; index = claimNext()) {
+			const result = await worker(items[index] as TItem, index)
+			results[index] = result
+			if (shouldStop(result)) stopped = true
+		}
+	}
 
-  const laneCount = Math.max(1, Math.min(localLimit, items.length));
-  await Promise.all(Array.from({ length: laneCount }, () => lane()));
-  return results;
+	const laneCount = Math.max(1, Math.min(localLimit, items.length))
+	await Promise.all(Array.from({ length: laneCount }, () => lane()))
+	return results
 }
