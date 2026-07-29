@@ -1,5 +1,21 @@
 # terminal-bench solvers
 
+> **Note (2026-07-29): the arrangement this file describes no longer exists.** Workflow definitions
+> now live in the `kimchi` repo (`benchmark/terminal-bench-2/workflows/`) and are uploaded into the
+> task container, where `/workflow run <name>` resolves them by declared name — see
+> `benchmark/terminal-bench-2/docs/workflow-agent-spec.md` for the current design. Concretely:
+> `extension.ts` (the bespoke `input`-hook entry point this section describes) is deleted, and
+> `ferment/` has moved to `kimchi/benchmark/terminal-bench-2/workflows/` (top-level
+> `ferment-oneshot.workflow.ts`, helpers under `workflows/ferment/`). There is no more `TB_WORKFLOW`
+> env var picking between two solvers behind one extension — `ferment-oneshot` is started directly by
+> name. `tb-solver.workflow.ts` / `contract.ts` / `prompts.ts` / `schedule.ts` were **not** moved: its
+> scheduling is wall-clock driven (a deadline computed from `TB_AGENT_TIMEOUT_SEC`), and that clock no
+> longer exists in the new design (harbor hands `agent_timeout_sec` only to the oracle agent — spec
+> §7), so porting it is future work rather than a mechanical move. Everything below this note is kept
+> as a historical record of the two-solver experiment and its measurements; treat file paths and
+> commands in it (`extension.ts`, `ferment/`, `TB_WORKFLOW`, `./scripts/run-workflow.sh` living in this
+> repo) as describing that past arrangement, not the current one.
+
 Two terminal-bench agents, each built as a workflow instead of one long agent loop, behind one
 extension. `TB_WORKFLOW` picks which one a run uses.
 
