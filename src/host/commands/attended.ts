@@ -10,10 +10,11 @@ import type { RunEvent, RunResult } from "../../engine/types.ts";
 import type { Questionnaire } from "../../flow/questionnaire.ts";
 import { createHostPort } from "../host-port.ts";
 import { loadWorkflowFile } from "../load-workflow.ts";
+import { inertProgress, type ProgressSink } from "../progress-sink.ts";
 import { collectAnswers } from "../questionnaire-render.ts";
 import type { RunLock } from "../run-lock.ts";
 import type { RunStore } from "../types.ts";
-import { type CommandCtx, describe, notifier, notifyResult, runGuarded, type StartAgent } from "./context.ts";
+import { type CommandCtx, describe, notifier, reportResult, runGuarded, type StartAgent } from "./context.ts";
 
 /** A blocked step's pending batch plus the node path (spec §8.5) that batch belongs to. */
 export interface PendingAsk {
@@ -46,6 +47,8 @@ export async function handleAttendedQuestionnaire(
   startAgent: StartAgent,
   runId: string,
   initialAsk: PendingAsk | undefined,
+  /** The invocation's sink, shared across every resume in this loop so the widget survives the block (progress §7.5). */
+  progress: ProgressSink = inertProgress,
 ): Promise<void> {
   let ask = initialAsk;
   for (;;) {
@@ -66,7 +69,7 @@ export async function handleAttendedQuestionnaire(
       result = await runGuarded(guard, runId, ctx.cwd, store, notifier(ctx), async (signal) => {
         const workflow = await loadWorkflowFile(workflowFilePath);
         const events = await store.loadEvents(runId);
-        const host = createHostPort(store, { startAgent });
+        const host = createHostPort(store, { startAgent, onEvent: progress.accept });
         return resumeWithAnswer(workflow, events, answers, host, { signal, path: targetPath });
       });
     } catch (err) {
@@ -79,7 +82,7 @@ export async function handleAttendedQuestionnaire(
       ask = askOf(result); // re-block (another batch, invalid answers, or a still-pending sibling) → ask again
       continue;
     }
-    notifyResult(ctx, workflowName, result);
+    reportResult(ctx, workflowName, result, progress.reportedOutcome());
     return;
   }
 }

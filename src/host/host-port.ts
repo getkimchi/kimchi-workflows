@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AgentRequest, AgentSession, HostPort } from "../engine/types.ts";
+import type { AgentRequest, AgentSession, HostPort, RunEvent } from "../engine/types.ts";
 import type { RunStore } from "./types.ts";
 
 /** Overrides for the non-deterministic `HostPort` inputs. Handy for deterministic tests. */
@@ -12,6 +12,17 @@ export interface HostPortOptions {
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** Supply agent execution (default: throws — a store-only host does not support agent steps). */
   startAgent?: (request: AgentRequest) => AgentSession;
+  /**
+   * A tee on the event stream, called AFTER the event is persisted (progress §2.3). This is where the
+   * progress sink attaches: persist-then-render, so a rendering failure can never lose an event, and
+   * the ordering is enforced here rather than trusted to each caller.
+   *
+   * Deliberately not a replacement for `emit` and deliberately synchronous-looking: no progress code
+   * runs on the engine's thread of control beyond the `emit` call it already makes (progress §10.3),
+   * and a consumer that throws must not fail the step that emitted the event — which is why the sink
+   * catches everything and self-disables rather than relying on a guard here.
+   */
+  onEvent?: (event: RunEvent) => void;
 }
 
 /**
@@ -29,7 +40,11 @@ export function createHostPort(store: RunStore, options: HostPortOptions = {}): 
       (() => {
         throw new Error("this HostPort has no agent support (no startAgent provided); agent steps cannot run");
       }),
-    emit: (event) => store.appendEvent(event),
+    // Persist first, render second (progress §2.3) — never the other way round, and never in parallel.
+    emit: async (event) => {
+      await store.appendEvent(event);
+      options.onEvent?.(event);
+    },
   };
 }
 

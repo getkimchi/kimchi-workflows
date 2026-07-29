@@ -10,14 +10,22 @@
 import { resumeWorkflow } from "../../engine/resume-workflow.ts";
 import { createHostPort } from "../host-port.ts";
 import { loadWorkflowFile } from "../load-workflow.ts";
+import { noProgressFor, type ProgressFor } from "../progress-sink.ts";
 import { resumeAction } from "../resume-router.ts";
 import type { RunLock } from "../run-lock.ts";
 import { summarizeRun } from "../summarize-run.ts";
 import type { RunStore } from "../types.ts";
 import { askOf, handleAttendedQuestionnaire, pendingAsk } from "./attended.ts";
-import { type CommandCtx, describe, notifier, notifyResult, rejectIfBusy, resolveRunRef, runGuarded, type StartAgent } from "./context.ts";
+import { type CommandCtx, describe, notifier, rejectIfBusy, reportResult, resolveRunRef, runGuarded, type StartAgent } from "./context.ts";
 
-export async function handleResume(ctx: CommandCtx, store: RunStore, guard: RunLock, startAgent: StartAgent, runRef: string): Promise<void> {
+export async function handleResume(
+  ctx: CommandCtx,
+  store: RunStore,
+  guard: RunLock,
+  startAgent: StartAgent,
+  runRef: string,
+  progressFor: ProgressFor = noProgressFor,
+): Promise<void> {
   if (rejectIfBusy(ctx, guard, "resuming")) return;
 
   const runId = await resolveRunRef(ctx, store, runRef, "resume");
@@ -44,21 +52,30 @@ export async function handleResume(ctx: CommandCtx, store: RunStore, guard: RunL
   const action = resumeAction(status);
   if (action.kind === "error") return void ctx.ui.notify(`workflow: cannot resume run ${runId}: ${action.reason}.`, "warning");
 
-  if (action.kind === "answer") {
-    await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, workflowFilePath, startAgent, runId, pendingAsk(events));
-    return;
-  }
+  // Seed the panel from the log BEFORE the first new event (progress §9.1), so the widget opens showing
+  // everything already done — collapsed per §6.1 — rather than an empty tree that fills in backwards.
+  // This falls out of §2.4: the projection does not care whether events arrived live or from disk.
+  const progress = progressFor(workflow, runId, workflowFilePath);
+  progress.seed(events);
+  try {
+    if (action.kind === "answer") {
+      await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, workflowFilePath, startAgent, runId, pendingAsk(events), progress);
+      return;
+    }
 
-  // rerun: node-atomic re-run (3a/5a). A re-run may itself reach a Q&A step and block → attend it.
-  const result = await runGuarded(guard, runId, ctx.cwd, store, notifier(ctx), (signal) => {
-    const host = createHostPort(store, { startAgent });
-    return resumeWorkflow(workflow, events, host, { signal });
-  });
-  if (!result) return; // guard was busy (race) — already notified
+    // rerun: node-atomic re-run (3a/5a). A re-run may itself reach a Q&A step and block → attend it.
+    const result = await runGuarded(guard, runId, ctx.cwd, store, notifier(ctx), (signal) => {
+      const host = createHostPort(store, { startAgent, onEvent: progress.accept });
+      return resumeWorkflow(workflow, events, host, { signal });
+    });
+    if (!result) return; // guard was busy (race) — already notified
 
-  if (result.status === "blocked") {
-    await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, workflowFilePath, startAgent, runId, askOf(result));
-  } else {
-    notifyResult(ctx, workflow.name, result);
+    if (result.status === "blocked") {
+      await handleAttendedQuestionnaire(ctx, store, guard, workflow.name, workflowFilePath, startAgent, runId, askOf(result), progress);
+    } else {
+      reportResult(ctx, workflow.name, result, progress.reportedOutcome());
+    }
+  } finally {
+    progress.dispose();
   }
 }

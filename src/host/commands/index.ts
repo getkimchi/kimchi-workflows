@@ -14,8 +14,10 @@
 export type { PendingAsk } from "./attended.ts";
 export { askOf, handleAttendedQuestionnaire, pendingAsk } from "./attended.ts";
 export type { CommandCtx, Notify, NotifyCtx, StartAgent } from "./context.ts";
-export { describe, notifier, notifyResult, rejectIfBusy, runGuarded } from "./context.ts";
+export { describe, notifier, notifyResult, rejectIfBusy, reportResult, runGuarded } from "./context.ts";
 export { handleCancel, handleDelete } from "./lifecycle.ts";
 export { handleListRuns, handleListWorkflows } from "./list.ts";
 export { handleResume } from "./resume.ts";
 export { handleCreate, handleRun } from "./run.ts";
+export type { StatusDeps } from "./status.ts";
+export { handleStatus } from "./status.ts";

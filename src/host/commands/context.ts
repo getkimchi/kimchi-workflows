@@ -105,6 +105,19 @@ export async function resolveRunRef(ctx: NotifyCtx, store: Pick<RunStore, "list"
   return undefined;
 }
 
+/**
+ * Report a run's terminal (or blocked) outcome (spec §5.1), unless the progress card already did.
+ *
+ * Progress §7.8: the card REPLACES this notification wherever it lands, rather than sitting beside it —
+ * two reports of one outcome is noise. It does not always land (§7.7: `appendEntry` needs a session,
+ * and the entry only renders in the interactive TUI), and a run that went silent about its own result
+ * would be a strictly worse outcome than a duplicate, so the fallback is unconditional.
+ */
+export function reportResult(ctx: NotifyCtx, workflowName: string, result: RunResult, reportedByCard: boolean): void {
+  if (reportedByCard && result.status !== "blocked") return;
+  notifyResult(ctx, workflowName, result);
+}
+
 /** Report a run's terminal (or blocked) outcome to the user (spec §5.1). */
 export function notifyResult(ctx: NotifyCtx, workflowName: string, result: RunResult): void {
   if (result.status === "completed") {
