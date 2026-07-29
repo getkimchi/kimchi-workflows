@@ -333,14 +333,16 @@ function backgroundSession(
 				}
 				args.push("--model", request.model)
 			}
-			args.push(message)
+			// The prompt goes over stdin (`runSubagent`/`writePrompt`), never in `args`: the respawned
+			// harness reads its prompt from stdin and, with a piped (non-TTY) stdin, silently ignores a
+			// positional argument — verified against a real `pi` binary (stdin: full reply, positional arg: nothing).
 
 			const invocation = invocationResolver(args)
 			// The attempt's signal kills the child (spec §8.8/§9.4). Without that a cancelled run reports
 			// itself stopped while this process keeps spending tokens and writing files, a wall-time budget
 			// fails the attempt but orphans the process it was supposed to bound, and — with no budget, the
 			// default — an unresponsive subagent hangs the run with nothing able to interrupt it.
-			const result = await runSubagent(spawnSubagent, invocation.command, invocation.args, request.signal)
+			const result = await runSubagent(spawnSubagent, invocation.command, invocation.args, message, request.signal)
 			if (request.signal?.aborted) {
 				throw new Error(`background subagent step "${request.stepName}" was aborted`)
 			}

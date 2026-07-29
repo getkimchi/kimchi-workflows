@@ -35,7 +35,7 @@ function fakeModelRegistry(hit?: { id: string }): ModelRegistry {
 }
 
 describe("createPiAgentBridge background requests (spec §2.2): a real subprocess, not a throw", () => {
-	it("spawns `pi --mode json -p --session <trace> --name <label> <prompt>` and returns the final assistant message + usage", async () => {
+	it("spawns `pi --mode json -p --session <trace> --name <label>` and returns the final assistant message + usage", async () => {
 		const { spawn, calls } = scriptedSubagent([assistantLine("hello", 5), ""].join("\n"))
 		const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir)
 
@@ -52,12 +52,17 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
 		expect(args[3]).toBe("--session")
 		expect(args[4]).toBe(path.join(sessionsDir, "workflow-test-run-1a2b3c4d-bg-a1.jsonl"))
 		expect(args.slice(5, 7)).toEqual(["--name", "test/bg #1a2b3c4d"])
-		expect(args.at(-1)).toBe("do the task")
 		expect(args).not.toContain("--no-session")
 		expect(args).not.toContain("--session-id")
+		// Regression test: the prompt is NOT a positional argument (the harness ignores one and the child
+		// exits without taking a turn) — it goes to stdin, which is ended so the child acts on it rather
+		// than hanging forever waiting for EOF.
+		expect(args).not.toContain("do the task")
+		expect(calls[0]?.child.stdin.chunks.join("")).toBe("do the task")
+		expect(calls[0]?.child.stdin.writableEnded).toBe(true)
 	})
 
-	it("passes a resolved --model before the prompt", async () => {
+	it("passes a resolved --model before the (now argv-absent) prompt", async () => {
 		const { spawn, calls } = scriptedSubagent(assistantLine("ok", 1))
 		const startAgent = createPiAgentBridge(
 			noopPi,
@@ -70,8 +75,10 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
 		)
 
 		const args = calls[0]?.args ?? []
-		expect(args.slice(-3)).toEqual(["--model", "kimchi-dev/kimi-k2.7", "go"])
+		expect(args.slice(-2)).toEqual(["--model", "kimchi-dev/kimi-k2.7"])
 		expect(args[3]).toBe("--session")
+		expect(args).not.toContain("go")
+		expect(calls[0]?.child.stdin.chunks.join("")).toBe("go")
 	})
 
 	it("rejects an unresolvable model before spawning anything", async () => {
@@ -90,6 +97,23 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
 
 		await expect(startAgent(agentRequest({ stepName: "bg", background: true })).sendAndAwaitEnd("go")).rejects.toThrow(
 			/exited with code 1.*boom/s,
+		)
+	})
+
+	// A child that dies before reading its prompt (bad `--model`, crash on startup) turns the write into
+	// an EPIPE. That must fail through the ordinary "subagent failed" path, never as an unhandled `error`
+	// event — Node's uncaught exception would take the whole harness down over one bad subagent.
+	it("fails the step cleanly, rather than throwing out of the harness, when writing the prompt hits EPIPE", async () => {
+		const { spawn } = fakeSubagentSpawner(
+			(child) => {
+				void child.exit(1) // died before it ever got to reading stdin
+			},
+			{ stdinFails: Object.assign(new Error("EPIPE"), { code: "EPIPE" }) },
+		)
+		const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir)
+
+		await expect(startAgent(agentRequest({ stepName: "bg", background: true })).sendAndAwaitEnd("go")).rejects.toThrow(
+			/exited with code 1/,
 		)
 	})
 

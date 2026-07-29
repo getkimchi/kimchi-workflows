@@ -9,16 +9,18 @@
  * subprocess at all, and why it streams rather than buffering, is recorded in pi-agent.ts's header.
  */
 import { spawn } from "node:child_process"
-import type { Readable } from "node:stream"
+import type { Readable, Writable } from "node:stream"
 import type { AgentTurn } from "../engine/types.ts"
 import { createAssistantTurnReader } from "./pi-agent-messages.ts"
 
 /**
- * The part of a `child_process.ChildProcess` a background subagent needs: two pipes to drain, an exit to
- * await, and a way to kill it. Structural on purpose — a real `ChildProcess` satisfies it, and so does a
- * test fake built from two streams, with no cast and no real binary.
+ * The part of a `child_process.ChildProcess` a background subagent needs: a pipe to write its prompt to,
+ * two pipes to drain, an exit to await, and a way to kill it. Structural on purpose — a real
+ * `ChildProcess` satisfies it, and so does a test fake built from streams, with no cast and no real
+ * binary.
  */
 export interface SubagentProcess {
+	readonly stdin: Writable | null
 	readonly stdout: Readable | null
 	readonly stderr: Readable | null
 	on(event: "exit" | "close", listener: (code: number | null) => void): unknown
@@ -29,9 +31,12 @@ export interface SubagentProcess {
 /** How a background subagent's process is started; injectable so the streaming/abort wiring is testable offline. */
 export type SubagentSpawner = (command: string, args: readonly string[]) => SubagentProcess
 
-/** The default spawner: a real child process with stdin closed and both output pipes ours to drain. */
+/**
+ * The default spawner: a real child process with a writable stdin — the prompt goes there, never in
+ * `args` (see `writePrompt` below for why) — and both output pipes ours to drain.
+ */
 export const subagentSpawner: SubagentSpawner = (command, args) =>
-	spawn(command, [...args], { shell: false, stdio: ["ignore", "pipe", "pipe"] })
+	spawn(command, [...args], { shell: false, stdio: ["pipe", "pipe", "pipe"] })
 
 /**
  * How much of a failing subagent's stderr to keep for its error message.
@@ -74,7 +79,9 @@ export interface SubagentResult {
  * Run one subagent process to completion, reducing its output AS IT ARRIVES rather than collecting it.
  *
  * Both pipes are drained the moment they produce anything — stdout into the incremental reader, stderr
- * into a fixed-size tail — so nothing this function holds grows with how much the child says.
+ * into a fixed-size tail — so nothing this function holds grows with how much the child says. `prompt` is
+ * delivered over stdin (see {@link writePrompt}), never in `args`: with a piped (non-TTY) stdin the
+ * harness silently ignores a positional argument (verified against a real `pi` binary).
  *
  * A child ended by a SIGNAL has no exit code; it is reported as 0, which is what `pi.exec` did (`code ??
  * 0`) and so keeps a cancel reading as a cancel rather than as a mystery exit. The one signal we send
@@ -85,14 +92,17 @@ export async function runSubagent(
 	spawnSubagent: SubagentSpawner,
 	command: string,
 	args: readonly string[],
+	prompt: string,
 	signal: AbortSignal | undefined,
 ): Promise<SubagentResult> {
 	const child = spawnSubagent(command, args)
 	const reader = createAssistantTurnReader()
 	let stderrTail = ""
 
-	// Listeners first, abort wiring second: an ALREADY-aborted attempt kills the child on the next line,
-	// and nothing about that exit may happen before there is something watching for it.
+	// Listeners first, then everything that can produce activity: an already-aborted attempt kills the
+	// child on the next line, and the child starts producing output the instant it sees its prompt —
+	// neither may happen before something is watching. Writing the prompt last avoids deadlocking a child
+	// that replies before it finishes reading stdin.
 	const exited = waitForExit(child, {
 		stdout: (chunk) => reader.push(chunk),
 		stderr: (chunk) => {
@@ -100,12 +110,28 @@ export async function runSubagent(
 		},
 	})
 	const stopWatchingAbort = killOnAbort(child, signal)
+	writePrompt(child, prompt)
 
 	try {
 		return { code: (await exited) ?? 0, turn: reader.end(), stderrTail }
 	} finally {
 		stopWatchingAbort()
 	}
+}
+
+/**
+ * Writes the prompt over stdin and ends it: the harness waits for EOF on a piped prompt, so a write
+ * with no `end` hangs forever.
+ *
+ * The `error` listener is not optional: a child that dies before reading (bad `--model`, crashed
+ * startup) causes EPIPE here, and without a listener Node throws an uncaught exception — taking the
+ * harness down over one failed subagent. Its exit code and stderr already carry the real reason.
+ */
+function writePrompt(child: SubagentProcess, prompt: string): void {
+	const stdin = child.stdin
+	if (!stdin) return // no stdin to write to (should not happen with `subagentSpawner`; guarded regardless)
+	stdin.on("error", () => {})
+	stdin.end(prompt)
 }
 
 /**

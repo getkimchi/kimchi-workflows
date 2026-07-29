@@ -1,15 +1,41 @@
 import { EventEmitter, once } from "node:events"
-import { PassThrough } from "node:stream"
+import { PassThrough, Writable } from "node:stream"
 import type { SubagentProcess, SubagentSpawner } from "../src/host/subagent-process.ts"
+
+/**
+ * The child's stdin as the code under test sees it: records every chunk written (how a test proves the
+ * prompt reached stdin, not argv) and exposes `writableEnded`/`writableFinished`. Optionally fails every
+ * write with `failWith`, standing in for a real pipe whose read end is already gone (EPIPE).
+ */
+class FakeStdin extends Writable {
+	readonly chunks: string[] = []
+	readonly #failWith: Error | undefined
+
+	constructor(failWith?: Error) {
+		super()
+		this.#failWith = failWith
+	}
+
+	override _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+		if (this.#failWith) {
+			callback(this.#failWith)
+			return
+		}
+		this.chunks.push(chunk.toString("utf8"))
+		callback()
+	}
+}
 
 /**
  * A scripted stand-in for the `pi` subprocess a background step spawns (spec §2.2, see
  * src/host/subagent-process.ts). Deliberately NOT a stub of the reading under test: the pipes are real
- * `PassThrough` streams and the `exit`/`close` events keep a real child's ordering, so chunk decoding,
- * line splitting across chunk boundaries, backpressure and the exit/pipe-close gap are all exercised for
- * real — only the OS process is missing, which is the one part that cannot be exercised offline.
+ * `PassThrough`/`Writable` streams and the `exit`/`close` events keep a real child's ordering, so chunk
+ * decoding, line splitting across chunk boundaries, backpressure and the exit/pipe-close gap are all
+ * exercised for real — only the OS process is missing, which is the one part that cannot be exercised
+ * offline.
  */
 export class FakeSubagent extends EventEmitter implements SubagentProcess {
+	readonly stdin: FakeStdin
 	readonly stdout = new PassThrough()
 	readonly stderr = new PassThrough()
 	/** Every signal `kill()` was asked for, in order — how a test proves an abort actually reached the child. */
@@ -18,9 +44,10 @@ export class FakeSubagent extends EventEmitter implements SubagentProcess {
 	readonly #ignores: readonly NodeJS.Signals[]
 	#exited = false
 
-	constructor(options: { ignores?: readonly NodeJS.Signals[] } = {}) {
+	constructor(options: { ignores?: readonly NodeJS.Signals[]; stdinFails?: Error } = {}) {
 		super()
 		this.#ignores = options.ignores ?? []
+		this.stdin = new FakeStdin(options.stdinFails)
 	}
 
 	/** A signalled child dies: its pipes close and it reports no exit code, because a signal ended it. */
@@ -94,7 +121,7 @@ export interface SpawnRecord {
  */
 export function fakeSubagentSpawner(
 	run: (child: FakeSubagent, call: SpawnRecord) => void | Promise<void> = () => {},
-	options: { ignores?: readonly NodeJS.Signals[] } = {},
+	options: { ignores?: readonly NodeJS.Signals[]; stdinFails?: Error } = {},
 ): { spawn: SubagentSpawner; calls: SpawnRecord[] } {
 	const calls: SpawnRecord[] = []
 	const spawn: SubagentSpawner = (command, args) => {
