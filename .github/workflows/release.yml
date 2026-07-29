@@ -16,6 +16,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} is not vMAJOR.MINOR.PATCH[-prerelease]"
+            exit 1
+          fi
+          echo "Releasing ${version}"
+
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -41,6 +50,9 @@ jobs:
     needs: [check]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -56,10 +68,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build
-        run: pnpm run build
-
       - name: Publish
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          case "$version" in
+            *-*) dist_tag="${version#*-}"; dist_tag="${dist_tag%%.*}" ;;
+            *)   dist_tag="latest" ;;
+          esac
+          npm pkg set version="$version"
+          echo "Publishing ${version} under dist-tag ${dist_tag}"
+          npm publish --access public --tag "$dist_tag"

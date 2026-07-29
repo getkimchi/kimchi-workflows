@@ -1,7 +1,8 @@
 {
 	"//name": "Scoped under the kimchi-dev npm org (the GitHub org is getkimchi)",
 	"name": "@kimchi-dev/kimchi-workflows",
-	"version": "0.0.1",
+	"//version": "Placeholder, never bumped: the git tag is the version, stamped in at publish time by release.yml",
+	"version": "0.0.0",
 	"description": "Define arbitrary workflows in TypeScript and run them inside the PI coding harness.",
 	"keywords": [
 		"pi-package",
