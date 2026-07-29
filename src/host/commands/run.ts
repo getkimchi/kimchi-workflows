@@ -4,9 +4,12 @@
  * Both go through the same {@link startRun} lifecycle — guard, run-id, provenance, attended Q&A — so
  * `create` gets nothing bespoke beyond the initial input its steps need.
  */
+import { readFile } from "node:fs/promises"
+import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { runWorkflow } from "../../engine/run-workflow.ts"
 import type { WorkflowDefinition } from "../../flow/types.ts"
+import { describeSchemaViolations } from "../../flow/validation.ts"
 import createWorkflowWorkflow from "../builtin/create.workflow.ts"
 import { createHostPort } from "../host-port.ts"
 import { mintRunId } from "../naming.ts"
@@ -15,15 +18,122 @@ import type { RunLock } from "../run-lock.ts"
 import type { RunStore } from "../types.ts"
 import { resolveWorkflow } from "../workflow-catalog.ts"
 import { askOf, handleAttendedQuestionnaire } from "./attended.ts"
-import { type CommandCtx, notifier, rejectIfBusy, reportResult, runGuarded, type StartAgent } from "./context.ts"
+import {
+	type CommandCtx,
+	describe,
+	notifier,
+	rejectIfBusy,
+	reportResult,
+	runGuarded,
+	type StartAgent,
+} from "./context.ts"
 
-/** `/workflow run <name|file.ts>` — start a workflow named either by declared name or by path. */
+/** A parsed `/workflow run` argument line (spec §6.1): the target, plus `--input`'s raw, unparsed payload. */
+export interface ParsedRunArgs {
+	readonly target: string | undefined
+	/** Everything after `--input`, verbatim: either inline JSON or `@<path>`. `undefined` when the flag was absent. */
+	readonly inputArg: string | undefined
+	/** Set only when `--input` was typed with nothing after it — a syntax error, not a resolution failure. */
+	readonly error: string | undefined
+}
+
+/**
+ * `--input` must be its own token — bounded by start-of-string/whitespace before it and
+ * whitespace/end-of-string after — so a workflow name that merely CONTAINS the substring
+ * (`my--input-migrator.workflow.ts`) is never mistaken for the flag.
+ */
+const INPUT_FLAG_RE = /(^|\s)--input(\s|$)/
+
+/**
+ * Parse `/workflow run <name|file.ts> [--input <json>|@<file>]` (spec §6.1).
+ *
+ * `--input`'s own payload is deliberately NOT tokenized the way the rest of `/workflow`'s arguments
+ * are (`extension.ts` splits on `/\s+/` for every other subcommand): a JSON object routinely contains
+ * spaces (`{"branch": "release notes"}`), and re-joining post-split tokens would already have
+ * collapsed repeated whitespace the payload may have meant literally. So the caller hands this the RAW
+ * text after `run` (whitespace-trimmed at the ends only), and everything from `--input` to the end of
+ * the line is taken verbatim as the payload.
+ */
+export function parseRunArgs(raw: string): ParsedRunArgs {
+	const trimmed = raw.trim()
+	const match = INPUT_FLAG_RE.exec(trimmed)
+	if (!match) return { target: trimmed || undefined, inputArg: undefined, error: undefined }
+
+	const flagStart = match.index + (match[1]?.length ?? 0)
+	const target = trimmed.slice(0, flagStart).trim() || undefined
+	const inputArg = trimmed.slice(flagStart + "--input".length).trim()
+	if (!inputArg) return { target, inputArg: undefined, error: "--input requires a value: inline JSON, or @<file>" }
+	return { target, inputArg, error: undefined }
+}
+
+/** What `--input` resolved to (spec §6.1), or why it could not — bad JSON, an unreadable file, or a
+ * schema violation are every one of them reported the same way: a notification, and no run started. */
+export type InitialInputResolution =
+	| { readonly ok: true; readonly value: unknown }
+	| { readonly ok: false; readonly error: string }
+
+/**
+ * Turn `--input`'s raw argument into a validated initial input (spec §6.1).
+ *
+ * Validation reuses {@link describeSchemaViolations} — the SAME TypeBox check the engine itself runs
+ * on a workflow's declared input schema (`engine/run-workflow.ts`) — rather than hand-rolling a second
+ * one that could drift from it. Doing it here, before `startRun` mints a run-id or touches the project
+ * lock, is what makes a malformed payload cost nothing: no run-id is burned, no lock is acquired, and
+ * no `run-meta`/`run-crashed` pair lands in the store. Letting the engine's own (still-present, §orig.)
+ * check catch it would technically be correct too, but only after paying for all three.
+ */
+export async function resolveInitialInput(
+	cwd: string,
+	inputArg: string,
+	workflow: Pick<WorkflowDefinition, "name" | "inputSchema">,
+): Promise<InitialInputResolution> {
+	const isFile = inputArg.startsWith("@")
+	const filePath = isFile ? inputArg.slice(1) : undefined
+
+	let source: string
+	if (isFile && filePath !== undefined) {
+		const resolved = path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath)
+		try {
+			source = await readFile(resolved, "utf8")
+		} catch (err) {
+			return { ok: false, error: `could not read --input file "${filePath}": ${describe(err)}` }
+		}
+	} else {
+		source = inputArg
+	}
+
+	let value: unknown
+	try {
+		value = JSON.parse(source)
+	} catch (err) {
+		const where = filePath !== undefined ? ` in "${filePath}"` : ""
+		return { ok: false, error: `--input is not valid JSON${where}: ${describe(err)}` }
+	}
+
+	if (workflow.inputSchema) {
+		// Same phrasing the engine's own pre-flight check would produce (`engine/run-workflow.ts`), so a
+		// payload that somehow slipped past this earlier gate still reads consistently downstream.
+		const violation = describeSchemaViolations(workflow.inputSchema, value)
+		if (violation) return { ok: false, error: `workflow "${workflow.name}" input: ${violation}` }
+	}
+
+	return { ok: true, value }
+}
+
+/**
+ * `/workflow run <name|file.ts> [--input <json>|@<file>]` — start a workflow named either by
+ * declared name or by path, optionally seeded with initial input (spec §6.1).
+ *
+ * With no `inputArg`, behaviour is exactly what it was before `--input` existed: `undefined` initial
+ * input, unchanged for every workflow that declares no top-level schema.
+ */
 export async function handleRun(
 	ctx: CommandCtx,
 	store: RunStore,
 	guard: RunLock,
 	startAgent: StartAgent,
 	target: string,
+	inputArg?: string,
 	progressFor: ProgressFor = noProgressFor,
 ): Promise<void> {
 	if (rejectIfBusy(ctx, guard, "starting")) return
@@ -34,7 +144,17 @@ export async function handleRun(
 		return
 	}
 
-	await startRun(ctx, store, guard, startAgent, resolution.workflow, resolution.filePath, undefined, progressFor)
+	let initialInput: unknown
+	if (inputArg !== undefined) {
+		const resolved = await resolveInitialInput(ctx.cwd, inputArg, resolution.workflow)
+		if (!resolved.ok) {
+			ctx.ui.notify(`workflow: ${resolved.error}`, "error")
+			return
+		}
+		initialInput = resolved.value
+	}
+
+	await startRun(ctx, store, guard, startAgent, resolution.workflow, resolution.filePath, initialInput, progressFor)
 }
 
 /**

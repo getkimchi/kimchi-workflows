@@ -18,6 +18,7 @@ export { describe, notifier, notifyResult, rejectIfBusy, reportResult, runGuarde
 export { handleCancel, handleDelete } from "./lifecycle.ts"
 export { handleListRuns, handleListWorkflows } from "./list.ts"
 export { handleResume } from "./resume.ts"
-export { handleCreate, handleRun } from "./run.ts"
+export type { InitialInputResolution, ParsedRunArgs } from "./run.ts"
+export { handleCreate, handleRun, parseRunArgs, resolveInitialInput } from "./run.ts"
 export type { StatusDeps } from "./status.ts"
 export { handleStatus } from "./status.ts"

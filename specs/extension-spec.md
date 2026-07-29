@@ -304,10 +304,27 @@ starting a **new** run (fresh run-id), never a transition back. *(decision)*
 
 ## 6. Commands
 
-6.1. `/workflow run <name|file.ts>` — start a run. The argument is resolved as a
-filesystem path when it ends in `.ts`, otherwise as a workflow **name** from the
-catalog (§6.7). Paths resolve relative to the project root. Rejected if another run
-is executing in this project (§7). *(orig. R3; name resolution: decision)*
+6.1. `/workflow run <name|file.ts> [--input <json>|@<file>]` — start a run. The
+argument is resolved as a filesystem path when it ends in `.ts`, otherwise as a
+workflow **name** from the catalog (§6.7). Paths resolve relative to the project
+root. Rejected if another run is executing in this project (§7). *(orig. R3; name
+resolution: decision)*
+
+  **`--input`** supplies the run's initial input (§3.11): `--input <json>` parses its
+  argument as JSON directly; `--input @<path>` reads the file at `<path>` (a relative
+  path resolves against the project root, exactly like `<name|file.ts>` itself) and
+  parses its contents as JSON. The parsed value is validated against the workflow's
+  declared top-level input schema, if it has one, using the SAME TypeBox check the
+  engine runs on it at the top of `runWorkflow` (§4) — not a second, hand-rolled one
+  that could drift from it. Every failure — malformed JSON, an unreadable file, a
+  schema violation — is reported and the run is **never started**: no run-id is
+  minted, the project lock (§7.2) is never acquired, and nothing is appended to any
+  run's log. This is deliberately stricter than leaving it to the engine's own check
+  alone, which would still catch a bad payload correctly but only after paying for
+  all three. Omitting `--input` is `undefined`, exactly as before the flag existed.
+  Until this, only `/workflow create` (§6.6) supplied an initial input — its own
+  project root, fixed and hardcoded — so a workflow whose first step needs input
+  could not be started from the command surface at all. *(decision)*
 
 6.2. `/workflow resume [run-id]` — recover a `blocked` (with an answer), `crashed`,
 or `cancelled` run, continuing from the last checkpoint (§5.5/§8). Requires that no
@@ -390,6 +407,18 @@ normally execute the others. *(decision)*
 6.9. **Every argument above is completable** in the interactive editor — verbs,
 workflow names, and run-ids filtered to the statuses the verb accepts. Completion is
 advisory and changes no dispatch rule; see §14. *(decision)*
+
+6.10. **`/workflow` already works in `print` and `json` mode — no extension-side
+dispatch needed.** `AgentSession.prompt()` (`@earendil-works/pi-coding-agent`,
+`core/agent-session.js`) checks whether the incoming text starts with `/` and, if so,
+tries the harness's own registered-command dispatch FIRST; only when that returns
+unhandled does it fall through to emit the `input` event and treat the text as an
+ordinary prompt. `/workflow` is always a registered command (`pi.registerCommand`
+above), so this dispatch step catches it in every mode — `print` and `json` included
+— before the text could ever reach `input`. An extension-side `input` handler
+re-parsing `/workflow` lines is therefore unreachable code, not a headless fallback:
+this note exists so that fact is not re-derived, and the dead handler is not
+re-added, the next time headless dispatch looks like a gap. *(decision)*
 
 ## 7. One executing run per project
 
@@ -803,6 +832,14 @@ verb accepts, so a completed run-id is one the command cannot then reject. They 
 therefore derived from the existing predicates — `resumeAction(status).kind !== "error"`
 for `resume` (§5.2), the live/stopped split for `cancel`/`delete` — never restated as
 a second copy of the rule. *(decision)*
+
+`run <partial>`'s slot completes ONLY the workflow-name token — `--input` (§6.1) is,
+textually, a second argument, and the existing "a second argument onward: none" row
+already covers it. This is not an oversight left over from before `--input` existed:
+completing a `--input` VALUE would mean completing arbitrary JSON or a project-relative
+file path, neither of which fits "one popup, one candidate list" the rest of this
+section is built on, and completing the bare flag name alone (`--input `) would not
+save a keystroke the way a workflow name or a run-id does. *(decision)*
 
 14.5. **Filtering and ordering.** Case-insensitive prefix match on the slot token,
 falling back to substring; ties keep the source order. Workflows sort by name; runs

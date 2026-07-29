@@ -5,6 +5,12 @@
  * This module is **argument dispatch only** — parse the subcommand, bind the per-invocation store and
  * agent starter, delegate. Every handler lives in `./commands/`, takes the narrowest context it needs,
  * and is unit-testable without a PI session.
+ *
+ * `/workflow` reaches this through exactly one door: `pi.registerCommand`. `print`/`json` mode need no
+ * extension-side help to get here — `AgentSession.prompt()` (pi-coding-agent's `agent-session.js`)
+ * dispatches a registered extension command BEFORE it ever emits the `input` event those modes' prompt
+ * path fires on, so a `/workflow …` line piped into either mode is already routed to this same handler
+ * by the harness itself (spec §6.10).
  */
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
 import {
@@ -16,6 +22,7 @@ import {
 	handleResume,
 	handleRun,
 	handleStatus,
+	parseRunArgs,
 } from "./commands/index.ts"
 import { createCompletionSources } from "./completion-sources.ts"
 import { completeWorkflowArgument } from "./completions.ts"
@@ -39,7 +46,8 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 		description: "PI workflows: run | create | list | status | resume | cancel | delete",
 		getArgumentCompletions: (argumentPrefix: string) => completeWorkflowArgument(argumentPrefix, completionSources),
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean)
+			const trimmedArgs = args.trim()
+			const [sub, ...rest] = trimmedArgs.split(/\s+/).filter(Boolean)
 			// Resolved per invocation, not at load: the session directory is a property of the CONTEXT (it
 			// moves with `--session-dir`, and is empty under `--no-session`), and `ctx` does not exist when
 			// this extension is loaded. Everything a run writes — its event log and every step session — lands
@@ -55,10 +63,19 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 				case "run": {
 					// `list` is reserved as the first argument to `run`, so it can never name a workflow (spec §6.3).
 					if (rest[0] === "list") return void (await handleListRuns(ctx, store))
-					const target = rest[0]
-					if (!target)
-						return void ctx.ui.notify("usage: /workflow run <name|file.ts>  |  /workflow run list", "warning")
-					return void (await handleRun(ctx, store, guard, startAgent, target, progressFor))
+
+					// Re-sliced from the RAW (not `\s+`-collapsed) remainder: `--input`'s own payload is very
+					// often a JSON object containing spaces (spec §6.1), and `rest` above has already thrown that
+					// whitespace away by the time we'd see it.
+					const runArgs = trimmedArgs.slice(sub.length).trim()
+					const parsed = parseRunArgs(runArgs)
+					if (parsed.error) return void ctx.ui.notify(`workflow: ${parsed.error}`, "error")
+					if (!parsed.target)
+						return void ctx.ui.notify(
+							"usage: /workflow run <name|file.ts> [--input <json>|@<file>]  |  /workflow run list",
+							"warning",
+						)
+					return void (await handleRun(ctx, store, guard, startAgent, parsed.target, parsed.inputArg, progressFor))
 				}
 
 				case "create":

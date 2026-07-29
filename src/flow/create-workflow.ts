@@ -36,7 +36,12 @@ export interface CreateWorkflowOptions<TInputSchema extends TSchema | undefined 
 	/** Unique workflow name/id — used by `/workflow list` and the run store (spec §1.5, §8.9). */
 	name: string
 	description?: string
-	/** Optional top-level input schema (spec §3.9). Phase 1 does not wire CLI input; reserved for later phases. */
+	/**
+	 * Optional top-level input schema (spec §3.9). `/workflow run --input` (spec §6.1) validates its
+	 * parsed payload against this before a run starts; `/workflow create` (spec §6.6) supplies its own
+	 * initial input directly rather than through the command line, since its input is a fixed shape
+	 * (the project root) known at every invocation, not something a caller varies per run.
+	 */
 	input?: TInputSchema
 	/** Default model (`provider/modelId`) for agent steps that declare none (spec §9.5). */
 	defaultModel?: string
