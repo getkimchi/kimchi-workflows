@@ -387,6 +387,10 @@ resolving a **name** first tries the `<name>.workflow.ts` convention and only fa
 back to a full scan when it does not hold — so running one workflow does not
 normally execute the others. *(decision)*
 
+6.9. **Every argument above is completable** in the interactive editor — verbs,
+workflow names, and run-ids filtered to the statuses the verb accepts. Completion is
+advisory and changes no dispatch rule; see §14. *(decision)*
+
 ## 7. One executing run per project
 
 7.1. At most one run is **executing** per project at any time. Runs in other states
@@ -725,6 +729,145 @@ assertable. *(decision)*
 value is real, but a fixture format, a staleness rule for edited prompts, and a
 re-record workflow are a project of their own; hand-scripted replies plus the live
 integration suite cover the ground meanwhile. *(decision)*
+
+## 14. Command completion
+
+14.1. **The problem.** Every `/workflow` argument must currently be typed blind.
+Workflow names live inside files the user has to remember, and run-ids are opaque
+(§8.9) — nobody types one from memory. A mistyped argument only fails *after* the
+command dispatches. Completion turns both into a menu at the point of typing.
+
+Scope: the **arguments** of `/workflow` in interactive (TUI) mode. Nothing about
+execution changes. Completion is **advisory**: it never becomes a validation path, and
+every handler keeps validating its argument exactly as it does today (§6.1, §6.8),
+because the user can always type past the menu. *(decision)*
+
+14.2. **The harness seam.** `pi.registerCommand` takes an optional
+`getArgumentCompletions(argumentPrefix) => Item[] | null | Promise<…>`, where an item
+is `{ value, label, description? }`. Its contract, as PI implements it — the rest of
+this section follows from it:
+
+  - it fires only when the line starts with `/` and the word before the first space
+    equals the command's invocation name (so duplicate registrations, which PI renames
+    `workflow:1`, still complete);
+  - `argumentPrefix` is **everything after that first space up to the cursor** — the
+    whole argument text, not the token under the cursor;
+  - the chosen `value` **replaces that whole argument text**, cursor at its end, no
+    trailing space appended. So values are *full argument strings* (`"run
+    review-loop"`), `label` carries the short display form, and `description` a
+    single-line annotation (rendered dimmed and truncated, only when the popup is
+    wider than 40 columns);
+  - `null` or `[]` means "no popup" — not "no matches";
+  - PI fuzzy-filters *command names* but passes argument prefixes through **untouched**;
+    filtering is ours (§14.5);
+  - the callback gets **no `ExtensionCommandContext`** — no `cwd`, no store, no UI
+    (§14.7);
+  - it may be async. PI debounces and abandons stale requests, but hands us no
+    `AbortSignal`, so a slow callback is a slow keystroke (§14.6). *(constraint)*
+
+14.3. **What opens the menu.** The popup opens on `/` at line start and re-opens on
+any name character typed while the line starts with `/` — so `/workflow r` shows the
+filtered verb list. A typed **space** re-queries only while the popup is already open;
+**Tab** accepts the highlighted item when the popup is open, and when it is closed
+forces *file-path* completion, which bypasses argument completions entirely.
+Consequence: `/workflow ` + Tab offers files, not verbs. We accept this (§14.9) —
+typing one more character opens the menu. *(constraint)*
+
+14.4. **The grammar.** Completion is a slot table over the same grammar §6 dispatches
+on, so the two cannot drift:
+
+| argument text            | slot     | candidates                                          |
+| ------------------------ | -------- | --------------------------------------------------- |
+| empty, or one partial token | verb  | `run`, `create`, `list`, `status`, `resume`, `cancel`, `delete` |
+| `run <partial>`          | workflow | `list` (§6.3, reserved and offered first), then `*.workflow.ts` filenames (§14.6) |
+| `status <partial>`       | run-id   | **every** recorded run — no filter                  |
+| `resume <partial>`       | run-id   | `blocked`, `crashed`, `cancelled` (§6.2)            |
+| `cancel <partial>`       | run-id   | `in_progress`, `blocked` (§6.4)                     |
+| `delete <partial>`       | run-id   | `completed`, `crashed`, `cancelled` (§6.5)          |
+| `create …`, `list …`     | —        | none                                                 |
+| a second argument onward | —        | none                                                 |
+
+Each candidate is emitted as `<verb> <candidate>`, the full argument string per §14.2,
+with the bare candidate as its `label`. A verb that takes an argument inserts its
+**trailing space** (`"run "`), because PI appends none and accepting a completion
+closes the popup: without it the user lands mid-token, and the menu only re-opens on a
+name character (§14.3). `create` and `list` insert no trailing space.
+
+`status` is the one run-id slot with no filter, and for the same reason the others
+have one: a run's tree is rebuilt from its log alone, so every recorded run can be
+shown. Its id is optional at the command — bare means the executing run — which makes
+completion the only practical way to reach a run that is *not* executing.
+
+The **status filters are the feature**, not decoration: they are exactly the sets each
+verb accepts, so a completed run-id is one the command cannot then reject. They are
+therefore derived from the existing predicates — `resumeAction(status).kind !== "error"`
+for `resume` (§5.2), the live/stopped split for `cancel`/`delete` — never restated as
+a second copy of the rule. *(decision)*
+
+14.5. **Filtering and ordering.** Case-insensitive prefix match on the slot token,
+falling back to substring; ties keep the source order. Workflows sort by name; runs
+come **newest first**, capped at 20, because runs accumulate until deleted (§6.5) and
+the interesting one is nearly always recent. Workflow items carry no `description` —
+the name *is* the file (§14.6). A run's does the work that makes an opaque id
+meaningful: workflow name, status, current step (§6.3). *(decision)*
+
+14.6. **Candidate sources must be cheap and read-only.** The callback runs on a
+keystroke, possibly while a run is executing, so neither listing path can be reused
+as it stands:
+
+  - **Workflow names come from filenames, never an import.** `discoverWorkflows`
+    (§6.8) imports every candidate module through a fresh loader to read its declared
+    name; per keystroke that recompiles the project's workflows and re-executes their
+    module bodies. Completion instead lists the workflows directory and strips the
+    `.workflow.ts` suffix — one `readdir`, no code executed, no cache to keep honest.
+    This is the same convention `run` resolves against first (§6.8), so a completed
+    name normally resolves in one import rather than a full scan. A file whose
+    *declared* name differs from its filename is therefore not completable — it stays
+    visible in `/workflow list` and runnable by name or path, and the convention it
+    breaks is the one §6.8 already asks for. Trading it for a background catalog cache
+    would buy declared names and descriptions at the price of executing project code
+    on a keystroke path. *(decision)*
+  - **Listing runs is a read.** `RunStore.list()` currently ensures the directory
+    exists first; a keystroke in a project that has never run a workflow must not
+    create the run-artifacts directory (§8.9). `list()` stops creating it and returns
+    empty when it is absent. Because that listing parses every run's log, memoize for
+    **one second** — enough that a burst of keystrokes costs one read, short enough
+    that no invalidation hook is needed after a run starts, is cancelled, or is
+    deleted. *(decision)*
+
+14.7. **Locating the project without a context.** Workflow files are keyed by project
+root (§6.8) and run logs by the harness's session directory (§8.9) — the callback has
+neither (§14.2). The extension captures both from `session_start`, where `ctx.cwd` and
+`ctx.sessionManager.getSessionDir()` are exactly what the command handler already uses
+to build its store, re-captured on every start whatever the reason, with `process.cwd()`
+and an empty session dir as the pre-first-start fallback. This copy exists for
+completion only; handlers keep resolving from their own invocation's context, which
+stays authoritative. *(decision)*
+
+14.8. **Shape and testability.** The grammar, filtering, and value assembly live in one
+**pure** module taking injected sources (`workflows()`, `runs()`) and returning items —
+no filesystem, no store, no PI session, testable exactly like the engine (§13.1). The
+extension wires the real sources, the memo, and the cwd capture. Tests cover: the
+verb list and its filtering, the reserved `run list`, each verb's run-id status set,
+whole-argument value assembly, silence on a second argument, and empty → `null`.
+*(decision)*
+
+14.9. **Rejected and out of scope.**
+
+  - **A stacked autocomplete provider** (`ctx.ui.addAutocompleteProvider`) to make Tab
+    on an empty argument work (§14.3). It means re-implementing PI's slash parsing and
+    delegating file completion to fix one keystroke. *(rejected)*
+  - **One command per verb** (`/workflow-run`, `/workflow-resume`, …) so the built-in
+    command menu completes verbs: six top-level names for one feature, and it would
+    still complete neither workflow names nor run-ids. *(rejected)*
+  - **Path completion for `run <file>.ts`.** Tab already force-completes paths (§14.3);
+    duplicating it here would fight the built-in provider. *(decision)*
+  - **An argument hint** on the command row. pi-tui's slash-command model has
+    `argumentHint`, and PI forwards it for built-ins and prompt templates, but
+    `RegisteredCommand` has no such field — an extension cannot set one. The verbs are
+    named in the command's own `description` instead, which does render. *(constraint)*
+  - **Non-TUI modes.** Completion is an editor affordance; RPC and print modes have
+    nothing to complete. *(decision)*
 
 ## Open items (TODO)
 
