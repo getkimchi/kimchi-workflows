@@ -22,7 +22,7 @@ import { createKimiAgentStarter, resolveKimiApiKey } from "./kimi-agent.ts"
  *
  * This is the one test where the generated file must be genuinely loadable, so it writes into THIS
  * repo's own workflows directory — the same place the command writes in a real project — proving that the
- * `@getkimchi/kimchi-workflows` import the generator is told to emit actually resolves.
+ * `@kimchi-dev/kimchi-workflows` import the generator is told to emit actually resolves.
  */
 const apiKey = resolveKimiApiKey()
 

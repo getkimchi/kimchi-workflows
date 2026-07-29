@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { describe, expect, it } from "vitest"
-import createWorkflowWorkflow from "../src/host/builtin/create.workflow.ts"
+import createWorkflowWorkflow, { API_EXAMPLE } from "../src/host/builtin/create.workflow.ts"
 import { loadWorkflowFile } from "../src/host/load-workflow.ts"
 import { workflowsDir } from "../src/host/project-dir.ts"
 import { ask, createTestRun, reply } from "../src/testing/index.ts"
@@ -36,6 +36,25 @@ const clarify = ask({
 })
 
 const projectRoot = () => mkdtemp(path.join(tmpdir(), "pi-create-"))
+
+/**
+ * `validSource` above imports by absolute path, so nothing else here exercises the package specifier
+ * the generator is actually told to emit — a scope renamed everywhere but line 77 of create.workflow.ts
+ * would ship a generator writing unresolvable imports, with this suite green.
+ */
+describe("the worked example handed to the generator", () => {
+	it("loads as a real workflow, so the API it demonstrates is the API that exists", async () => {
+		const root = await projectRoot()
+		await mkdir(workflowsDir(root), { recursive: true })
+		const file = path.join(workflowsDir(root), "writer.workflow.ts")
+		await writeFile(file, API_EXAMPLE, "utf8")
+
+		const workflow = await loadWorkflowFile(file)
+
+		expect(workflow.name).toBe("writer")
+		expect(workflow.nodes).toHaveLength(3)
+	})
+})
 
 describe("/workflow create meta-workflow", () => {
 	it("interviews, revises on request, approves, and writes the approved workflow into the project's workflows dir (spec §6.6)", async () => {

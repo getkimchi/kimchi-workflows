@@ -22,7 +22,7 @@ import type { ProgressCtx, ProgressMode } from "../src/host/progress-sink.ts"
  */
 
 const WORKFLOW_SOURCE = `
-import { createStep, createWorkflow } from "@getkimchi/kimchi-workflows";
+import { createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows";
 
 export default createWorkflow({ name: "audit" })
   .then(createStep({ name: "collect", run: () => ({ ok: true }) }))

@@ -101,8 +101,8 @@ There are two separate installs, and most people only need the first:
 `package.json` declares `src/host/extension.ts` under the `pi` key, so PI's package machinery installs it directly:
 
 ```bash
-pi install npm:@getkimchi/kimchi-workflows        # user-wide (~/.pi/agent/settings.json)
-pi install -l npm:@getkimchi/kimchi-workflows     # this project only (.pi/settings.json)
+pi install npm:@kimchi-dev/kimchi-workflows        # user-wide (~/.pi/agent/settings.json)
+pi install -l npm:@kimchi-dev/kimchi-workflows     # this project only (.pi/settings.json)
 ```
 
 `-l` writes project settings, which makes the project untrusted until you approve it once — pass `-a`, or accept the prompt on the next interactive start. Other routes, all equivalent:
@@ -116,7 +116,7 @@ pi -e /path/to/kimchi-workflows/src/host/extension.ts # one-off, this run only
 A local path is recorded rather than copied, so that checkout keeps its own `node_modules` — which it needs, because PI supplies `typebox` to extensions but not `jiti`. Dropping a re-export into `~/.pi/agent/extensions/` or `.pi/extensions/` also works and is what makes `/reload` pick up edits. For a custom host, register the factory by hand:
 
 ```ts
-import { piWorkflowsExtension } from "@getkimchi/kimchi-workflows/host";
+import { piWorkflowsExtension } from "@kimchi-dev/kimchi-workflows/host";
 piWorkflowsExtension(pi);
 ```
 
@@ -127,7 +127,7 @@ piWorkflowsExtension(pi);
 Only if you want autocomplete, `tsc`, or your own tests over the workflows you author — none of it is needed to *run* them:
 
 ```bash
-npm install -D @getkimchi/kimchi-workflows typebox     # or pnpm add -D
+npm install -D @kimchi-dev/kimchi-workflows typebox     # or pnpm add -D
 ```
 
 `typebox` comes along because your editor needs its types on disk; at run time PI's own copy is used regardless of what you install. The published package ships built JavaScript with `.d.ts`, so an ordinary `tsconfig.json` type-checks it with no special flags.
@@ -161,7 +161,7 @@ A useful side effect: the workflow and the engine share **one** typebox instance
 Editors are the one thing jiti cannot help with, because `tsc` resolves from disk. Add the package as a dev dependency (step 2 above) and an ordinary `tsconfig.json` type-checks an authored workflow with no special flags:
 
 ```bash
-npm install -D @getkimchi/kimchi-workflows typebox
+npm install -D @kimchi-dev/kimchi-workflows typebox
 ```
 
 Working against a local checkout instead of the registry? `npm install -D file:/path/to/kimchi-workflows typebox` behaves the same, as long as that checkout has been built (`pnpm build`) — `exports` points at `dist`.
@@ -171,7 +171,7 @@ Biome needs nothing either way: it does no type-aware resolution, and the only t
 Testing your workflows is the same story — a dev dependency and any runner:
 
 ```ts
-import { createTestRun, reply } from "@getkimchi/kimchi-workflows/testing";
+import { createTestRun, reply } from "@kimchi-dev/kimchi-workflows/testing";
 
 const run = await createTestRun(myWorkflow, { agents: { draft: [reply({ summary: "…" })] } });
 expect(run.status).toBe("completed");
@@ -197,7 +197,7 @@ A minimal function-step workflow:
 
 ```ts
 import { Type } from "typebox";
-import { createStep, createWorkflow } from "@getkimchi/kimchi-workflows";
+import { createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows";
 
 const sayHello = createStep({
   name: "say-hello",
@@ -277,7 +277,7 @@ Function-only and questionnaire examples run with no network; agent examples use
 A workflow's behaviour is pinned by three things: the agents' replies, the answers given to questions, and what its steps do. `src/testing` supplies all three — no PI, no filesystem, no network, and no runner-specific matchers, so it works under Vitest, Jest, or `node:test`.
 
 ```ts
-import { ask, createTestRun, reply } from "@getkimchi/kimchi-workflows/testing";
+import { ask, createTestRun, reply } from "@kimchi-dev/kimchi-workflows/testing";
 
 const blocked = await createTestRun(planningWorkflow, {
   agents: {

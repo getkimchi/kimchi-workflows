@@ -73,8 +73,8 @@ const approveSchema = Type.Object({
  * heads and imports cleanly, so only a shape check at `commit()` catches it. Showing the real shape
  * is what actually prevents it.
  */
-const API_EXAMPLE = `import { Type } from "typebox";
-import { createStep, createAgentStep, createQuestionnaireStep, createWorkflow } from "@getkimchi/kimchi-workflows";
+export const API_EXAMPLE = `import { Type } from "typebox";
+import { createStep, createAgentStep, createQuestionnaireStep, createWorkflow } from "@kimchi-dev/kimchi-workflows";
 
 const askSchema = Type.Object({
   topic: Type.String({ description: "What should we write about?" }),

@@ -25,7 +25,7 @@ import type { WorkflowDefinition } from "../flow/types.ts"
  *    module. There is no file on disk to point an alias at, so `require.resolve("typebox")` has
  *    nothing to find and a path-based alias would be unbuildable.
  *  - it guarantees ONE instance. The workflow's `Type.Object(...)` and the engine's `Value.Check(...)`
- *    are then provably the same typebox, and the workflow's `@getkimchi/kimchi-workflows` is the very module
+ *    are then provably the same typebox, and the workflow's `@kimchi-dev/kimchi-workflows` is the very module
  *    object running the engine — not a second copy that node resolution happened to find.
  *
  * The modules we hand out are whatever OUR imports above resolved to, so under the harness a workflow
@@ -46,9 +46,9 @@ const workflowModules = {
 	typebox,
 	"typebox/value": typeboxValue,
 	"typebox/compile": typeboxCompile,
-	"@getkimchi/kimchi-workflows": flow,
-	"@getkimchi/kimchi-workflows/flow": flow,
-	"@getkimchi/kimchi-workflows/engine": engine,
+	"@kimchi-dev/kimchi-workflows": flow,
+	"@kimchi-dev/kimchi-workflows/flow": flow,
+	"@kimchi-dev/kimchi-workflows/engine": engine,
 }
 
 function isWorkflowDefinition(value: unknown): value is WorkflowDefinition {

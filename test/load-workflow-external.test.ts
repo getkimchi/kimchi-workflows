@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { createJiti } from "jiti"
@@ -16,10 +16,15 @@ import { createTestRun } from "../src/testing/index.ts"
  * `Cannot find module 'typebox'` — see the negative control below, which proves the temp project
  * really is dependency-free and that these tests are not passing by accident.
  */
+// Read, not hardcoded: the loader's virtual-module map must key on this exact string.
+const { name: PKG_NAME } = JSON.parse(await readFile(path.resolve(import.meta.dirname, "../package.json"), "utf8")) as {
+	name: string
+}
+
 const SOURCE = `import { basename } from "node:path";
 import { Type } from "typebox";
-import { isValidNodeName } from "@getkimchi/kimchi-workflows/engine";
-import { createStep, createWorkflow } from "@getkimchi/kimchi-workflows";
+import { isValidNodeName } from "${PKG_NAME}/engine";
+import { createStep, createWorkflow } from "${PKG_NAME}";
 
 const greet = createStep({
   name: "greet",
@@ -67,11 +72,7 @@ describe("authoring outside this repo", () => {
 		// Only the published names resolve. A directory path is not a supported import, and failing here
 		// is the point: it cannot work after a real `npm install` either, since `exports` omits it.
 		const byPath = path.join(workflowsDir(projectRoot), "by-path.workflow.ts")
-		await writeFile(
-			byPath,
-			SOURCE.replace('from "@getkimchi/kimchi-workflows"', 'from "@getkimchi/kimchi-workflows/src/flow"'),
-			"utf8",
-		)
+		await writeFile(byPath, SOURCE.replace(`from "${PKG_NAME}"`, `from "${PKG_NAME}/src/flow"`), "utf8")
 
 		await expect(loadWorkflowFile(byPath)).rejects.toThrow(/Cannot find module/)
 	})

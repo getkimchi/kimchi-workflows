@@ -1,6 +1,6 @@
 {
-	"//name": "Scoped under the getkimchi org. The name is not cosmetic: it is the specifier every authored workflow imports, so it also appears in the loader's virtual-module map and in what /workflow create generates.",
-	"name": "@getkimchi/kimchi-workflows",
+	"//name": "Scoped under the kimchi-dev npm org (the GitHub org is getkimchi)",
+	"name": "@kimchi-dev/kimchi-workflows",
 	"version": "0.0.1",
 	"description": "Define arbitrary workflows in TypeScript and run them inside the PI coding harness.",
 	"keywords": [
