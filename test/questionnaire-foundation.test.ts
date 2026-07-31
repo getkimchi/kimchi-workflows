@@ -151,7 +151,7 @@ describe("buildAskingProtocol", () => {
 		const target = Type.Object({ answer: Type.String() })
 		const protocol = buildAskingProtocol(target)
 		expect(protocol).toMatch(/"questions":/) // the ask shape
-		expect(protocol).toMatch(/"result":/) // the finish shape
+		expect(protocol).toMatch(/submit_result/) // the finish channel
 		expect(protocol).toMatch(/[Bb]atch as many questions/) // batch instruction
 		// Both schemas are embedded verbatim.
 		expect(protocol).toContain(JSON.stringify(QuestionnaireSchema, null, 2))

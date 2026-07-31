@@ -21,7 +21,7 @@ const propose = createAgentStep({
 	prompt: () =>
 		[
 			"Propose a URL slug for an article titled: 'Deterministic Workflow Engines for Coding Agents'.",
-			'Reply with ONLY JSON of the form {"slug": string}. The slug must be lowercase letters, digits, and single hyphens only.',
+			"The slug must be lowercase letters, digits, and single hyphens only.",
 		].join("\n"),
 })
 

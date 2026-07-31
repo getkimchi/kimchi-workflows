@@ -4,6 +4,7 @@
  * The engine (run-workflow.ts) imports only from here and from the pure
  * flow types — never from PI, `node:fs`, or any network lib.
  */
+import type { TSchema } from "typebox"
 import type { Questionnaire } from "../flow/questionnaire.ts"
 
 /** Why a step is being retried (spec §9.2/§9.3). Input-schema violations are never retried. */
@@ -184,6 +185,17 @@ export interface AgentRequest {
 	 */
 	readonly resumeKey?: string
 	/**
+	 * The step's declared output contract, when it has one (spec §9.2).
+	 *
+	 * Passed so a host that runs this request out-of-process can register a `submit_result` tool typed by
+	 * it inside that process — the payload then travels as a tool call, which a later message cannot
+	 * displace. A host with nowhere to register tools leaves this undefined, and every step under a
+	 * contract then fails — there is no text channel behind it.
+	 */
+	readonly outputSchema?: TSchema
+	/** True when the step may answer with a questionnaire instead of a result (spec §10.1) — enables `submit_questions`. */
+	readonly asks?: boolean
+	/**
 	 * The attempt's abort signal — the run's cancel signal (spec §8.8) combined with the step's wall-time
 	 * budget (spec §9.4). A host that runs this request as an out-of-process subagent MUST honour it, or
 	 * the two mechanisms become lies: `/workflow cancel` would report a stopped run while its subagent
@@ -200,19 +212,33 @@ export interface TokenUsage {
 	readonly totalTokens: number
 }
 
+/** A `submit_*` tool call the agent made, as seen in the turn's transcript. */
+export interface SubmittedOutput {
+	/** Which output tool was called — the discriminator (see engine/output-tools.ts). */
+	readonly tool: string
+	/** The call's arguments, already an object (`ToolCall.arguments`); no JSON extraction involved. */
+	readonly arguments: Record<string, unknown>
+}
+
 /** The result of one agent turn: the final assistant text plus optional token usage for budgeting. */
 export interface AgentTurn {
 	readonly text: string
 	readonly usage?: TokenUsage
+	/**
+	 * The last `submit_*` call of the turn, if any — the ONLY channel a step under a contract reports
+	 * through, since a later message cannot displace a tool call. A step with no `outputSchema` has no
+	 * contract to submit against and reports its text instead, so this is ignored there.
+	 */
+	readonly submitted?: SubmittedOutput
 }
 
 /**
  * A single agent conversation opened by the host. The engine sends the built prompt and awaits the
- * agent loop's end, receiving the final assistant text + optional usage (which it parses/validates
- * and sums against `maxTokens`). All network and PI coupling lives behind this seam.
+ * agent loop's end, receiving the turn's submission + optional usage (which it validates against the
+ * step's schema and sums against `maxTokens`). All network and PI coupling lives behind this seam.
  */
 export interface AgentSession {
-	/** Send `message`, run the agent loop to `agent_end`, and resolve with the final assistant text + usage. */
+	/** Send `message`, run the agent loop to `agent_end`, and resolve with the turn's submission + usage. */
 	sendAndAwaitEnd(message: string): Promise<AgentTurn>
 	/** The full conversation after the last turn — captured when a Q&A step blocks, to resume it (spec §8.4). */
 	getConversation(): readonly ConversationMessage[]

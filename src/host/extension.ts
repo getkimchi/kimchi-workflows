@@ -31,8 +31,14 @@ import { createPiAgentBridge } from "./pi-agent.ts"
 import { bindProgress } from "./progress-sink.ts"
 import { runArtifactsDir } from "./project-dir.ts"
 import { createRunLock } from "./run-lock.ts"
+import { registerStepOutputToolsFromEnv } from "./step-output-tools.ts"
 
 export default function piWorkflowsExtension(pi: ExtensionAPI): void {
+	// A process spawned as a workflow STEP is not a workflow host: it registers the step's output tools
+	// (step-output-tools.ts) and nothing else. Registering `/workflow` there would let a step start a
+	// nested run inside the run it belongs to.
+	if (registerStepOutputToolsFromEnv(pi)) return
+
 	const guard = createRunLock() // one execution slot per project, backed by the file lock (spec §7)
 	const bindAgentStarter = createPiAgentBridge(pi) // one agent_end listener for the extension's lifetime
 	const completionSources = createCompletionSources()

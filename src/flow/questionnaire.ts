@@ -21,6 +21,7 @@
  *  - `recommended?: boolean`  → on a literal member, marks that option `recommended`.
  */
 import { type Static, type TSchema, Type } from "typebox"
+import { SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "./output-tool-names.ts"
 import { describeSchemaViolations } from "./validation.ts"
 
 /** A selectable option for a single/multi question. */
@@ -93,34 +94,38 @@ export function questionnaireFromSchema(outputSchema: TSchema): Questionnaire {
 }
 
 /**
- * The output contract appended to every non-`asks` agent step's fresh prompt (pure). The engine parses
- * and validates the reply against this schema regardless, so stating it is not decoration — it is the
+ * The output contract appended to every non-`asks` agent step's fresh prompt (pure). The engine validates
+ * the submitted payload against this schema regardless, so stating it is not decoration — it is the
  * difference between a model that knows the shape and one that has to guess it. Kept next to
- * {@link buildAskingProtocol} because the two are the same idea, and an `asks` step's protocol already
- * embeds the schema as one arm of its union.
+ * {@link buildAskingProtocol} because the two are the same idea.
  */
 export function buildOutputProtocol(outputSchema: TSchema): string {
 	return [
-		"Reply with ONLY a JSON value and nothing else — no prose before or after, no code fences. It must",
-		"be an INSTANCE of this JSON Schema (the fields filled in), not the schema itself:",
+		`Submit your result by calling the \`${SUBMIT_RESULT_TOOL}\` tool, passing it as the \`result\` argument.`,
+		"That call is the ONLY thing read as your output — anything you write as text is ignored, so you",
+		"are free to think and explain around it.",
+		"",
+		"`result` must be an INSTANCE of this JSON Schema (the fields filled in), not the schema itself:",
 		JSON.stringify(outputSchema, null, 2),
 	].join("\n")
 }
 
 /**
- * The protocol text injected into an agent's prompt (pure). Tells the model to ask by replying with
- * ONLY `{ questions: … }` (batching questions) and to finish with ONLY `{ result: … }`, embedding
- * both the {@link QuestionnaireSchema} and the target output schema (TypeBox schemas *are* JSON Schema).
+ * The protocol text injected into an `asks` agent step's prompt (pure). Tells the model to ask by calling
+ * `submit_questions` (batching them) and to finish by calling `submit_result`, embedding both the
+ * {@link QuestionnaireSchema} and the target output schema (TypeBox schemas *are* JSON Schema).
  */
 export function buildAskingProtocol(outputSchema: TSchema): string {
 	return [
-		"When you need information from the user, reply with ONLY a JSON object of the form",
-		'{ "questions": <Questionnaire> } and nothing else. Batch as many questions as you can into a',
-		"single batch rather than asking one at a time. The Questionnaire must match this JSON Schema:",
+		"End your turn by calling exactly one of two tools. They are the ONLY thing read as your output —",
+		"anything you write as text is ignored, so you are free to think and explain around the call.",
+		"",
+		`When you need information from the user, call \`${SUBMIT_QUESTIONS_TOOL}\`. Batch as many questions as you`,
+		"can into a single call rather than asking one at a time. Its arguments must match this JSON Schema:",
 		JSON.stringify(QuestionnaireSchema, null, 2),
 		"",
-		'When you have enough information, reply with ONLY { "result": <result> }, where <result> matches',
-		"this JSON Schema:",
+		`When you have enough information, call \`${SUBMIT_RESULT_TOOL}\` instead, passing the result as its`,
+		"`result` argument, matching this JSON Schema:",
 		JSON.stringify(outputSchema, null, 2),
 	].join("\n")
 }
@@ -154,14 +159,19 @@ export function answersToOutput(outputSchema: TSchema, answers: Record<string, u
 	return result
 }
 
-/** Render collected answers as a short message to feed back into an agent's loop (spec §8.4). */
+/**
+ * Render collected answers as a short message to feed back into an agent's loop (spec §8.4).
+ *
+ * This is the LAST instruction the model reads before it responds, so it must name the same channel the
+ * engine reads — a resumed step told to reply in text submits nothing and fails.
+ */
 export function formatAnswers(answers: Record<string, unknown>): string {
 	const lines = Object.entries(answers).map(([key, value]) => `- ${key}: ${JSON.stringify(value)}`)
 	return [
 		"The user answered your questionnaire:",
 		...lines,
 		"",
-		'Continue: reply with ONLY { "result": … } if you now have enough, or ONLY { "questions": … } if you need more.',
+		`Continue: call \`${SUBMIT_RESULT_TOOL}\` if you now have enough, or \`${SUBMIT_QUESTIONS_TOOL}\` if you need more.`,
 	].join("\n")
 }
 

@@ -29,14 +29,21 @@ export interface SubagentProcess {
 }
 
 /** How a background subagent's process is started; injectable so the streaming/abort wiring is testable offline. */
-export type SubagentSpawner = (command: string, args: readonly string[]) => SubagentProcess
+export type SubagentSpawner = (command: string, args: readonly string[], env?: NodeJS.ProcessEnv) => SubagentProcess
 
 /**
  * The default spawner: a real child process with a writable stdin — the prompt goes there, never in
  * `args` (see `writePrompt` below for why) — and both output pipes ours to drain.
+ *
+ * `env` ADDS to the parent's environment rather than replacing it: a step child must keep the
+ * provider config, auth and agent-dir it inherits, and only gains the step-specific handoff on top.
  */
-export const subagentSpawner: SubagentSpawner = (command, args) =>
-	spawn(command, [...args], { shell: false, stdio: ["pipe", "pipe", "pipe"] })
+export const subagentSpawner: SubagentSpawner = (command, args, env) =>
+	spawn(command, [...args], {
+		shell: false,
+		stdio: ["pipe", "pipe", "pipe"],
+		...(env ? { env: { ...process.env, ...env } } : {}),
+	})
 
 /**
  * How much of a failing subagent's stderr to keep for its error message.
@@ -94,8 +101,9 @@ export async function runSubagent(
 	args: readonly string[],
 	prompt: string,
 	signal: AbortSignal | undefined,
+	env?: NodeJS.ProcessEnv,
 ): Promise<SubagentResult> {
-	const child = spawnSubagent(command, args)
+	const child = spawnSubagent(command, args, env)
 	const reader = createAssistantTurnReader()
 	let stderrTail = ""
 

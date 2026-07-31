@@ -92,10 +92,18 @@ import {
 	type AgentMessages,
 	lastAssistantText,
 	lastAssistantUsage,
+	lastSubmittedOutput,
 	type ModelRegistry,
 	resolveModel,
 	seedHistory,
 } from "./pi-agent-messages.ts"
+import {
+	activeToolsForStep,
+	registerStepOutputTools,
+	removeStepOutputToolSpec,
+	STEP_OUTPUT_TOOLS_ENV,
+	writeStepOutputToolSpec,
+} from "./step-output-tools.ts"
 import { runSubagent, type SubagentSpawner, subagentSpawner } from "./subagent-process.ts"
 
 export type AgentStarter = (request: AgentRequest) => AgentSession
@@ -152,6 +160,42 @@ const PERMISSION_BYPASS_FLAGS = ["--dangerously-skip-permissions", "--yolo"] as 
 
 export function inheritedPermissionArgs(argv: readonly string[] = process.argv): string[] {
 	return PERMISSION_BYPASS_FLAGS.filter((flag) => argv.includes(flag))
+}
+
+/**
+ * The `-e`/`--extension` flags the CURRENT process was launched with, which a step child needs too if it
+ * is to register this extension's output tools (step-output-tools.ts).
+ *
+ * Same allowlist discipline, and the same direction of safety, as {@link inheritedPermissionArgs}: a flag
+ * has to be in the parent's own argv to be forwarded. A harness that loaded this extension some other way
+ * (an installed package the child discovers on its own) needs nothing here; one that loaded it by path and
+ * forwards nothing gets no tools in the child, and every step under an output contract then FAILS —
+ * there is no text channel behind it, so this is a hard dependency, not a graceful degradation.
+ */
+export function inheritedExtensionArgs(argv: readonly string[] = process.argv): string[] {
+	const forwarded: string[] = []
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i]
+		if ((arg === "-e" || arg === "--extension") && i + 1 < argv.length) {
+			forwarded.push("-e", argv[i + 1] as string)
+			i++
+		} else if (arg?.startsWith("--extension=")) {
+			forwarded.push("-e", arg.slice("--extension=".length))
+		}
+	}
+	return forwarded
+}
+
+/**
+ * The handoff file's stem for ONE execution (spec §8.5).
+ *
+ * Deliberately not derived from the session file: a `resumable` step reuses one session name across every
+ * execution, so inside a `.foreach` its concurrent items would share a single handoff and
+ * `writeFileSync`'s truncate would hand a sibling an empty read. `traceSessionFile` already encodes
+ * run + path + attempt, which is exactly the identity a handoff needs.
+ */
+function stepOutputToolsStem(request: AgentRequest): string {
+	return traceSessionFile(request.workflowName, request.runId, request.path, request.attempt).replace(/\.jsonl$/, "")
 }
 
 /**
@@ -215,7 +259,11 @@ export function createPiAgentBridge(
 		const turn = inFlight
 		if (!turn) return // no in-session turn was awaiting this event (only background/isolated steps ran)
 		inFlight = undefined
-		turn.resolve({ text: lastAssistantText(event.messages), usage: lastAssistantUsage(event.messages) })
+		turn.resolve({
+			text: lastAssistantText(event.messages),
+			usage: lastAssistantUsage(event.messages),
+			submitted: lastSubmittedOutput(event.messages),
+		})
 	})
 
 	pi.on("context", (event: ContextEvent) => {
@@ -234,6 +282,11 @@ export function createPiAgentBridge(
 		}
 
 		const token = {} // this session's own identity — see `inFlight`'s doc above
+		// Captured per SESSION, not per bridge. extension.ts builds ONE bridge at extension load, so a
+		// baseline held there freezes whatever the user's tools were during the FIRST run and silently
+		// reverts anything they enable afterwards. Set only once this session actually narrows the set,
+		// so a session rejected by the cross-talk guard cannot restore over a sibling's live turn.
+		let toolBaseline: readonly string[] | undefined
 		// An answer-resume (spec §8.4) arrives with its blocked step's stored conversation — seed it into
 		// this session's outgoing LLM calls via the shared `context` handler above, for the session's whole
 		// lifetime (cleared in `dispose()`). A fresh run's `request.history` is always undefined, so the
@@ -268,6 +321,23 @@ export function createPiAgentBridge(
 						throw new Error(`no API key available for model "${request.model}"`)
 					}
 				}
+
+				// The output tools, scoped to THIS step (step-output-tools.ts). A spawned step gets them at
+				// load from the env handoff and its process ends with the step; an in-session one shares a
+				// process with every other step, so the schema is re-registered per turn AND the ACTIVE set
+				// narrowed — registration alone leaks, since pi has no unregister.
+				const spec = request.outputSchema ? { outputSchema: request.outputSchema, asks: request.asks } : undefined
+				if (spec) {
+					registerStepOutputTools(pi, spec)
+					// Filtered on capture: pi ACTIVATES a tool when it is registered, and a previous step in this
+					// session may already have registered one, so an unfiltered read would treat the framework's
+					// own tool as something the user had and hand it back on dispose.
+					toolBaseline ??= activeToolsForStep(pi.getActiveTools())
+					pi.setActiveTools(activeToolsForStep(toolBaseline, spec))
+				}
+				// A contract-free step narrows nothing: the previous step's session restored the set on
+				// dispose (the engine disposes in a `finally`), so there is nothing of ours left active.
+
 				return new Promise<AgentTurn>((resolve) => {
 					inFlight = { token, stepName: request.stepName, resolve }
 					pi.sendUserMessage(message)
@@ -281,6 +351,10 @@ export function createPiAgentBridge(
 				// (should not arise given the guard above, but dispose() must stay safe regardless, spec §2.2).
 				if (inFlight?.token === token) inFlight = undefined
 				if (activeHistory?.token === token) activeHistory = undefined
+				// Hand the session back as we found it — but only if THIS session narrowed it. A session
+				// rejected by the cross-talk guard never registered anything, and restoring from it would
+				// strip the tools out from under the turn that is genuinely in flight.
+				if (toolBaseline !== undefined) pi.setActiveTools(activeToolsForStep(toolBaseline))
 			},
 		}
 	}
@@ -315,15 +389,17 @@ function backgroundSession(
 			// Permission posture is inherited, not defaulted (see `inheritedPermissionArgs`): a subagent of a
 			// run that bypasses permissions must bypass them too, or it re-arms the classifier and spends its
 			// budget arguing with a prompt no one is there to answer.
+			const session = sessionPath(sessionsDir, request)
 			const args = [
 				"--mode",
 				"json",
 				"-p",
 				"--session",
-				sessionPath(sessionsDir, request),
+				session,
 				"--name",
 				stepSessionName(request.workflowName, request.path, request.runId),
 				...inheritedPermissionArgs(),
+				...(request.outputSchema ? inheritedExtensionArgs() : []),
 			]
 			if (request.model) {
 				// Resolved (and rejected) up front, same as the interactive path: a typo'd model should fail
@@ -337,12 +413,31 @@ function backgroundSession(
 			// harness reads its prompt from stdin and, with a piped (non-TTY) stdin, silently ignores a
 			// positional argument — verified against a real `pi` binary (stdin: full reply, positional arg: nothing).
 
+			// The step's output contract, handed to the child so it can register `submit_result` typed by it
+			// (step-output-tools.ts). A tool call cannot be displaced by a later message, which is the whole
+			// point. If the child never registers the tool the step FAILS — there is no text channel behind
+			// it — so the handoff is written per EXECUTION, never per session file (see stepOutputToolsStem).
+			const handoff = request.outputSchema
+				? writeStepOutputToolSpec(sessionsDir, stepOutputToolsStem(request), {
+						outputSchema: request.outputSchema,
+						asks: request.asks,
+					})
+				: undefined
+			const env = handoff ? { [STEP_OUTPUT_TOOLS_ENV]: handoff } : undefined
+
 			const invocation = invocationResolver(args)
 			// The attempt's signal kills the child (spec §8.8/§9.4). Without that a cancelled run reports
 			// itself stopped while this process keeps spending tokens and writing files, a wall-time budget
 			// fails the attempt but orphans the process it was supposed to bound, and — with no budget, the
 			// default — an unresponsive subagent hangs the run with nothing able to interrupt it.
-			const result = await runSubagent(spawnSubagent, invocation.command, invocation.args, message, request.signal)
+			let result: Awaited<ReturnType<typeof runSubagent>>
+			try {
+				result = await runSubagent(spawnSubagent, invocation.command, invocation.args, message, request.signal, env)
+			} finally {
+				// The child read it at load, so the handoff has no readers left. One file per step per attempt
+				// would otherwise accumulate beside the user's own sessions for the life of the project.
+				if (handoff) removeStepOutputToolSpec(handoff)
+			}
 			if (request.signal?.aborted) {
 				throw new Error(`background subagent step "${request.stepName}" was aborted`)
 			}

@@ -13,12 +13,14 @@ export interface CreateAgentStepOptions<TInputSchema extends TSchema | undefined
 	/** TypeBox schema for the step's input. Omit if the prompt ignores upstream output (spec §3.6). */
 	input?: TInputSchema
 	/**
-	 * TypeBox schema the agent's final text is parsed to JSON and validated against.
+	 * TypeBox schema the agent's submitted result is validated against. The step reports by calling
+	 * `submit_result`; assistant text is never read as output.
 	 *
-	 * Omit it for a step that ACTS rather than REPORTS: no contract is injected, nothing is validated, and
+	 * Omit it for a step that ACTS rather than REPORTS: no contract is injected, no tool is offered, and
 	 * the raw final text becomes the output. Use that when the step's product is its side effects and
-	 * something else establishes whether they happened — requiring JSON there only adds a way to fail at
-	 * work that already succeeded. Required when `asks` is set (the questionnaire is derived from it).
+	 * something else establishes whether they happened — requiring a structured reply there only adds a
+	 * way to fail at work that already succeeded. Required when `asks` is set (the questionnaire is
+	 * derived from it).
 	 */
 	output?: TOutputSchema
 	/** Model override in `provider/modelId` form. Falls back to the workflow default, then the session (spec §9.5). */

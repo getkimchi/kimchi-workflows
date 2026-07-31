@@ -4,7 +4,7 @@ import summarizeWorkflow, { summarySchema } from "../examples/summarize.workflow
 import { runWorkflow } from "../src/engine/run-workflow.ts"
 import type { AgentRequest, AgentSession, RunEvent } from "../src/engine/types.ts"
 import { createTestHost } from "./helpers.ts"
-import { callKimi, createKimiAgentStarter, resolveKimiApiKey, toModelId } from "./kimi-agent.ts"
+import { createKimiAgentStarter, resolveKimiApiKey } from "./kimi-agent.ts"
 
 /**
  * Real E2E for the agent-step seam (Phase 4a/4b): drives agent-step workflows through the engine
@@ -33,22 +33,26 @@ describe.skipIf(!apiKey)("agent step E2E (kimchi-dev/kimi-k2.7)", () => {
 	it("recovers via real in-session steering after an injected invalid reply", async () => {
 		if (!apiKey) throw new Error("unreachable: skipIf guards this")
 
-		// Deterministically force one steer: the first reply is garbage; the correction turn (which the
-		// engine builds with the schema) goes to the REAL model, proving steering drives a real repair.
+		// Deterministically force one steer: the first turn submits nothing; the correction turn (which the
+		// engine builds with the schema) goes to the REAL model with the real tools, proving steering drives
+		// a real repair through the tool channel.
 		let realCalls = 0
+		const real = createKimiAgentStarter(apiKey)
 		const startAgent = (request: AgentRequest): AgentSession => {
-			const modelId = toModelId(request.model)
+			const session = real(request)
 			let turn = 0
 			return {
 				async sendAndAwaitEnd(message: string) {
 					if (turn++ === 0) return { text: "sorry, I can't do JSON" }
 					realCalls += 1
-					return { text: await callKimi(apiKey, modelId, message) }
+					return session.sendAndAwaitEnd(message)
 				},
 				getConversation() {
-					return []
+					return session.getConversation()
 				},
-				dispose() {},
+				dispose() {
+					session.dispose()
+				},
 			}
 		}
 

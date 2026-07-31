@@ -28,10 +28,14 @@ function fakePi(): {
 	fireAgentEnd: (text: string) => void
 	fireContext: (messages: unknown[]) => ContextResult
 	sentMessages: string[]
+	registeredTools: string[]
+	activeTools: () => string[]
 } {
 	let endHandler: ((event: AgentEndEvent) => void) | undefined
 	let contextHandler: ((event: { type: "context"; messages: unknown[] }) => ContextResult) | undefined
 	const sentMessages: string[] = []
+	const registeredTools: string[] = []
+	let activeTools: string[] = ["bash", "read"]
 	const pi = {
 		on: (event: string, h: (event: AgentEndEvent | { type: "context"; messages: unknown[] }) => unknown) => {
 			if (event === "agent_end") endHandler = h as (event: AgentEndEvent) => void
@@ -41,10 +45,19 @@ function fakePi(): {
 			sentMessages.push(message)
 		},
 		setModel: async () => true,
+		registerTool: (tool: { name: string }) => {
+			registeredTools.push(tool.name)
+		},
+		getActiveTools: () => [...activeTools],
+		setActiveTools: (names: string[]) => {
+			activeTools = [...names]
+		},
 	} as unknown as ExtensionAPI
 
 	return {
 		pi,
+		registeredTools,
+		activeTools: () => [...activeTools],
 		fireAgentEnd: (text: string) => {
 			if (!endHandler) throw new Error("test bug: no agent_end handler was registered")
 			endHandler({
