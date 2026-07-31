@@ -245,7 +245,6 @@ const generate = createAgentStep({
 			"wrote (`tsc --noEmit`, `biome check`) and fix anything they report before replying. If neither",
 			"tool is available, do not pretend otherwise — say so plainly in `verification`.",
 			"",
-			'Reply with ONLY JSON of the form {"source": "<the full file contents>", "verification": "<what you ran and what it said>"}.',
 			...retry,
 		].join("\n")
 	},

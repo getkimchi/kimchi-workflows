@@ -13,6 +13,7 @@
  * one is for workflow authors, who should not have to know where a session begins.
  */
 
+import { SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "../engine/output-tools.ts"
 import type { AgentRequest, AgentSession, ConversationMessage } from "../engine/types.ts"
 import type { Questionnaire } from "../flow/questionnaire.ts"
 import type { AgentStep, WorkflowNode } from "../flow/types.ts"
@@ -23,32 +24,36 @@ import { forEachNode } from "../flow/types.ts"
  * {@link usage} — never written by hand, so the wire encoding stays an implementation detail.
  */
 export type AgentTurnScript =
-	/** A `{questions}` reply — the run blocks. Only valid for a step declared `asks: true`. */
-	| { kind: "ask"; questionnaire: Questionnaire; totalTokens?: number }
-	/** The step's success payload. Encoded bare or as `{result}` depending on the step's `asks` flag. */
-	| { kind: "reply"; value: unknown; totalTokens?: number }
-	/** Arbitrary text, sent through unchanged — drives the in-session output-steering repair (spec §9.2). */
+	/** A `submit_*` tool call — the only channel a step under a contract reports through. */
+	| { kind: "submit"; tool: string; args: Record<string, unknown>; trailingText?: string; totalTokens?: number }
+	/** Text and no submission — drives the in-session output-steering repair (spec §9.2). */
 	| { kind: "raw"; text: string; totalTokens?: number }
 	/** A transport failure — drives the step's outer retry policy (spec §9.1). */
 	| { kind: "throws"; error: Error }
 
-/** Script a `{questions}` turn: the agent asks, and the run blocks (spec §10.1). */
-export function ask(questionnaire: Questionnaire): AgentTurnScript {
-	return { kind: "ask", questionnaire }
+/** Script the agent asking: a `submit_questions` call, on which the run blocks (spec §10.1). */
+export function ask(questionnaire: Questionnaire, trailingText?: string): AgentTurnScript {
+	return { kind: "submit", tool: SUBMIT_QUESTIONS_TOOL, args: { ...questionnaire }, trailingText }
 }
 
 /**
- * Script the step's success payload. The encoding follows the step: a plain agent step expects bare
- * JSON, an `asks: true` step expects `{ result: … }` — the double reads the step definition and wraps
- * accordingly, so one builder serves both and neither can be mismatched to the wrong step kind.
+ * Script the step's success payload: a `submit_result` call carrying `value`.
+ *
+ * `trailingText` is prose the model wrote AFTER submitting — what an injected harness nudge leaves
+ * behind. It must never be mistaken for the output, which is the point of submitting through a tool.
  */
-export function reply(value: unknown): AgentTurnScript {
-	return { kind: "reply", value }
+export function reply(value: unknown, trailingText?: string): AgentTurnScript {
+	return { kind: "submit", tool: SUBMIT_RESULT_TOOL, args: { result: value }, trailingText }
 }
 
-/** Script an unparseable/invalid reply, to exercise output steering (spec §9.2). */
+/** Script a turn that says something and submits nothing, to exercise output steering (spec §9.2). */
 export function raw(text: string): AgentTurnScript {
 	return { kind: "raw", text }
+}
+
+/** Script an arbitrary tool call by name, for contract tests (an unrelated tool must never be read as output). */
+export function submitRaw(tool: string, args: Record<string, unknown>, trailingText?: string): AgentTurnScript {
+	return { kind: "submit", tool, args, trailingText }
 }
 
 /** Script a thrown transport error, to exercise the retry policy (spec §9.1). */
@@ -101,7 +106,7 @@ export function createAgentDouble(nodes: readonly WorkflowNode[], scripts: Agent
 				`agent script for "${stepName}": the workflow has no agent step with that name (agent steps: ${[...agentSteps.keys()].join(", ") || "none"})`,
 			)
 		}
-		const asked = turns.findIndex((turn) => turn.kind === "ask")
+		const asked = turns.findIndex((turn) => turn.kind === "submit" && turn.tool === SUBMIT_QUESTIONS_TOOL)
 		if (asked !== -1 && !step.asks) {
 			throw new Error(
 				`agent script for "${stepName}": ask() at index ${asked} requires a step declared asks: true — a plain agent step can never block`,
@@ -138,9 +143,18 @@ export function createAgentDouble(nodes: readonly WorkflowNode[], scripts: Agent
 				}
 				if (turn.kind === "throws") throw turn.error
 
-				const text = encodeTurn(step, turn)
-				conversation.push({ role: "assistant", content: text })
-				return turn.totalTokens === undefined ? { text } : { text, usage: { totalTokens: turn.totalTokens } }
+				const usage = turn.totalTokens === undefined ? undefined : { totalTokens: turn.totalTokens }
+
+				// A submitted payload rides the transcript, not the text: the trailing prose is what a real
+				// harness nudge leaves behind, and must not be mistaken for the step's answer.
+				if (turn.kind === "submit") {
+					const text = turn.trailingText ?? ""
+					if (text) conversation.push({ role: "assistant", content: text })
+					return { text, usage, submitted: { tool: turn.tool, arguments: turn.args } }
+				}
+
+				conversation.push({ role: "assistant", content: turn.text })
+				return { text: turn.text, usage }
 			},
 			getConversation() {
 				return conversation
@@ -160,19 +174,6 @@ export function createAgentDouble(nodes: readonly WorkflowNode[], scripts: Agent
 				remaining: queues.get(stepName)?.length ?? 0,
 			}
 		},
-	}
-}
-
-/** Encode a scripted turn as the reply text the engine will parse (spec §9.2/§10.1). */
-function encodeTurn(step: AgentStep, turn: Exclude<AgentTurnScript, { kind: "throws" }>): string {
-	switch (turn.kind) {
-		case "raw":
-			return turn.text
-		case "ask":
-			return JSON.stringify({ questions: turn.questionnaire })
-		case "reply":
-			// A Q&A step's reply is the `{result} | {questions}` union; a plain step's is the bare output.
-			return JSON.stringify(step.asks ? { result: turn.value } : turn.value)
 	}
 }
 

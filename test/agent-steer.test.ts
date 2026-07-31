@@ -75,7 +75,7 @@ describe("output steering (Phase 4b, spec §9.2)", () => {
 		expect(steerEvents(await store.loadEvents(result.runId))).toHaveLength(0)
 	})
 
-	it("steers unparseable (non-JSON) replies too, then completes", async () => {
+	it("steers a turn that submitted nothing, then completes", async () => {
 		const workflow = createWorkflow({ name: "steer-nonjson" }).then(agentStepWith()).commit()
 		const agent = scriptedAgent([["I cannot produce JSON, sorry.", valid]])
 		const { host, store } = createTestHost({ startAgent: agent.startAgent })
@@ -85,7 +85,7 @@ describe("output steering (Phase 4b, spec §9.2)", () => {
 		expect(result.status).toBe("completed")
 		const steers = steerEvents(await store.loadEvents(result.runId))
 		expect(steers).toHaveLength(1)
-		expect(steers[0]?.violation).toMatch(/not valid JSON/)
+		expect(steers[0]?.violation).toMatch(/without calling submit_result/)
 	})
 
 	it("falls back to the repeat policy once repairs are exhausted, when the step declares retry (spec §9.2/§9.3)", async () => {
@@ -144,10 +144,10 @@ describe("output steering (Phase 4b, spec §9.2)", () => {
 	})
 
 	describe("buildCorrectionMessage", () => {
-		it("includes the violation text, the JSON Schema, and an ONLY-JSON instruction", () => {
+		it("includes the violation text, the JSON Schema, and the submit instruction", () => {
 			const message = buildCorrectionMessage(outputSchema, 'expected required property "keywords"')
 			expect(message).toMatch(/expected required property "keywords"/) // the violation
-			expect(message).toMatch(/ONLY a JSON value/i) // the instruction
+			expect(message).toMatch(/call submit_result/i) // the instruction
 			// The schema object itself is embedded (round-trips to the same schema).
 			const schemaJson = message.slice(message.indexOf("{"))
 			expect(JSON.parse(schemaJson)).toEqual(JSON.parse(JSON.stringify(outputSchema)))

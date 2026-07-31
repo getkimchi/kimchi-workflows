@@ -267,6 +267,7 @@ describe("createAssistantTurnReader", () => {
 		// grows with the count (see pi-agent-background.test.ts for the measured version of that claim).
 		const noise = Array.from({ length: 20_000 }, (_, i) => end("assistant", `turn ${i}`, i))
 		const ndjson = [...noise, end("assistant", "last", 9)].join("\n")
+
 		expect(readAll(ndjson)).toEqual({ text: "last", usage: { totalTokens: 9 } })
 	})
 })

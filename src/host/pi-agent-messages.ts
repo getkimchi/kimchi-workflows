@@ -4,7 +4,8 @@
  * this module pulls no PI/host/network code.
  */
 import type { AgentEndEvent, ExtensionContext } from "@earendil-works/pi-coding-agent"
-import type { ConversationMessage, TokenUsage } from "../engine/types.ts"
+import { isOutputToolName } from "../engine/output-tools.ts"
+import type { ConversationMessage, SubmittedOutput, TokenUsage } from "../engine/types.ts"
 
 /** The PI model registry (from the extension context) — referenced structurally for `find`. */
 export type ModelRegistry = ExtensionContext["modelRegistry"]
@@ -21,14 +22,28 @@ export function resolveModel(
 	return modelRegistry.find(modelString.slice(0, slash), modelString.slice(slash + 1))
 }
 
+/**
+ * Whether `value` is an assistant message this module can read.
+ *
+ * `"role" in value` THROWS on a primitive, and every scan below runs over a child process's stdout or an
+ * `agent_end` payload — neither is trusted input. A throw on the in-session path happens while building
+ * the value a turn resolves with (`inFlight` already cleared, so the turn never settles); on the
+ * background path it escapes a stream `data` listener as an uncaughtException. Both hang the run.
+ */
+function isAssistantMessage(value: unknown): value is { content: unknown; usage?: { totalTokens?: unknown } } {
+	return typeof value === "object" && value !== null && (value as { role?: unknown }).role === "assistant"
+}
+
 /** The last assistant message's concatenated text content (`""` when there is no assistant message). */
 export function lastAssistantText(messages: AgentMessages): string {
+	if (!Array.isArray(messages)) return ""
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i]
-		if (message && "role" in message && message.role === "assistant") {
+		if (isAssistantMessage(message)) {
+			if (!Array.isArray(message.content)) return ""
 			let text = ""
-			for (const part of message.content) {
-				if (part.type === "text") text += part.text
+			for (const part of message.content as { type?: string; text?: string }[]) {
+				if (part?.type === "text" && part.text) text += part.text
 			}
 			return text
 		}
@@ -36,12 +51,66 @@ export function lastAssistantText(messages: AgentMessages): string {
 	return ""
 }
 
-/** The last assistant message's token usage (chat-completions `usage.totalTokens`), for token budgeting (spec §9.3). */
-export function lastAssistantUsage(messages: AgentMessages): TokenUsage | undefined {
+/**
+ * The last output-tool call in a conversation, or undefined if there was none.
+ *
+ * Last-write-wins: a model that submits twice has its final submission taken. Scanning backwards is
+ * what makes that free.
+ */
+export function lastSubmittedOutput(messages: AgentMessages): SubmittedOutput | undefined {
+	if (!Array.isArray(messages)) return undefined
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i]
-		if (message && "role" in message && message.role === "assistant") {
-			return { totalTokens: message.usage.totalTokens }
+		if (!isAssistantMessage(message)) continue
+		const submitted = submittedFromMessage(message)
+		if (submitted) return submitted
+	}
+	return undefined
+}
+
+/** The last output-tool call within a single assistant message (a turn may carry several tool calls). */
+export function submittedFromMessage(message: AgentMessages[number]): SubmittedOutput | undefined {
+	if (!isAssistantMessage(message)) return undefined
+	const content = message.content
+	if (!Array.isArray(content)) return undefined
+	for (let i = content.length - 1; i >= 0; i--) {
+		const part = content[i] as { type?: string; name?: string; arguments?: unknown } | undefined
+		if (part?.type !== "toolCall" || !part.name || !isOutputToolName(part.name)) continue
+		return { tool: part.name, arguments: toArguments(part.arguments) }
+	}
+	return undefined
+}
+
+/**
+ * Normalise a tool call's arguments to an object.
+ *
+ * `ToolCall.arguments` is typed as an object, but that is a property of the providers pi has been used
+ * with, not a guarantee: an OpenAI-compatible gateway may pass the raw JSON string through. Dropping it
+ * would turn every submission into "the turn ended without calling submit_result" — a violation blaming
+ * the model for the transport's shape.
+ */
+function toArguments(args: unknown): Record<string, unknown> {
+	if (typeof args === "object" && args !== null) return args as Record<string, unknown>
+	if (typeof args === "string") {
+		try {
+			const parsed = JSON.parse(args)
+			if (typeof parsed === "object" && parsed !== null) return parsed as Record<string, unknown>
+		} catch {
+			// An unparseable argument string is reported as an empty submission, which the engine turns
+			// into a named violation rather than a silent non-submission.
+		}
+	}
+	return {}
+}
+
+/** The last assistant message's token usage (chat-completions `usage.totalTokens`), for token budgeting (spec §9.3). */
+export function lastAssistantUsage(messages: AgentMessages): TokenUsage | undefined {
+	if (!Array.isArray(messages)) return undefined
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i]
+		if (isAssistantMessage(message)) {
+			const total = message.usage?.totalTokens
+			return typeof total === "number" ? { totalTokens: total } : undefined
 		}
 	}
 	return undefined
@@ -82,12 +151,19 @@ function isMessageEndEvent(value: unknown): value is { type: "message_end"; mess
 	)
 }
 
+/** What the streaming reader recovers from a subagent's stdout — the {@link AgentTurn} fields a background step can supply. */
+export interface ReadAssistantTurn {
+	text: string
+	usage?: TokenUsage
+	submitted?: SubmittedOutput
+}
+
 /** An incremental reader over a subagent's NDJSON stdout — see {@link createAssistantTurnReader}. */
 export interface AssistantTurnReader {
 	/** Feed the next decoded stdout chunk. Complete lines are read and dropped; a partial one is held. */
 	push(chunk: string): void
 	/** Read whatever partial line is left and return the last assistant turn seen (empty if there was none). */
-	end(): { text: string; usage?: TokenUsage }
+	end(): ReadAssistantTurn
 }
 
 /**
@@ -122,6 +198,8 @@ export interface AssistantTurnReader {
 export function createAssistantTurnReader(): AssistantTurnReader {
 	let pending = "" // the tail of the last chunk, up to the next newline — never a whole stream
 	let last: { text: string; usage?: TokenUsage } | undefined
+	// Replaced, never appended — last write wins, and one submission costs the same as any number.
+	let submitted: SubmittedOutput | undefined
 
 	const readLine = (line: string): void => {
 		const trimmed = line.trim()
@@ -134,10 +212,20 @@ export function createAssistantTurnReader(): AssistantTurnReader {
 		}
 		if (!isMessageEndEvent(event)) return
 		const message = event.message as AgentMessages[number]
-		if (!(message && "role" in message && message.role === "assistant")) return
-		// Decode to the two fields we keep and let the parsed message go — replacing the previous last,
-		// never appending to a list.
-		last = { text: lastAssistantText([message]), usage: lastAssistantUsage([message]) }
+		if (!isAssistantMessage(message)) return
+		// Decode to the fields we keep and let the parsed message go — never retaining the message itself.
+		const text = lastAssistantText([message])
+		const usage = lastAssistantUsage([message])
+		// A tool-call-only message contributes its usage but NOT a text: carrying the previous message's
+		// text forward would hand a contract-free step stale mid-turn prose as its output (that step's
+		// output IS `turn.text`).
+		if (text) {
+			last = { text, usage }
+		} else if (usage) {
+			last = { text: "", usage }
+		}
+		const call = submittedFromMessage(message)
+		if (call) submitted = call
 	}
 
 	return {
@@ -150,13 +238,13 @@ export function createAssistantTurnReader(): AssistantTurnReader {
 			}
 			if (start > 0) pending = pending.slice(start)
 		},
-		end(): { text: string; usage?: TokenUsage } {
+		end(): ReadAssistantTurn {
 			if (pending) {
 				const rest = pending
 				pending = ""
 				readLine(rest)
 			}
-			return last ?? { text: "", usage: undefined }
+			return { text: last?.text ?? "", usage: last?.usage, submitted }
 		},
 	}
 }

@@ -30,23 +30,6 @@ describe("agent step (Phase 4a, fake host)", () => {
 		expect(agent.disposed).toBe(1)
 	})
 
-	it("tolerantly parses fenced JSON wrapped in prose", async () => {
-		const text = [
-			"Sure! Here is the summary:",
-			"```json",
-			'{ "summary": "ok", "keywords": ["x", "y"] }',
-			"```",
-			"Hope that helps!",
-		].join("\n")
-		const agent = scriptedAgent([[text]])
-		const { host } = createTestHost({ startAgent: agent.startAgent })
-
-		const result = await runWorkflow(workflow, undefined, host)
-
-		expect(result.status).toBe("completed")
-		expect(result.output).toEqual({ summary: "ok", keywords: ["x", "y"] })
-	})
-
 	it("retries a thrown transport error with a fresh session, then succeeds", async () => {
 		const flaky = createAgentStep({
 			name: "summarize",

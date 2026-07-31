@@ -1,4 +1,34 @@
-import type { AgentRequest, AgentSession } from "../src/engine/types.ts"
+import { SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "../src/engine/output-tools.ts"
+import type { AgentRequest, AgentSession, SubmittedOutput } from "../src/engine/types.ts"
+
+/**
+ * How a scripted string reaches the engine, now that a step under a contract reports ONLY through
+ * `submit_result`/`submit_questions` (engine/output-tools.ts).
+ *
+ * A string that parses as JSON is delivered as a SUBMISSION — the same payload the old text protocol
+ * encoded, so a test that scripts `'{"summary":"x"}'` still means "the step produced that output".
+ * Anything else is delivered as text with no submission, which is what drives output steering. An
+ * `asks` step keeps the old union's spelling: `{questions}` becomes a `submit_questions` call and
+ * `{result}` a `submit_result` one, so those tests read unchanged.
+ */
+function submissionFor(text: string, asks: boolean | undefined): SubmittedOutput | undefined {
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(text)
+	} catch {
+		return undefined
+	}
+	if (asks && typeof parsed === "object" && parsed !== null) {
+		const record = parsed as Record<string, unknown>
+		// The old union nested the WHOLE questionnaire under `questions`, so that value is the tool's
+		// argument object, not a field of it.
+		if ("questions" in record) {
+			return { tool: SUBMIT_QUESTIONS_TOOL, arguments: record.questions as Record<string, unknown> }
+		}
+		if ("result" in record) return { tool: SUBMIT_RESULT_TOOL, arguments: { result: record.result } }
+	}
+	return { tool: SUBMIT_RESULT_TOOL, arguments: { result: parsed } }
+}
 
 /** A scripted turn: a plain string reply, a thrown `Error`, or a reply with token usage for budgeting. */
 export type ScriptedTurn = string | Error | { text: string; totalTokens: number }
@@ -75,7 +105,10 @@ export function scriptedAgent(sessionScripts: readonly (readonly ScriptedTurn[])
 					if (response instanceof Error) throw response
 					const text = typeof response === "string" ? response : response.text
 					conversation.push({ role: "assistant", content: text })
-					return typeof response === "string" ? { text } : { text, usage: { totalTokens: response.totalTokens } }
+					const submitted = submissionFor(text, request.asks)
+					return typeof response === "string"
+						? { text, submitted }
+						: { text, submitted, usage: { totalTokens: response.totalTokens } }
 				} finally {
 					// Every exit path, including a scripted transport error: a turn that threw is no longer in
 					// flight, and the retry that follows opens a fresh session PI would happily accept.

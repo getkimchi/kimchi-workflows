@@ -1,6 +1,12 @@
 import { readFileSync } from "node:fs"
 import path from "node:path"
-import type { AgentRequest, AgentSession, AgentTurn } from "../src/engine/types.ts"
+import {
+	SUBMIT_QUESTIONS_TOOL,
+	SUBMIT_RESULT_TOOL,
+	submitQuestionsParameters,
+	submitResultParameters,
+} from "../src/engine/output-tools.ts"
+import type { AgentRequest, AgentSession, AgentTurn, SubmittedOutput } from "../src/engine/types.ts"
 
 /**
  * Shared helpers for the gated integration tests: resolve the kimchi API key and build a real
@@ -31,6 +37,44 @@ interface ChatMessage {
 	content: string
 }
 
+/** An OpenAI-shaped tool definition, as the gateway expects it. */
+interface ChatTool {
+	type: "function"
+	function: { name: string; description: string; parameters: unknown }
+}
+
+/**
+ * The output tools this step may call, in the gateway's own shape.
+ *
+ * A step under a contract reports ONLY through these (engine/output-tools.ts), so the integration
+ * tests have to offer them for real — the gateway is where the schema is actually enforced, which is
+ * the property these tests exist to check against a live model.
+ */
+function outputTools(request: AgentRequest): ChatTool[] | undefined {
+	if (!request.outputSchema) return undefined
+	const tools: ChatTool[] = [
+		{
+			type: "function",
+			function: {
+				name: SUBMIT_RESULT_TOOL,
+				description: "Submit this step's result as the `result` argument.",
+				parameters: submitResultParameters(request.outputSchema),
+			},
+		},
+	]
+	if (request.asks) {
+		tools.push({
+			type: "function",
+			function: {
+				name: SUBMIT_QUESTIONS_TOOL,
+				description: "Ask the user for information instead of submitting a result. Batch every question into one call.",
+				parameters: submitQuestionsParameters(),
+			},
+		})
+	}
+	return tools
+}
+
 /**
  * A `startAgent` backed by real kimi chat completions. The gateway is stateless, so each turn sends
  * the FULL accumulated conversation (seeded with `history` on a resumed session) — this is what lets
@@ -43,9 +87,10 @@ export function createKimiAgentStarter(apiKey: string): (request: AgentRequest) 
 		return {
 			async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
 				conversation.push({ role: "user", content: message })
-				const { text, totalTokens } = await callKimiChat(apiKey, modelId, conversation)
-				conversation.push({ role: "assistant", content: text })
-				return { text, usage: totalTokens === undefined ? undefined : { totalTokens } }
+				const { text, submitted, totalTokens } = await callKimiChat(apiKey, modelId, conversation, outputTools(request))
+				// The submission is echoed into the conversation so a steering repair sees what it is correcting.
+				conversation.push({ role: "assistant", content: submitted ? JSON.stringify(submitted.arguments) : text })
+				return { text, submitted, usage: totalTokens === undefined ? undefined : { totalTokens } }
 			},
 			getConversation() {
 				return conversation
@@ -57,29 +102,48 @@ export function createKimiAgentStarter(apiKey: string): (request: AgentRequest) 
 	}
 }
 
-/** One-shot single-user-message call returning just the text (used by the steering integration test). */
-export async function callKimi(apiKey: string, modelId: string, message: string): Promise<string> {
-	return (await callKimiChat(apiKey, modelId, [{ role: "user", content: message }])).text
-}
-
 export async function callKimiChat(
 	apiKey: string,
 	modelId: string,
 	messages: readonly ChatMessage[],
-): Promise<{ text: string; totalTokens?: number }> {
+	tools?: readonly ChatTool[],
+): Promise<{ text: string; submitted?: SubmittedOutput; totalTokens?: number }> {
 	const response = await fetch(KIMI_CHAT_URL, {
 		method: "POST",
 		headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-		body: JSON.stringify({ model: modelId, messages, temperature: 0 }),
+		body: JSON.stringify({ model: modelId, messages, temperature: 0, ...(tools?.length ? { tools } : {}) }),
 	})
 	if (!response.ok) {
 		throw new Error(`kimi gateway HTTP ${response.status}: ${await response.text()}`)
 	}
 	const data = (await response.json()) as {
-		choices?: Array<{ message?: { content?: string } }>
+		choices?: Array<{
+			message?: { content?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> }
+		}>
 		usage?: { total_tokens?: number }
 	}
-	return { text: data.choices?.[0]?.message?.content ?? "", totalTokens: data.usage?.total_tokens }
+	const message = data.choices?.[0]?.message
+	return {
+		text: message?.content ?? "",
+		submitted: lastToolCall(message?.tool_calls),
+		totalTokens: data.usage?.total_tokens,
+	}
+}
+
+/** The last output-tool call in a response — last write wins, exactly as the host readers do. */
+function lastToolCall(calls: Array<{ function?: { name?: string; arguments?: string } }> | undefined) {
+	if (!calls) return undefined
+	for (let i = calls.length - 1; i >= 0; i--) {
+		const name = calls[i]?.function?.name
+		if (name !== SUBMIT_RESULT_TOOL && name !== SUBMIT_QUESTIONS_TOOL) continue
+		try {
+			const args = JSON.parse(calls[i]?.function?.arguments ?? "{}") as Record<string, unknown>
+			return { tool: name, arguments: args }
+		} catch {
+			return { tool: name, arguments: {} }
+		}
+	}
+	return undefined
 }
 
 export function toModelId(model: string | undefined): string {

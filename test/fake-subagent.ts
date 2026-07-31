@@ -111,6 +111,8 @@ export interface SpawnRecord {
 	readonly command: string
 	readonly args: readonly string[]
 	readonly child: FakeSubagent
+	/** Extra environment the bridge asked for — the step's output-tool handoff, when it declared a schema. */
+	readonly env?: NodeJS.ProcessEnv
 }
 
 /**
@@ -124,9 +126,9 @@ export function fakeSubagentSpawner(
 	options: { ignores?: readonly NodeJS.Signals[]; stdinFails?: Error } = {},
 ): { spawn: SubagentSpawner; calls: SpawnRecord[] } {
 	const calls: SpawnRecord[] = []
-	const spawn: SubagentSpawner = (command, args) => {
+	const spawn: SubagentSpawner = (command, args, env) => {
 		const child = new FakeSubagent(options)
-		const call: SpawnRecord = { command, args, child }
+		const call: SpawnRecord = { command, args, child, env }
 		calls.push(call)
 		queueMicrotask(() => void run(child, call))
 		return child

@@ -4,12 +4,19 @@
  * suspension (spec §10). Pure w.r.t. the engine boundary: all agent/network coupling is behind
  * `host.startAgent`; all delay (backoff + budget timers) is `host.sleep`.
  */
-import { buildAskingProtocol, buildOutputProtocol, formatAnswers, type Questionnaire } from "../flow/questionnaire.ts"
+import {
+	buildAskingProtocol,
+	buildOutputProtocol,
+	formatAnswers,
+	type Questionnaire,
+	QuestionnaireSchema,
+} from "../flow/questionnaire.ts"
 import type { AgentStep, FunctionStep, RetryPolicy, RunContext, StepLogger } from "../flow/types.ts"
 import { describeSchemaViolations } from "../flow/validation.ts"
-import { buildCorrectionMessage, buildQaSchema, validateAgentOutput, validateQaOutput } from "./agent-output.ts"
+import { buildCorrectionMessage } from "./agent-output.ts"
 import { createRunContext, createStepLogger, iso, type RunState, type StepOutcome } from "./context.ts"
 import type { NodePath } from "./node-path.ts"
+import { readSubmittedPayload, SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "./output-tools.ts"
 import type { AgentTurn, HostPort, RetryReason } from "./types.ts"
 
 /** Default in-session output-steering budget (spec §9.2) when an agent step declares none. */
@@ -326,8 +333,9 @@ async function runFunctionAttempt(
  * an answer-continuation of the same attempt — zero for a fresh one); exceeding `maxTokens` → retryable
  * `budget-exceeded` (§9.3). A Q&A `{questions}` → `blocked` (§10); transport error → `retryable`.
  *
- * When `asks`, the framework owns the questionnaire schema: the reply union is `{result}|{questions}`
- * and the asking protocol is auto-injected into the fresh prompt (so the author's prompt is task-only).
+ * When `asks`, the framework owns the questionnaire schema: the step submits EITHER tool, and which one
+ * it called decides result-vs-block. The asking protocol is auto-injected into the fresh prompt, so the
+ * author's prompt stays task-only.
  *
  * **Exhausted repairs are `retryable`, not fatal (spec §9.2/§9.3).** "Only when repairs are exhausted
  * does the attempt FAIL and the repeat policy apply" — a fresh session (a genuine retry, §9.1) can
@@ -365,7 +373,7 @@ async function runAgentSession(
 	// cannot be wrong (spec §2.2 — it acts rather than reports).
 	const noSteering = step.background === true || isolated || step.outputSchema === undefined
 	const maxRepairs = noSteering ? 0 : Math.max(0, step.maxOutputRepairs ?? DEFAULT_MAX_OUTPUT_REPAIRS)
-	const steerSchema = step.outputSchema && (step.asks ? buildQaSchema(step.outputSchema) : step.outputSchema)
+	const steerSchema = step.outputSchema
 	const history = entry.kind === "answer" ? entry.conversation : undefined
 	// `resumeKey` defaults to the step's own name: every execution of THIS step continues the same
 	// conversation, which is what makes a round-two worker pick up where round one was cut off (spec
@@ -386,6 +394,9 @@ async function runAgentSession(
 		background: step.background,
 		isolated,
 		resumeKey: resolveResumeKey(step),
+		// Handed over so a host running this out-of-process can register `submit_result` typed by it there.
+		outputSchema: step.outputSchema,
+		asks: step.asks,
 		signal,
 	})
 
@@ -420,7 +431,7 @@ async function runAgentSession(
 				}
 			}
 
-			const check = checkAgentReply(step, turn.text)
+			const check = checkAgentTurn(step, turn)
 			if (check.ok) {
 				if (check.kind === "questions") {
 					// Chain onto whatever conversation SEEDED this attempt (spec §8.4): an answer-resume's session
@@ -447,7 +458,7 @@ async function runAgentSession(
 					violation: lastViolation,
 					at: iso(host),
 				})
-				message = buildCorrectionMessage(steerSchema, lastViolation)
+				message = buildCorrectionMessage(steerSchema, lastViolation, step.asks === true)
 				continue
 			}
 
@@ -467,31 +478,56 @@ type ReplyCheck =
 	| { ok: true; kind: "questions"; questions: Questionnaire }
 	| { ok: false; violation: string }
 
-/** Validate the agent's reply against the step's output schema — or, for Q&A steps, the `{result}|{questions}` union. */
-function checkAgentReply(step: AgentStep, text: string): ReplyCheck {
+/**
+ * Read a step's output from one turn, in order of how displaceable each channel is.
+ *
+ * 1. A `submit_*` tool call — a later message cannot displace it, and which tool was called says whether
+ *    this is a result or a question batch, so no union needs sniffing.
+ * 2. Nothing else. A step under a contract reports through the tool or not at all — assistant text is
+ *    never read as output, because a later message can always displace it (81 of 159 nudged sessions
+ *    lost their payload that way). A turn that submits nothing is a violation the repair loop answers.
+ */
+function checkAgentTurn(step: AgentStep, turn: AgentTurn): ReplyCheck {
 	// No declared contract: the step acts, and whatever it said IS the output. Nothing here can fail,
 	// which is the point — a step whose edits are already on disk must not be failed over formatting.
-	if (step.outputSchema === undefined) return { ok: true, kind: "result", value: text }
-	if (step.asks) {
-		const check = validateQaOutput(step.outputSchema, text)
-		if (!check.ok) return check
-		// `questions` validated against QuestionnaireSchema above, so the cast is sound.
-		return check.kind === "questions"
-			? { ok: true, kind: "questions", questions: check.questions as Questionnaire }
-			: { ok: true, kind: "result", value: check.value }
+	if (step.outputSchema === undefined) return { ok: true, kind: "result", value: turn.text }
+
+	const submitted = readSubmittedPayload(turn.submitted)
+	if (!submitted) {
+		return {
+			ok: false,
+			violation: step.asks
+				? `the turn ended without calling ${SUBMIT_RESULT_TOOL} or ${SUBMIT_QUESTIONS_TOOL}`
+				: `the turn ended without calling ${SUBMIT_RESULT_TOOL}`,
+		}
 	}
-	const check = validateAgentOutput(step.outputSchema, text)
-	return check.ok ? { ok: true, kind: "result", value: check.value } : check
+
+	if (submitted.kind === "malformed") {
+		return { ok: false, violation: `${submitted.tool}: ${submitted.reason}` }
+	}
+
+	if (submitted.kind === "questions") {
+		if (!step.asks) return { ok: false, violation: `${SUBMIT_QUESTIONS_TOOL}: this step cannot ask questions` }
+		const violation = describeSchemaViolations(QuestionnaireSchema, submitted.value)
+		return violation
+			? { ok: false, violation: `${SUBMIT_QUESTIONS_TOOL}: ${violation}` }
+			: { ok: true, kind: "questions", questions: submitted.value as Questionnaire }
+	}
+
+	const violation = describeSchemaViolations(step.outputSchema, submitted.value)
+	return violation
+		? { ok: false, violation: `${SUBMIT_RESULT_TOOL}: ${violation}` }
+		: { ok: true, kind: "result", value: submitted.value }
 }
 
 /**
  * The fresh-run first message: the author's task prompt, plus the framework's own output contract.
  *
  * The contract is injected rather than left to the author because the engine — not the prompt — is what
- * enforces it: the reply is parsed and validated against `outputSchema` either way, so a prompt that
+ * enforces it: the submitted payload is validated against `outputSchema` either way, so a prompt that
  * omits it just fails validation for a reason the model was never told. `asks` steps get the asking
- * protocol (which already embeds the schema, as one arm of its `{result}|{questions}` union); every
- * other agent step gets the plain output protocol.
+ * protocol (which names both tools and embeds both schemas); every other agent step gets the plain
+ * output protocol.
  *
  * This matters most for a step that cannot be steered — `background`/`isolated` ones have no repair
  * budget at all (spec §9.2) — where a single unstated expectation is the whole attempt.

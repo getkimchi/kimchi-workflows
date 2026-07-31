@@ -1,5 +1,6 @@
 import { Type } from "typebox"
 import { describe, expect, it } from "vitest"
+import { SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "../src/engine/output-tools.ts"
 import { resumeWithAnswer } from "../src/engine/resume-workflow.ts"
 import { runWorkflow } from "../src/engine/run-workflow.ts"
 import type { AgentSession, RunEvent } from "../src/engine/types.ts"
@@ -93,8 +94,8 @@ describe("time budget (Phase 7a, spec §9.3)", () => {
 			const index = call++
 			return {
 				async sendAndAwaitEnd() {
-					if (index === 0) return { text: JSON.stringify({ questions: questionnaire }) }
-					return { text: JSON.stringify({ result: { ok: true } }) }
+					if (index === 0) return { text: "", submitted: { tool: SUBMIT_QUESTIONS_TOOL, arguments: questionnaire } }
+					return { text: "", submitted: { tool: SUBMIT_RESULT_TOOL, arguments: { result: { ok: true } } } }
 				},
 				getConversation: () => [],
 				dispose: () => {},
@@ -138,10 +139,10 @@ describe("time budget (Phase 7a, spec §9.3)", () => {
 				async sendAndAwaitEnd() {
 					if (index === 0) {
 						ms += 1000 // the WHOLE budget spent in_progress before it ever asks
-						return { text: JSON.stringify({ questions: questionnaire }) }
+						return { text: "", submitted: { tool: SUBMIT_QUESTIONS_TOOL, arguments: questionnaire } }
 					}
 					secondSessionCalls += 1
-					return { text: JSON.stringify({ result: { ok: true } }) }
+					return { text: "", submitted: { tool: SUBMIT_RESULT_TOOL, arguments: { result: { ok: true } } } }
 				},
 				getConversation: () => [],
 				dispose: () => {},
