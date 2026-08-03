@@ -1,5 +1,5 @@
 import { SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "../src/engine/output-tools.ts"
-import type { AgentRequest, AgentSession, SubmittedOutput } from "../src/engine/types.ts"
+import type { AgentRequest, AgentSession, AgentTurnError, SubmittedOutput } from "../src/engine/types.ts"
 
 /**
  * How a scripted string reaches the engine, now that a step under a contract reports ONLY through
@@ -30,8 +30,12 @@ function submissionFor(text: string, asks: boolean | undefined): SubmittedOutput
 	return { tool: SUBMIT_RESULT_TOOL, arguments: { result: parsed } }
 }
 
-/** A scripted turn: a plain string reply, a thrown `Error`, or a reply with token usage for budgeting. */
-export type ScriptedTurn = string | Error | { text: string; totalTokens: number }
+/**
+ * A scripted turn: a plain string reply, a thrown `Error` (transport failure, nothing came back), a reply
+ * with token usage for budgeting, or `{ error }` — a turn the PROVIDER refused, which completes normally
+ * but carries no reply (see `AgentTurnError`).
+ */
+export type ScriptedTurn = string | Error | { text: string; totalTokens: number } | { error: AgentTurnError }
 
 export interface ScriptedAgent {
 	startAgent: (request: AgentRequest) => AgentSession
@@ -103,6 +107,8 @@ export function scriptedAgent(sessionScripts: readonly (readonly ScriptedTurn[])
 					const response = script[turn++]
 					if (response === undefined) throw new Error("scripted session ran out of responses")
 					if (response instanceof Error) throw response
+					// Nothing is appended to the conversation: a refused request never reached the model.
+					if (typeof response === "object" && "error" in response) return { text: "", error: response.error }
 					const text = typeof response === "string" ? response : response.text
 					conversation.push({ role: "assistant", content: text })
 					const submitted = submissionFor(text, request.asks)

@@ -8,7 +8,7 @@ import type { TSchema } from "typebox"
 import type { Questionnaire } from "../flow/questionnaire.ts"
 
 /** Why a step is being retried (spec §9.2/§9.3). Input-schema violations are never retried. */
-export type RetryReason = "thrown-error" | "invalid-output" | "budget-exceeded"
+export type RetryReason = "thrown-error" | "invalid-output" | "budget-exceeded" | "agent-error"
 
 /**
  * Append-only lifecycle events (spec §8.1, §12.1), each tagged with the run id and an ISO timestamp.
@@ -40,6 +40,23 @@ export type RunEvent =
 	// An in-session output-steering correction (spec §9.2): the agent's reply was invalid and a
 	// correction was sent within the same session. `attempt` is the 1-based repair number.
 	| { type: "agent-steer"; runId: string; path: string; attempt: number; violation: string; at: string }
+	// A turn that ended on a FAILED REQUEST rather than on anything the model did (see `AgentTurnError`).
+	// Recorded as its own event because the alternative is silence: the provider's message is stated
+	// nowhere else the engine can see, and the step failure it causes is otherwise indistinguishable from
+	// a model that declined to submit. `attempt` is the step's outer attempt number (as on `step-retry`),
+	// not a repair number — a failed request never reaches the repair budget. `terminal` marks a failure
+	// no retry can clear: a resumed session whose transcript no longer fits the context window is over,
+	// and the run should say so once rather than re-discover it on every later step sharing the session.
+	| {
+			type: "agent-error"
+			runId: string
+			path: string
+			attempt: number
+			kind: AgentTurnErrorKind
+			message: string
+			terminal: boolean
+			at: string
+	  }
 	// One completed agent turn's token usage (spec §9.3), recorded as it happens rather than only summed
 	// into a budget check. Without it a run's cost is invisible: the totals a host can see from OUTSIDE
 	// (a session file, a provider bill) miss every isolated step entirely, since those run as their own
@@ -220,6 +237,29 @@ export interface SubmittedOutput {
 	readonly arguments: Record<string, unknown>
 }
 
+/**
+ * Why a turn produced nothing, when the reason was the provider rather than the model.
+ *
+ * A refused request still completes a turn: the harness records an assistant message with no content
+ * and ends the loop, so from the outside it is shaped exactly like a model that declined to submit.
+ * Without this distinction the engine reports "the turn ended without calling submit_result" — blaming
+ * a model that was never asked — and spends a repair turn correcting an omission that never happened.
+ *
+ *  - `context-window-exceeded` — the request was larger than the model's context. Terminal for a session
+ *    that is RESUMED (spec §2.2's `resumable`): every later turn re-sends the same transcript plus more,
+ *    so it can only fail again. A non-resumable step gets a new session file per attempt, so a retry
+ *    there is a genuinely different request.
+ *  - `provider-error` — anything else the provider refused or failed on. Retryable like a thrown error.
+ */
+export type AgentTurnErrorKind = "context-window-exceeded" | "provider-error"
+
+/** A turn that ended because the request failed, not because the model chose what to say. */
+export interface AgentTurnError {
+	readonly kind: AgentTurnErrorKind
+	/** The provider's own message, verbatim — the only place the real cause is stated. */
+	readonly message: string
+}
+
 /** The result of one agent turn: the final assistant text plus optional token usage for budgeting. */
 export interface AgentTurn {
 	readonly text: string
@@ -230,6 +270,11 @@ export interface AgentTurn {
 	 * contract to submit against and reports its text instead, so this is ignored there.
 	 */
 	readonly submitted?: SubmittedOutput
+	/**
+	 * Set when the turn ended on a failed request. The engine treats it as a failure of the ATTEMPT, not
+	 * of the reply: no steering correction is sent, because there is no reply to correct.
+	 */
+	readonly error?: AgentTurnError
 }
 
 /**

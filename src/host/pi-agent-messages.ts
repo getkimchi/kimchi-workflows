@@ -5,7 +5,13 @@
  */
 import type { AgentEndEvent, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { isOutputToolName } from "../engine/output-tools.ts"
-import type { ConversationMessage, SubmittedOutput, TokenUsage } from "../engine/types.ts"
+import type {
+	AgentTurnError,
+	AgentTurnErrorKind,
+	ConversationMessage,
+	SubmittedOutput,
+	TokenUsage,
+} from "../engine/types.ts"
 
 /** The PI model registry (from the extension context) — referenced structurally for `find`. */
 export type ModelRegistry = ExtensionContext["modelRegistry"]
@@ -103,6 +109,52 @@ function toArguments(args: unknown): Record<string, unknown> {
 	return {}
 }
 
+/**
+ * The failure the last assistant message records, if it records one.
+ *
+ * PI writes a refused request as an ordinary assistant message: `content: []`, zero usage,
+ * `stopReason: "error"`, and the provider's raw body in `errorMessage`. The turn then ends normally,
+ * which is what makes this worth extracting: nothing downstream can otherwise tell it apart from a model
+ * that said nothing. Both host paths read the harness's own message objects, so one reader serves both.
+ *
+ * `stopReason` is the only signal used. Empty content is NOT one on its own — a turn that ends on a tool
+ * call alone legitimately carries no text.
+ */
+export function lastAssistantError(messages: AgentMessages): AgentTurnError | undefined {
+	if (!Array.isArray(messages)) return undefined
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i]
+		if (!isAssistantMessage(message)) continue
+		return errorFromMessage(message)
+	}
+	return undefined
+}
+
+/** {@link lastAssistantError} for a single message — the incremental reader's entry point. */
+export function errorFromMessage(message: unknown): AgentTurnError | undefined {
+	if (!isAssistantMessage(message)) return undefined
+	const failed = message as { stopReason?: unknown; errorMessage?: unknown }
+	if (failed.stopReason !== "error") return undefined
+	const raw = typeof failed.errorMessage === "string" ? failed.errorMessage : ""
+	return { kind: classifyAgentError(raw), message: raw || "the provider reported an error with no message" }
+}
+
+/**
+ * Which failure a provider's error body describes.
+ *
+ * Matched on text because that is all there is: the body is passed through from whatever gateway served
+ * the request, and none of them agree on a machine-readable code. The patterns cover the phrasings seen
+ * in real transcripts — a named `ContextWindowExceededError` and a plain "the input is longer than the
+ * model's context length". Anything unrecognized stays `provider-error`, the conservative answer: it
+ * retries rather than declaring a run over, which is right for the socket closes, 503s and overload
+ * responses that make up the rest.
+ */
+export function classifyAgentError(raw: string): AgentTurnErrorKind {
+	return /context[ _-]?window|context length|too many tokens|prompt is too long|maximum context/i.test(raw)
+		? "context-window-exceeded"
+		: "provider-error"
+}
+
 /** The last assistant message's token usage (chat-completions `usage.totalTokens`), for token budgeting (spec §9.3). */
 export function lastAssistantUsage(messages: AgentMessages): TokenUsage | undefined {
 	if (!Array.isArray(messages)) return undefined
@@ -156,6 +208,7 @@ export interface ReadAssistantTurn {
 	text: string
 	usage?: TokenUsage
 	submitted?: SubmittedOutput
+	error?: AgentTurnError
 }
 
 /** An incremental reader over a subagent's NDJSON stdout — see {@link createAssistantTurnReader}. */
@@ -200,6 +253,10 @@ export function createAssistantTurnReader(): AssistantTurnReader {
 	let last: { text: string; usage?: TokenUsage } | undefined
 	// Replaced, never appended — last write wins, and one submission costs the same as any number.
 	let submitted: SubmittedOutput | undefined
+	// Also last-write-wins, and deliberately CLEARED by a later healthy message: pi retries some failures
+	// on its own (`auto_retry_start`/`auto_retry_end`), so an error mid-stream that the child recovered
+	// from is not this turn's outcome. Only a failure the turn actually ended on reaches the engine.
+	let error: AgentTurnError | undefined
 
 	const readLine = (line: string): void => {
 		const trimmed = line.trim()
@@ -226,6 +283,7 @@ export function createAssistantTurnReader(): AssistantTurnReader {
 		}
 		const call = submittedFromMessage(message)
 		if (call) submitted = call
+		error = errorFromMessage(message)
 	}
 
 	return {
@@ -244,7 +302,7 @@ export function createAssistantTurnReader(): AssistantTurnReader {
 				pending = ""
 				readLine(rest)
 			}
-			return { text: last?.text ?? "", usage: last?.usage, submitted }
+			return { text: last?.text ?? "", usage: last?.usage, submitted, error }
 		},
 	}
 }

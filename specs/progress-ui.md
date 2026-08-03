@@ -123,6 +123,7 @@ avoid by construction. *(decision)*
 | `step-completed` | row `completed`, duration |
 | `step-retry` | `attempt` + `reason` badge on the row (§5.3) |
 | `agent-steer` | `repair N` badge |
+| `agent-error` | no badge of its own: what became of the step reaches the row through the `step-retry` (reason `provider error`) or failure that follows it |
 | `agent-usage` | `+totalTokens` on the row and on the run header |
 | `step-failed` | row `failed` — optional step, run continues (§9.1) |
 | `step-cancelled` | row `cancelled` (drain-then-crash, §9.5) |

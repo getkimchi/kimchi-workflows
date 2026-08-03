@@ -603,9 +603,17 @@ what it got wrong, whereas a retry discards a working session and re-pays the pr
   - **Thrown error** — a step raised an error.
   - **Invalid output** — after in-session repairs were exhausted (§9.2).
   - **Budget/time exceeded** — see 9.4.
+  - **Agent error** — the turn completed but the REQUEST failed: the provider
+    refused it and the harness recorded an empty assistant message. This is not
+    invalid output and is never steered (§9.2), because there is no reply to
+    correct; reported as its own `agent-error` event carrying the provider's own
+    message, which is otherwise stated nowhere the engine can see.
 
   **Not** covered: an input that fails its schema, which is a wiring failure and
-  crashes without retry (§3.8).
+  crashes without retry (§3.8). Nor a context window exceeded by a session the step
+  RESUMES (§2.2): every later turn re-sends that transcript plus more, so the
+  attempt is terminal and the repeat policy is skipped rather than spent.
+  *(decision)*
 
 9.4. **Per-step budgets:** a step may declare a max token budget and/or max wall
 time (§orig. R18). Exceeding a budget is a failure kind counted against the repeat

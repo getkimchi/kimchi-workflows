@@ -14,7 +14,13 @@
  */
 
 import { SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "../engine/output-tools.ts"
-import type { AgentRequest, AgentSession, ConversationMessage } from "../engine/types.ts"
+import type {
+	AgentRequest,
+	AgentSession,
+	AgentTurnError,
+	AgentTurnErrorKind,
+	ConversationMessage,
+} from "../engine/types.ts"
 import type { Questionnaire } from "../flow/questionnaire.ts"
 import type { AgentStep, WorkflowNode } from "../flow/types.ts"
 import { forEachNode } from "../flow/types.ts"
@@ -30,6 +36,8 @@ export type AgentTurnScript =
 	| { kind: "raw"; text: string; totalTokens?: number }
 	/** A transport failure — drives the step's outer retry policy (spec §9.1). */
 	| { kind: "throws"; error: Error }
+	/** A turn the PROVIDER refused: the harness completes the turn, but there is no reply in it. */
+	| { kind: "failed"; error: AgentTurnError }
 
 /** Script the agent asking: a `submit_questions` call, on which the run blocks (spec §10.1). */
 export function ask(questionnaire: Questionnaire, trailingText?: string): AgentTurnScript {
@@ -56,6 +64,18 @@ export function submitRaw(tool: string, args: Record<string, unknown>, trailingT
 	return { kind: "submit", tool, args, trailingText }
 }
 
+/**
+ * Script a turn that failed at the provider rather than at the model (spec §9.3's `agent-error`).
+ *
+ * Distinct from {@link throws}, which is a transport error the host never got an answer to. This one
+ * ANSWERED: the harness ended the turn normally, carrying an empty assistant message and the provider's
+ * error. It exists because that is the ambiguous case — a step under a contract sees a turn that
+ * submitted nothing either way, and only this distinction keeps it from being read as the model's fault.
+ */
+export function fails(kind: AgentTurnErrorKind, message: string): AgentTurnScript {
+	return { kind: "failed", error: { kind, message } }
+}
+
 /** Script a thrown transport error, to exercise the retry policy (spec §9.1). */
 export function throws(error: Error | string): AgentTurnScript {
 	return { kind: "throws", error: typeof error === "string" ? new Error(error) : error }
@@ -63,7 +83,8 @@ export function throws(error: Error | string): AgentTurnScript {
 
 /** Attach token usage to any scripted turn, to exercise the per-step token budget (spec §9.3). */
 export function usage(turn: AgentTurnScript, totalTokens: number): AgentTurnScript {
-	if (turn.kind === "throws") throw new Error("usage(): a thrown turn reports no token usage")
+	if (turn.kind === "throws" || turn.kind === "failed")
+		throw new Error(`usage(): a ${turn.kind} turn reports no token usage`)
 	return { ...turn, totalTokens }
 }
 
@@ -142,6 +163,8 @@ export function createAgentDouble(nodes: readonly WorkflowNode[], scripts: Agent
 					throw new Error(`agent step "${stepName}" was called more times than it has scripted replies`)
 				}
 				if (turn.kind === "throws") throw turn.error
+				// No content, no usage, no conversation entry: a refused request leaves the session as it was.
+				if (turn.kind === "failed") return { text: "", error: turn.error }
 
 				const usage = turn.totalTokens === undefined ? undefined : { totalTokens: turn.totalTokens }
 
