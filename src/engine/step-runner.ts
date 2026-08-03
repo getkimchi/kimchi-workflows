@@ -4,6 +4,8 @@
  * suspension (spec §10). Pure w.r.t. the engine boundary: all agent/network coupling is behind
  * `host.startAgent`; all delay (backoff + budget timers) is `host.sleep`.
  */
+
+import { isValidResumeKey } from "../flow/isolation.ts"
 import {
 	buildAskingProtocol,
 	buildOutputProtocol,
@@ -58,10 +60,27 @@ function resolveBudgetMs(
  * `resumable: true` means "continue MYSELF", so the key is the step's own name. A string means
  * "continue THIS conversation", which any number of steps may name to take turns in one context —
  * the difference between a chain of briefed strangers and a single orchestrator that remembers why it
- * planned what it planned. `.commit()` has already rejected a shared key wherever two holders could
- * run at once, so nothing here has to reason about who else might be writing.
+ * planned what it planned. `.commit()` has already rejected a shared STRING key wherever two holders
+ * could run at once, so nothing here has to reason about who else might be writing.
+ *
+ * A FUNCTION is the per-execution form, and it is the only one that can say "each ITEM continues its
+ * own conversation": `true` keys by the step's NAME, and every item of a `.foreach` runs the same named
+ * step, so `true` would pool them all into one file. Its result does not exist at `.commit()` time, so
+ * the syntax check a static key got there happens here instead — and it throws rather than falling back
+ * to a fresh session, because silently starting cold is precisely the continuity the author asked for
+ * and would then have to debug through a model's confusion.
  */
-function resolveResumeKey(step: AgentStep): string | undefined {
+function resolveResumeKey(step: AgentStep, ctx: RunContext): string | undefined {
+	if (typeof step.resumable === "function") {
+		const key = step.resumable({ ctx })
+		if (typeof key !== "string" || !isValidResumeKey(key)) {
+			throw new Error(
+				`agent step "${step.name}": resumable() returned ${JSON.stringify(key)}, which is not a valid resume key — ` +
+					`it becomes a session filename on the host (src/host/pi-agent.ts), so it may not be empty or contain "/", "#", or "@"`,
+			)
+		}
+		return key
+	}
 	if (typeof step.resumable === "string") return step.resumable
 	return step.resumable === true ? step.name : undefined
 }
@@ -384,7 +403,7 @@ async function runAgentSession(
 		attempt,
 		background: step.background,
 		isolated,
-		resumeKey: resolveResumeKey(step),
+		resumeKey: resolveResumeKey(step, ctx),
 		// Handed over so a host running this out-of-process can register `submit_result` typed by it there.
 		outputSchema: step.outputSchema,
 		asks: step.asks,
@@ -496,7 +515,17 @@ async function runAgentSession(
  * limits, gateway hiccups and overloads are exactly what the repeat policy is for.
  */
 function isTerminalAgentError(step: AgentStep, error: AgentTurnError): boolean {
-	return error.kind === "context-window-exceeded" && resolveResumeKey(step) !== undefined
+	return error.kind === "context-window-exceeded" && resumes(step)
+}
+
+/**
+ * Whether this step continues a conversation at all — the question `isTerminalAgentError` asks, and the
+ * only one that can be answered without a `RunContext`. A per-execution key resumes by construction, so
+ * its function is never called here: evaluating it would be a side effect on a path that just needs the
+ * yes/no, and it can legitimately throw on a context this call has no business supplying.
+ */
+function resumes(step: AgentStep): boolean {
+	return step.resumable !== undefined && step.resumable !== false
 }
 
 type ReplyCheck =

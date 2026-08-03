@@ -87,7 +87,13 @@ function resolveStep(workflowName: string, step: StepDefinition, isolatedHere: b
 	return { ...step, isolated: true }
 }
 
-/** A shared key becomes `<key>.jsonl` on the host, so it carries a step name's ban on path syntax (spec §3). */
-function isValidResumeKey(key: string): boolean {
+/**
+ * A shared key becomes `<key>.jsonl` on the host, so it carries a step name's ban on path syntax (spec §3).
+ *
+ * Exported because a per-execution key (`resumable` as a function) cannot be checked here — it does not
+ * exist until the step runs — so `step-runner.ts` applies this same rule at resolution time. One
+ * definition, so the two paths can never drift into accepting different filenames.
+ */
+export function isValidResumeKey(key: string): boolean {
 	return key.length > 0 && !key.includes("/") && !key.includes("#") && !key.includes("@")
 }
