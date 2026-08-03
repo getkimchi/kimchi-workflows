@@ -192,8 +192,20 @@ export interface AgentStep extends StepBase {
 	 * on any step tagged `isolated` (`src/flow/isolation.ts`), since two subprocesses appending to one
 	 * session would interleave into nonsense. The key is also node-path syntax-checked exactly like a
 	 * step name (spec §3) — it becomes a filename on the host side.
+	 *
+	 * A FUNCTION computes the key per execution, which is the only way to say "each ITEM continues its
+	 * own conversation". `true` cannot express that: it keys by the step's NAME, and every item of a
+	 * `.foreach` runs the same named step, so they would all land in one file. A per-item key closes
+	 * that — `resumable: ({ ctx }) => \`step-${ctx.getStepResult<Item>("item").index}\`` — and it is what
+	 * lets a re-entered step meet its own prior work rather than a summary of it.
+	 *
+	 * Its result cannot be checked at `.commit()` (it does not exist until the step runs), so the two
+	 * guarantees a static key gets are enforced at runtime instead: the produced key is syntax-checked
+	 * the same way, and the host refuses to open one resume file for two executions at once
+	 * (`src/host/pi-agent.ts`). An author whose function returns the same key for two concurrent items
+	 * therefore gets a loud error rather than an interleaved session.
 	 */
-	readonly resumable?: boolean | string
+	readonly resumable?: boolean | string | ((args: { readonly ctx: RunContext }) => string)
 	/**
 	 * Static isolation (spec §2.2), framework-set at `.commit()` (`src/flow/isolation.ts`): true when
 	 * this step sits somewhere that can run concurrently with a sibling — every `.parallel` arm, or a

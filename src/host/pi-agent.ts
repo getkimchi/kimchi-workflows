@@ -226,6 +226,38 @@ function sessionPath(dir: string, request: AgentRequest): string {
 }
 
 /**
+ * Resume files with a subagent writing to them right now.
+ *
+ * `.commit()` guarantees no two steps holding a STATIC shared key can overlap, and that used to settle
+ * it. A per-execution key (`resumable` as a function, spec §2.2) cannot be checked there — it does not
+ * exist until the step runs — so the same guarantee is made here instead, at the one place that knows
+ * which file is actually about to be opened.
+ *
+ * The failure this rules out is silent: two children appending to one session interleave two
+ * conversations into a file that still parses, and the damage surfaces later as a model confused by
+ * words it never said. An author whose key function forgot the item index gets this error on the second
+ * concurrent item instead — naming both paths, because the bug is always in what the key left out.
+ */
+const liveResumeFiles = new Map<string, string>()
+
+function claimResumeFile(file: string, request: AgentRequest): () => void {
+	if (!request.resumeKey) return () => {} // a trace file is unique per execution by construction
+	const holder = liveResumeFiles.get(file)
+	if (holder !== undefined) {
+		throw new Error(
+			`pi-agent bridge: step "${request.stepName}" (${request.path}) resolved resume key "${request.resumeKey}" ` +
+				`while "${holder}" is still writing that same session file. Two subagents appending to one session ` +
+				`interleave into nonsense (spec §2.2) — a per-execution resumable() must return a DISTINCT key for ` +
+				`every concurrent execution, so include whatever distinguishes them (the .foreach item index) in it.`,
+		)
+	}
+	liveResumeFiles.set(file, request.path)
+	return () => {
+		if (liveResumeFiles.get(file) === request.path) liveResumeFiles.delete(file)
+	}
+}
+
+/**
  * Create the PI agent bridge. Call once per extension instance (registers one `agent_end` listener),
  * then obtain a per-invocation `AgentStarter` bound to the command's model registry AND to the
  * directory that invocation's sessions belong in. The directory arrives at BIND time, not here: this
@@ -393,6 +425,8 @@ function backgroundSession(
 			// run that bypasses permissions must bypass them too, or it re-arms the classifier and spends its
 			// budget arguing with a prompt no one is there to answer.
 			const session = sessionPath(sessionsDir, request)
+			// Claimed before anything is spawned, released once the child is gone — see `liveResumeFiles`.
+			const releaseResumeFile = claimResumeFile(session, request)
 			const args = [
 				"--mode",
 				"json",
@@ -440,6 +474,9 @@ function backgroundSession(
 				// The child read it at load, so the handoff has no readers left. One file per step per attempt
 				// would otherwise accumulate beside the user's own sessions for the life of the project.
 				if (handoff) removeStepOutputToolSpec(handoff)
+				// Released on every path, including the aborted and non-zero-exit ones below: the child is gone
+				// by the time `runSubagent` settles, so the next execution of this key may open the file.
+				releaseResumeFile()
 			}
 			if (request.signal?.aborted) {
 				throw new Error(`background subagent step "${request.stepName}" was aborted`)

@@ -325,3 +325,112 @@ describe("permission posture is inherited by spawned subagents", () => {
 		expect(calls[0]?.args).toContain("--dangerously-skip-permissions")
 	})
 })
+
+/**
+ * A per-execution resume key (spec §2.2): `resumable` as a FUNCTION.
+ *
+ * `true` cannot express "each ITEM continues its own conversation" — it keys by the step's NAME, and
+ * every item of a `.foreach` runs the same named step, so `true` pools them into one file. That is the
+ * gap this form closes, and the reason it cannot be checked at `.commit()`: the key does not exist
+ * until the item does.
+ */
+describe("a resume key computed per execution", () => {
+	const itemSchema = Type.Object({ index: Type.Number() })
+
+	function perItemWorkflow(key: (index: number) => string, concurrency = 1) {
+		const item = createAgentStep({
+			name: "worker",
+			input: itemSchema,
+			output: okSchema,
+			background: true,
+			resumable: ({ ctx }) => key(ctx.getStepResult<{ index: number }>("item")?.index ?? 0),
+			prompt: () => "work",
+		})
+		const body = createWorkflow({ name: "item-body" })
+			.then(
+				createAgentStep({
+					name: "item",
+					input: itemSchema,
+					output: itemSchema,
+					background: true,
+					prompt: () => "echo",
+				}),
+			)
+			.then(item)
+			.commit()
+		return createWorkflow({ name: "per-item" })
+			.foreach(body, () => [{ index: 1 }, { index: 2 }], { name: "items", concurrency })
+			.commit()
+	}
+
+	it("gives each foreach item its own conversation, where `true` would have pooled them", async () => {
+		const agent = recordingAgent([
+			JSON.stringify({ index: 1 }),
+			JSON.stringify({ ok: true }),
+			JSON.stringify({ index: 2 }),
+			JSON.stringify({ ok: true }),
+		])
+		const { host } = createTestHost({ startAgent: agent.startAgent })
+		await runWorkflow(
+			perItemWorkflow((index) => `worker-${index}`),
+			undefined,
+			host,
+		)
+
+		const workerKeys = agent.requests.filter((r) => r.stepName === "worker").map((r) => r.resumeKey)
+		expect(workerKeys).toEqual(["worker-1", "worker-2"])
+	})
+
+	it("aborts the run loudly when the computed key could not be a filename", async () => {
+		const agent = recordingAgent([JSON.stringify({ index: 1 }), JSON.stringify({ ok: true })])
+		const { host } = createTestHost({ startAgent: agent.startAgent })
+		// "#" is node-path syntax, banned in a resume key exactly as it is in a step name (spec §3). A
+		// static key is rejected at `.commit()` and never starts the run at all; a computed one can only be
+		// caught here — so it is fatal in the same way rather than a step failure the retry policy absorbs.
+		// Both say the same thing: the WORKFLOW is wrong, not the work.
+		await expect(
+			runWorkflow(
+				perItemWorkflow(() => "bad#key"),
+				undefined,
+				host,
+			),
+		).rejects.toThrow(/not a valid resume key/)
+	})
+})
+
+/**
+ * The guarantee `.commit()` makes for a STATIC shared key — no two holders can be writing at once — made
+ * at runtime instead, because a computed key is unknowable until the step runs. A key function that
+ * forgets what distinguishes its items is the whole failure mode, and it is silent without this: two
+ * children appending to one session interleave into a file that still parses.
+ */
+describe("two concurrent executions may not open one resume file", () => {
+	it("refuses the second claim rather than interleaving the sessions", async () => {
+		const { createPiAgentBridge } = await import("../src/host/pi-agent.ts")
+		const { spawn } = scriptedSubagent(assistantLine("{}", 1))
+		const start = createPiAgentBridge(
+			{ on: () => {} } as never,
+			(args) => ({ command: "kimchi", args }),
+			spawn,
+		)({ find: () => undefined } as never, sessionsDir)
+
+		// The first turn is still in flight when the second claims the same key.
+		const first = start(
+			agentRequest({ stepName: "worker", path: "items@0/worker", background: true, resumeKey: "shared" }),
+		).sendAndAwaitEnd("go")
+		await expect(
+			start(
+				agentRequest({ stepName: "worker", path: "items@1/worker", background: true, resumeKey: "shared" }),
+			).sendAndAwaitEnd("go"),
+		).rejects.toThrow(/still writing that same session file/)
+		await first
+
+		// Released once the first child is gone, so the key is reusable by the NEXT execution — a resumable
+		// step naming one file across executions is the point, and only overlap is the error.
+		await expect(
+			start(
+				agentRequest({ stepName: "worker", path: "items@1/worker", background: true, resumeKey: "shared" }),
+			).sendAndAwaitEnd("go"),
+		).resolves.toBeDefined()
+	})
+})

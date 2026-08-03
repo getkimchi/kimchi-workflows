@@ -52,8 +52,12 @@ export interface CreateAgentStepOptions<TInputSchema extends TSchema | undefined
 	 * `true` keys it by the step's own name. A string names a conversation shared with every other step
 	 * declaring the same key — one orchestrator session taking turns across several steps. Steps sharing
 	 * a key may not overlap; `.commit()` rejects a shared key on an isolated step.
+	 *
+	 * A function computes the key per execution, which is how each ITEM of a `.foreach` continues its own
+	 * conversation — `true` cannot say that, since it keys by the step's name and every item runs the
+	 * same named step. Checked at runtime rather than at `.commit()`; see `AgentStep.resumable`.
 	 */
-	resumable?: boolean | string
+	resumable?: boolean | string | ((args: { ctx: RunContext }) => string)
 }
 
 /** Agent step (spec §2.2). Runs the agent loop via the host and validates its structured output. */
