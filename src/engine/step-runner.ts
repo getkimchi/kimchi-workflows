@@ -17,7 +17,7 @@ import { buildCorrectionMessage } from "./agent-output.ts"
 import { createRunContext, createStepLogger, iso, type RunState, type StepOutcome } from "./context.ts"
 import type { NodePath } from "./node-path.ts"
 import { readSubmittedPayload, SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "./output-tools.ts"
-import type { AgentTurn, HostPort, RetryReason } from "./types.ts"
+import type { AgentTurn, AgentTurnError, HostPort, RetryReason } from "./types.ts"
 
 /** Default in-session output-steering budget (spec §9.2) when an agent step declares none. */
 const DEFAULT_MAX_OUTPUT_REPAIRS = 2
@@ -92,11 +92,16 @@ export type AgentEntry =
  *                  never treated as a dead end in its own right, background step or not);
  *  - `blocked`    — a Q&A step emitted a `{questions}` batch (spec §10); `elapsedMs`/`tokensUsed`
  *                  (agent steps only) are the running budget totals at the moment of blocking (§9.4);
+ *  - `fatal`     — a failure a second attempt provably cannot clear, so the repeat policy is skipped
+ *                  rather than spent (see {@link isTerminalAgentError}). Deliberately rare: retrying a
+ *                  failure that MIGHT be transient costs one attempt, whereas retrying one that cannot
+ *                  be costs every attempt the policy allows and reports the wrong cause at the end;
  *  - `cancelled` — the abort signal fired.
  */
 type AttemptResult =
 	| { kind: "ok"; output: unknown }
 	| { kind: "retryable"; reason: RetryReason; error: string }
+	| { kind: "fatal"; error: string }
 	| {
 			kind: "blocked"
 			questionnaire: Questionnaire
@@ -205,6 +210,7 @@ async function retryLoop(
 		)
 		if (result.kind === "cancelled") return { kind: "cancelled" }
 		if (result.kind === "ok") return { kind: "ok", output: result.output }
+		if (result.kind === "fatal") return { kind: "crashed", error: result.error }
 		if (result.kind === "blocked") {
 			return {
 				kind: "blocked",
@@ -403,6 +409,26 @@ async function runAgentSession(
 
 			if (signal.aborted) return { kind: "cancelled" }
 
+			// A turn that failed at the provider is not a reply, so nothing below it applies: there is no
+			// usage to bill, no output to validate, and — above all — nothing to steer. Checked BEFORE the
+			// output contract, which cannot tell the two apart (`AgentTurnError`) and would report a
+			// violation the model never committed.
+			if (turn.error) {
+				const terminal = isTerminalAgentError(step, turn.error)
+				await host.emit({
+					type: "agent-error",
+					runId: state.runId,
+					path,
+					attempt,
+					kind: turn.error.kind,
+					message: turn.error.message,
+					terminal,
+					at: iso(host),
+				})
+				const error = `step "${step.name}": ${turn.error.kind}: ${turn.error.message}`
+				return terminal ? { kind: "fatal", error } : { kind: "retryable", reason: "agent-error", error }
+			}
+
 			// Token budget (spec §9.3/§9.4): accumulate usage across prompt + steering + answer turns.
 			const turnTokens = turn.usage?.totalTokens ?? 0
 			totalTokens += turnTokens
@@ -456,6 +482,21 @@ async function runAgentSession(
 	} finally {
 		session.dispose()
 	}
+}
+
+/**
+ * Whether a failed request can only fail again.
+ *
+ * Only one case qualifies today: a context window exceeded by a session the step RESUMES (spec §2.2). A
+ * resumed session names one file for every execution, and each turn appends to it — the request that was
+ * already too large is a prefix of the next one, so the retry policy can do nothing but re-send it.
+ *
+ * A step that does NOT resume gets a fresh session file per attempt (host naming.ts), so its next
+ * attempt is a genuinely smaller request and stays retryable. So does every other provider error: rate
+ * limits, gateway hiccups and overloads are exactly what the repeat policy is for.
+ */
+function isTerminalAgentError(step: AgentStep, error: AgentTurnError): boolean {
+	return error.kind === "context-window-exceeded" && resolveResumeKey(step) !== undefined
 }
 
 type ReplyCheck =

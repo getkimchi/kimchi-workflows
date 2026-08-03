@@ -13,7 +13,7 @@
 
 export type { StepState } from "../engine/step-state.ts"
 export type { AgentDouble, AgentRecord, AgentScripts, AgentTurnScript } from "./agent-double.ts"
-export { ask, createAgentDouble, raw, reply, submitRaw, throws, usage } from "./agent-double.ts"
+export { ask, createAgentDouble, fails, raw, reply, submitRaw, throws, usage } from "./agent-double.ts"
 export type { StepOverride, StepOverrides } from "./step-override.ts"
 export { applyStepOverrides } from "./step-override.ts"
 export type { PendingQuestion, TestRun, TestRunOptions } from "./test-run.ts"

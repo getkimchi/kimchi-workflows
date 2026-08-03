@@ -78,6 +78,9 @@ const RETRY_REASONS: Readonly<Record<RetryReason, string>> = {
 	"thrown-error": "error",
 	"invalid-output": "invalid output",
 	"budget-exceeded": "budget exceeded",
+	// Named for where the failure happened, not for what the model said: this retry follows a request the
+	// provider refused, so "invalid output" would point the reader at a reply that never existed.
+	"agent-error": "provider error",
 }
 
 /** The plain cells of one row, before any padding or styling (progress §4.11). */

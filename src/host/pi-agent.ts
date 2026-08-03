@@ -90,6 +90,7 @@ import type { AgentRequest, AgentSession, AgentTurn, ConversationMessage } from 
 import { resumeSessionFile, stepSessionName, traceSessionFile } from "./naming.ts"
 import {
 	type AgentMessages,
+	lastAssistantError,
 	lastAssistantText,
 	lastAssistantUsage,
 	lastSubmittedOutput,
@@ -263,6 +264,7 @@ export function createPiAgentBridge(
 			text: lastAssistantText(event.messages),
 			usage: lastAssistantUsage(event.messages),
 			submitted: lastSubmittedOutput(event.messages),
+			error: lastAssistantError(event.messages),
 		})
 	})
 
