@@ -591,11 +591,13 @@ exhausted does the attempt fail and the repeat policy apply. The two budgets are
 deliberately separate: a repair costs one turn and keeps the agent's own context on
 what it got wrong, whereas a retry discards a working session and re-pays the prompt.
 
-  In-session repair requires a resumable conversation. If PI's subagent facility is
-  one-shot, a `background` step (§2.2) cannot be steered and its invalid output fails
-  the attempt directly, falling back to the repeat policy (§9.1) — a stated
-  consequence of choosing isolation, not a defect to be discovered later.
-  *(orig. R15; decision)*
+  In-session repair requires a resumable conversation, and every step with an output
+  contract has one. A `background` or `isolated` step (§2.2) runs as a fresh
+  subprocess per turn, but that subprocess resumes the step's own session file, so a
+  correction reaches the model with its prior work intact. Execution mode therefore
+  does **not** narrow the repair budget: only the absence of an output schema does,
+  because a step that reports nothing has nothing to be steered toward.
+  *(orig. R15; decision, amended)*
 
 9.3. Failure kinds handled within the repeat policy:
   - **Thrown error** — a step raised an error.

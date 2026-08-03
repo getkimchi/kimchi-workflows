@@ -143,6 +143,65 @@ describe("output steering (Phase 4b, spec §9.2)", () => {
 		expect(steerEvents(events)).toHaveLength(1) // one in-session steer in session 2
 	})
 
+	/**
+	 * A background step that ends its turn without calling `submit_result` used to fail the
+	 * attempt outright: no correction, and the next attempt re-prompted from scratch. The model was never
+	 * told what it had omitted, so a model prone to omitting it omitted it again. The subprocess resumes
+	 * the step's session file, so the correction below reaches it with its own work still in front of it.
+	 */
+	describe("a background step that never calls submit_result", () => {
+		// Prose from a turn that did real work and simply forgot to submit — no JSON, nothing to salvage.
+		const workedButNoSubmit = "I've edited the files and run the tests. All done."
+
+		it("is corrected in the same session, and no work is discarded", async () => {
+			const step = createAgentStep({
+				name: "step-turn",
+				output: outputSchema,
+				background: true,
+				prompt: () => "Do the work and report a summary.",
+			})
+			const workflow = createWorkflow({ name: "bg-no-submit" }).then(step).commit()
+			const agent = scriptedAgent([[workedButNoSubmit, valid]])
+			const { host, store } = createTestHost({ startAgent: agent.startAgent })
+
+			const result = await runWorkflow(workflow, undefined, host)
+
+			expect(result.status).toBe("completed")
+			expect(result.output).toEqual({ summary: "ok", keywords: ["k"] })
+			expect(agent.opened).toBe(1) // the SAME session — nothing restarted, nothing lost
+			expect(agent.messages).toHaveLength(2)
+			expect(agent.messages[1]).toMatch(/without calling submit_result/) // told what it omitted…
+			expect(agent.messages[1]).toMatch(/call submit_result/i) // …and what to do about it
+
+			const events = await store.loadEvents(result.runId)
+			expect(steerEvents(events)).toHaveLength(1)
+			expect(events.filter((event) => event.type === "step-retry")).toHaveLength(0)
+		})
+
+		it("still falls back to the repeat policy if the model keeps omitting it", async () => {
+			const step = createAgentStep({
+				name: "step-turn",
+				output: outputSchema,
+				background: true,
+				maxOutputRepairs: 1,
+				retry: { maxRetry: 1 },
+				prompt: () => "Do the work and report a summary.",
+			})
+			const workflow = createWorkflow({ name: "bg-no-submit-persists" }).then(step).commit()
+			// Session 1: omits twice (the one repair is spent), session 2: submits.
+			const agent = scriptedAgent([[workedButNoSubmit, workedButNoSubmit], [valid]])
+			const { host, store } = createTestHost({ startAgent: agent.startAgent })
+
+			const result = await runWorkflow(workflow, undefined, host)
+
+			expect(result.status).toBe("completed")
+			expect(agent.opened).toBe(2)
+			const events = await store.loadEvents(result.runId)
+			expect(steerEvents(events)).toHaveLength(1)
+			expect(events.filter((event) => event.type === "step-retry")).toHaveLength(1)
+		})
+	})
+
 	describe("buildCorrectionMessage", () => {
 		it("includes the violation text, the JSON Schema, and the submit instruction", () => {
 			const message = buildCorrectionMessage(outputSchema, 'expected required property "keywords"')
