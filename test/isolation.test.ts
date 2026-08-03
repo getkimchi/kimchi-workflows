@@ -178,22 +178,27 @@ describe("static isolation end-to-end (spec §2.2): AgentRequest.isolated thread
 		expect(sequentialAgent.isolateds).toEqual([false, false])
 	})
 
-	it("an isolated step's repair budget is forced to 0, same as background (spec §9.2)", async () => {
+	it("an isolated step is steered in-session, same as any step with a contract", async () => {
 		const a = createAgentStep({ name: "a", output: okSchema, maxOutputRepairs: 2, prompt: () => "go" })
 		const b = createAgentStep({ name: "b", output: okSchema, maxOutputRepairs: 2, prompt: () => "go" })
 		const workflow = createWorkflow({ name: "w" }).parallel([a, b], { name: "par" }).commit()
 
-		// Both arms reply with schema-invalid output; a steerable step would send a correction and get a
-		// second turn from the SAME session — an isolated one must fail the attempt outright instead, and
-		// then take its one default repeat as a wholly fresh session (four sessions, two per arm).
-		const agent = scriptedAgent([['{"ok":"nope"}'], ['{"ok":"nope"}'], ['{"ok":"nope"}'], ['{"ok":"nope"}']])
+		// Both arms reply with schema-invalid output; each is steered in-session (2 repairs) before crashing.
+		// No outer retry — default maxRetry is 0 now that all contracted steps are steerable.
+		const agent = scriptedAgent([
+			['{"ok":"nope"}', '{"ok":"nope"}', '{"ok":"nope"}'],
+			['{"ok":"nope"}', '{"ok":"nope"}', '{"ok":"nope"}'],
+		])
 		const { host, store } = createTestHost({ startAgent: agent.startAgent })
 
 		const result = await runWorkflow(workflow, undefined, host)
 
 		expect(result.status).toBe("crashed")
-		expect(agent.messages).toHaveLength(4) // one turn per attempt, no correction sent inside any of them
+		expect(agent.opened).toBe(2) // one session per arm, steered in-session
+		expect(agent.messages).toHaveLength(6) // 3 turns per arm (prompt + 2 corrections)
 		const events = await store.loadEvents(result.runId)
-		expect(events.some((e) => e.type === "agent-steer")).toBe(false)
+		const steers = events.filter((e) => e.type === "agent-steer")
+		expect(steers).toHaveLength(4) // 2 per arm
+		expect(events.filter((e) => e.type === "step-retry")).toHaveLength(0)
 	})
 })

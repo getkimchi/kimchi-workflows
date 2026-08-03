@@ -67,8 +67,8 @@ step "orient" output: <root>: must have required properties summary, keyPaths, h
 
 — because my prompt said "matching the schema you were given" and nothing had given it one. The engine
 already injected a protocol for `asks` steps and for steering corrections; it now does so for every
-agent step. **An unstated expectation is a bug in the framework, not the caller** — especially for a
-step that cannot be steered, where one bad reply is the whole attempt.
+agent step. **An unstated expectation is a bug in the framework, not the caller** — a step that has to
+spend its first correction learning the shape has one fewer turn to get the content right.
 
 ### Observability has to live where the work happens
 
@@ -77,12 +77,15 @@ accounting, the trial's own token counters — sees roughly zero for the entire 
 `agent-usage` events were the only way to measure cost at all, and every number in this document comes
 from them. When work moves out of process, telemetry must move with it or it disappears.
 
-### Defaults should mirror what the thing can actually do
+### An execution mode is not a capability
 
-A steerable step gets two free in-session repairs. An isolated one gets none — and used to die on a
-single malformed reply. Making unsteerable steps default to one repeat restores the symmetry: the
-budget matches the capability. Look for defaults that were written for one execution mode and silently
-inherited by another.
+"A background step is a one-shot subagent, so it cannot be steered" read as a fact about the world and
+was really an assumption about our own code. Background steps had their repair budget forced to 0 and a
+compensating extra repeat, so a model that merely forgot to call `submit_result` lost its turn instead
+of being told. But the subprocess is spawned with `--session <path>`, which the CLI **resumes** — a
+second turn was available the whole time, and the correction it carries lands in the conversation that
+already holds the work. One turn was never one session. Before writing a limit into a default, check
+that the layer underneath actually imposes it.
 
 ### Two primitives that only became obvious under time pressure
 

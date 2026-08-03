@@ -362,11 +362,12 @@ export function createPiAgentBridge(
 
 /**
  * A background subagent's session (spec §2.2): one `pi --mode json -p` subprocess per
- * `sendAndAwaitEnd` call (step-runner.ts calls it exactly once — a background step's repair budget is
- * forced to 0, spec §9.2 — but nothing here assumes that; a second call just spawns a second process).
- * Isolated by construction: a fresh CLI invocation gets its own context window and tool loop, with no
- * access to the parent session's history — `request.history` is always undefined for a background
- * request (see AgentRequest's doc, engine/types.ts) so there is nothing to seed it with anyway.
+ * `sendAndAwaitEnd` call. A second call is ordinary, not exceptional — a steering repair (spec §9.2)
+ * spawns another process against the SAME `--session` file, which the CLI resumes, so the correction
+ * lands in the conversation that already holds the work being corrected.
+ * Isolated from the PARENT by construction: a fresh CLI invocation gets its own context window and tool
+ * loop, with no access to the parent session's history — `request.history` is always undefined for a
+ * background request (see AgentRequest's doc, engine/types.ts) so there is nothing to seed it with.
  */
 function backgroundSession(
 	modelRegistry: ModelRegistry,

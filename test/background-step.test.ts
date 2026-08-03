@@ -70,10 +70,10 @@ describe("background agent step (spec §2.2/§9.2, faked subagent seam offline)"
 		expect(agent.opened).toBe(1)
 
 		const events = await store.loadEvents(result.runId)
-		expect(steerEvents(events)).toHaveLength(0) // never steered — one-shot, no resumable conversation
+		expect(steerEvents(events)).toHaveLength(0) // valid reply — no steering needed
 	})
 
-	it("never steers invalid output in-session — no agent-steer events even though the reply is bad", async () => {
+	it("steers invalid output in-session — background steps get repairs like any contracted step", async () => {
 		const step = createAgentStep({
 			name: "bg",
 			output: outputSchema,
@@ -81,72 +81,81 @@ describe("background agent step (spec §2.2/§9.2, faked subagent seam offline)"
 			maxOutputRepairs: 2,
 			prompt: () => "go",
 		})
-		const workflow = createWorkflow({ name: "bg-invalid" }).then(step).commit()
-		// Two invalid subagent runs: the first attempt and the one free repeat an unsteerable step gets.
-		const agent = scriptedAgent([['{"summary":123}'], ['{"summary":123}']]) // schema violation
+		const workflow = createWorkflow({ name: "bg-steer" }).then(step).commit()
+		// One session: invalid → correction → invalid → correction → invalid → repairs exhausted → crash
+		const agent = scriptedAgent([['{"summary":123}', '{"summary":456}', '{"summary":789}']])
 		const { host, store } = createTestHost({ startAgent: agent.startAgent })
 
 		const result = await runWorkflow(workflow, undefined, host)
 
 		expect(result.status).toBe("crashed")
-		expect(agent.opened).toBe(2) // a fresh SESSION per attempt…
-		expect(agent.messages).toHaveLength(2) // …one turn each, never a correction inside one
+		expect(agent.opened).toBe(1) // one session, steered in-session, never a fresh one
+		expect(agent.messages).toHaveLength(3) // prompt + 2 corrections
 		const events = await store.loadEvents(result.runId)
-		expect(steerEvents(events)).toHaveLength(0) // maxOutputRepairs is ignored for background — no steering budget at all
+		expect(steerEvents(events)).toHaveLength(2) // two corrections sent
+		expect(retryEvents(events)).toHaveLength(0) // no outer retry — default maxRetry is 0
 	})
 
-	it("repeats once by default, since a step that cannot be steered would otherwise die on one bad reply", async () => {
-		// No `retry` declared: the default for an unsteerable step is one repeat (spec §9.1/§9.2), which is
-		// the counterpart of the two in-session repairs a steerable step gets for free.
+	it("completes after a steering repair in the same session", async () => {
 		const step = createAgentStep({ name: "bg", output: outputSchema, background: true, prompt: () => "go" })
-		const workflow = createWorkflow({ name: "bg-default-retry" }).then(step).commit()
-		const agent = scriptedAgent([['{"summary":123}'], [valid]]) // invalid, then good
+		const workflow = createWorkflow({ name: "bg-steer-ok" }).then(step).commit()
+		// Session 1: invalid → correction → valid
+		const agent = scriptedAgent([['{"summary":123}', valid]])
 		const { host, store } = createTestHost({ startAgent: agent.startAgent })
 
 		const result = await runWorkflow(workflow, undefined, host)
 
 		expect(result.status).toBe("completed")
-		expect(agent.opened).toBe(2)
+		expect(result.output).toEqual({ summary: "ok" })
+		expect(agent.opened).toBe(1) // same session, repaired in-conversation
 		const events = await store.loadEvents(result.runId)
-		expect(events.filter((e) => e.type === "step-retry")).toHaveLength(1)
+		expect(steerEvents(events)).toHaveLength(1)
+		expect(retryEvents(events)).toHaveLength(0) // no outer retry needed
 	})
 
-	it("falls back to the repeat policy on invalid output: retries with a fresh subagent session and succeeds", async () => {
+	it("falls back to the repeat policy after repairs are exhausted, and a fresh session succeeds", async () => {
 		const step = createAgentStep({
 			name: "bg",
 			output: outputSchema,
 			background: true,
 			retry: { maxRetry: 1 },
+			maxOutputRepairs: 1, // exhaust quickly: 1 repair, then retry
 			prompt: () => "go",
 		})
 		const workflow = createWorkflow({ name: "bg-retry" }).then(step).commit()
-		// First subagent invocation: invalid. Second (fresh, retried) invocation: valid.
-		const agent = scriptedAgent([['{"summary":123}'], [valid]])
+		// Session 1: invalid → correction → invalid → repairs exhausted → outer retry
+		// Session 2: valid
+		const agent = scriptedAgent([['{"summary":123}', '{"summary":456}'], [valid]])
 		const { host, store } = createTestHost({ startAgent: agent.startAgent })
 
 		const result = await runWorkflow(workflow, undefined, host)
 
 		expect(result.status).toBe("completed")
-		expect(agent.opened).toBe(2) // a fresh, isolated subagent session per attempt
+		expect(agent.opened).toBe(2) // exhausted repairs → fresh session
 		expect(agent.backgrounds).toEqual([true, true])
-
 		const events = await store.loadEvents(result.runId)
-		expect(steerEvents(events)).toHaveLength(0) // still never steered
+		expect(steerEvents(events)).toHaveLength(1) // one steer in session 1
 		const retries = retryEvents(events)
 		expect(retries).toHaveLength(1)
 		expect(retries[0]).toMatchObject({ path: "bg", attempt: 1, reason: "invalid-output" })
 	})
 
-	it("crashes once the repeat policy is exhausted too", async () => {
+	it("crashes once repairs AND the repeat policy are exhausted", async () => {
 		const step = createAgentStep({
 			name: "bg",
 			output: outputSchema,
 			background: true,
 			retry: { maxRetry: 1 },
+			maxOutputRepairs: 1,
 			prompt: () => "go",
 		})
 		const workflow = createWorkflow({ name: "bg-retry-exhaust" }).then(step).commit()
-		const agent = scriptedAgent([['{"summary":123}'], ['{"summary":456}']]) // both invalid
+		// Session 1: invalid → correction → invalid → repairs exhausted → retry
+		// Session 2: invalid → correction → invalid → repairs exhausted → crash
+		const agent = scriptedAgent([
+			['{"summary":123}', '{"summary":456}'],
+			['{"summary":789}', '{"summary":false}'],
+		])
 		const { host, store } = createTestHost({ startAgent: agent.startAgent })
 
 		const result = await runWorkflow(workflow, undefined, host)
@@ -154,7 +163,7 @@ describe("background agent step (spec §2.2/§9.2, faked subagent seam offline)"
 		expect(result.status).toBe("crashed")
 		expect(agent.opened).toBe(2)
 		const events = await store.loadEvents(result.runId)
-		expect(steerEvents(events)).toHaveLength(0)
+		expect(steerEvents(events)).toHaveLength(2) // 1 per session
 		expect(retryEvents(events)).toHaveLength(1) // 2 attempts -> 1 retry
 	})
 

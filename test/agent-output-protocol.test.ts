@@ -11,8 +11,8 @@ const outputSchema = Type.Object({ verdict: Type.String() })
 /**
  * The engine owns the output contract (spec §2.2/§9.2): a step's reply is parsed and validated against
  * its `outputSchema` whether or not the author remembered to describe it, so the framework states it —
- * exactly as it already did for `asks` steps and for steering corrections. A `background`/`isolated`
- * step has no repair budget at all, so an unstated expectation there costs the whole attempt.
+ * exactly as it already did for `asks` steps and for steering corrections. An unstated expectation
+ * otherwise burns a repair turn on learning the shape rather than fixing the content.
  */
 describe("output protocol injection", () => {
 	it("appends the schema to a plain agent step's first message", async () => {
@@ -57,7 +57,7 @@ describe("output protocol injection", () => {
 		const workflow = createWorkflow({ name: "retry-protocol" }).then(step).commit()
 
 		const run = await createTestRun(workflow, {
-			// First attempt: unparseable, and with no repair budget left it fails the attempt outright.
+			// First attempt: three unparseable turns — the prompt plus both repairs — then the retry succeeds.
 			agents: { judge: [raw("nope"), raw("still nope"), raw("nope again"), reply({ verdict: "ok" })] },
 		})
 

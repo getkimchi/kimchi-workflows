@@ -161,30 +161,18 @@ export async function runAgentStep(
 		return runAgentSession(step, input, host, ctx, state, sig, path, entry, attemptNumber, startingTokens)
 	}
 
-	// An unsteerable step gets one repeat by default (spec §9.1/§9.2). A steerable step's first invalid
-	// reply is answered with a correction in the same session; an isolated one's is simply fatal, and
-	// "one bad reply ends the step" is a worse default than paying for a second, clean attempt. Live
-	// terminal-bench runs bear this out: retries rescued attempts that would otherwise have crashed the
-	// run outright. An author who declares `retry` still overrides this in either direction.
-	const unsteerable = step.background === true || step.isolated === true
-	return retryLoop(
-		step,
-		host,
-		state,
-		signal,
-		path,
-		attempt,
-		resolveBudgetMs(step, ctx),
-		carryOverMs,
-		unsteerable ? 1 : 0,
-	)
+	// A step with an output contract is always steerable: the model can be reminded to call
+	// `submit_result` in the same resumed session, whether it runs in-process or as a background
+	// subprocess. `background`/`isolated` control HOW the session runs, not whether it can be steered.
+	// A step with no output contract cannot be wrong, so neither repairs nor default retries apply.
+	return retryLoop(step, host, state, signal, path, attempt, resolveBudgetMs(step, ctx), carryOverMs)
 }
 
 /**
  * Shared retry loop (spec §9): wrap each attempt in the time budget, re-attempt `retryable` failures
- * within budget. `defaultMaxRetry` is what applies when the step declares no policy of its own — 0 for
- * anything steerable, since an in-session step already gets repair turns (spec §9.2), and 1 for a step
- * that cannot be steered at all (see {@link runAgentStep}).
+ * within budget. A step that declares no policy of its own runs exactly once (§9.1's `maxRetry` default
+ * of 0): an agent step with a contract has already spent its in-session repairs by the time an attempt
+ * fails here (§9.2), and those are the cheaper budget — they keep the context a retry would rebuild.
  */
 async function retryLoop(
 	step: BudgetedStep,
@@ -197,9 +185,8 @@ async function retryLoop(
 	attempt: (signal: AbortSignal, attemptNumber: number) => Promise<AttemptResult>,
 	budgetMs: number | undefined,
 	carryOverMs = 0,
-	defaultMaxRetry = 0,
 ): Promise<StepOutcome> {
-	const totalAttempts = Math.max(1, (step.retry?.maxRetry ?? defaultMaxRetry) + 1)
+	const totalAttempts = Math.max(1, (step.retry?.maxRetry ?? 0) + 1)
 	const backoffMs = step.retry?.backoffMs ?? 0
 	let lastError = ""
 
@@ -341,12 +328,10 @@ async function runFunctionAttempt(
  * does the attempt FAIL and the repeat policy apply" — a fresh session (a genuine retry, §9.1) can
  * succeed where a poisoned context could not, so this never short-circuits the outer retry policy.
  * `maxRetry` defaults to 0, so by default the crash still happens on the very next loop turn — only an
- * author who declared `retry` sees a different outcome. A `background` step has no repair budget at all
- * (§9.2: forced to 0 below, since a one-shot subagent cannot be steered) — the same `retryable` outcome
- * covers it uniformly, rather than needing a special case. An `isolated` step (spec §2.2 — one that can
- * overlap with a sibling, tagged onto the step at `.commit()` by flow/isolation.ts) runs through the SAME
- * isolated subprocess path as `background` (src/host/pi-agent.ts) and is just as unsteerable, so it gets
- * the same forced-zero repair budget.
+ * author who declared `retry` sees a different outcome. `background` and `isolated` steps (spec §2.2)
+ * take the SAME path: they run as a subprocess per turn (src/host/pi-agent.ts) but resume one session
+ * file, so a correction reaches the model in the conversation that holds its work. How a session runs
+ * has no bearing on whether it can be steered — only the presence of an output contract does.
  */
 async function runAgentSession(
 	step: AgentStep,
@@ -365,13 +350,13 @@ async function runAgentSession(
 	// and tagged onto the step itself — read straight off it here, never re-derived from what happens to
 	// be in flight.
 	const isolated = step.isolated === true
-	// A `background` or (statically) `isolated` step is a one-shot PI subagent (spec §2.2/§9.2, see
-	// src/host/pi-agent.ts): there is no resumable conversation to steer, so its repair budget is forced
-	// to 0 regardless of what the step itself declares — the loop below then runs exactly one turn before
-	// it must succeed or fail outright.
-	// A step with no output contract has nothing to be steered TOWARD: its reply is whatever it says, and
-	// cannot be wrong (spec §2.2 — it acts rather than reports).
-	const noSteering = step.background === true || isolated || step.outputSchema === undefined
+	// A step with an output contract is always steerable: a `background` or `isolated` step runs as a
+	// subprocess per turn, but its session file (`--session <path>`) is resumed on each
+	// `sendAndAwaitEnd`, so a correction reaches the model in the SAME conversation, with its prior work
+	// in front of it. `maxOutputRepairs` applies regardless of how the session runs.
+	// A step with no output contract has nothing to be steered TOWARD: its reply is whatever it says,
+	// and cannot be wrong (spec §2.2 — it acts rather than reports).
+	const noSteering = step.outputSchema === undefined
 	const maxRepairs = noSteering ? 0 : Math.max(0, step.maxOutputRepairs ?? DEFAULT_MAX_OUTPUT_REPAIRS)
 	const steerSchema = step.outputSchema
 	const history = entry.kind === "answer" ? entry.conversation : undefined
@@ -529,8 +514,8 @@ function checkAgentTurn(step: AgentStep, turn: AgentTurn): ReplyCheck {
  * protocol (which names both tools and embeds both schemas); every other agent step gets the plain
  * output protocol.
  *
- * This matters most for a step that cannot be steered — `background`/`isolated` ones have no repair
- * budget at all (spec §9.2) — where a single unstated expectation is the whole attempt.
+ * Stating it up front is what keeps the repair budget for genuine mistakes: a step that has to spend its
+ * first correction learning the shape it was never told has one fewer turn to get the content right.
  */
 function freshPrompt(step: AgentStep, input: unknown, ctx: RunContext): string {
 	const prompt = step.buildPrompt({ input, ctx })
