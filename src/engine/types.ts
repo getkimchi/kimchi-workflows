@@ -11,6 +11,24 @@ import type { Questionnaire } from "../flow/questionnaire.ts"
 export type RetryReason = "thrown-error" | "invalid-output" | "budget-exceeded" | "agent-error"
 
 /**
+ * How an agent's reply failed its output contract (spec §9.2) — the classification behind an
+ * `agent-steer`, decided where the violation is DETECTED (`checkAgentTurn`) rather than re-derived by
+ * matching on the human-readable message it also produces.
+ *
+ * The message names the specific field and is what the model is corrected with; this is the bounded
+ * vocabulary a consumer can count. The distinction matters because these fail for unrelated reasons:
+ * `no-submission` is a model that ended its turn without calling the tool at all, `schema-violation` is
+ * one that answered in the wrong shape, and `asking-not-allowed` is an author who declared a step that
+ * cannot ask questions and prompted it as though it could.
+ */
+export type AgentOutputViolationKind =
+	| "no-submission"
+	| "malformed-arguments"
+	| "asking-not-allowed"
+	| "invalid-questions"
+	| "schema-violation"
+
+/**
  * Append-only lifecycle events (spec §8.1, §12.1), each tagged with the run id and an ISO timestamp.
  *
  * Every event that names a step or node carries its `path` — the full DYNAMIC node path (spec §8.5),
@@ -39,7 +57,19 @@ export type RunEvent =
 	| { type: "step-retry"; runId: string; path: string; attempt: number; reason: RetryReason; error: string; at: string }
 	// An in-session output-steering correction (spec §9.2): the agent's reply was invalid and a
 	// correction was sent within the same session. `attempt` is the 1-based repair number.
-	| { type: "agent-steer"; runId: string; path: string; attempt: number; violation: string; at: string }
+	// `violationKind` classifies the failure (`violation` states it); `resumeKey` names the conversation
+	// this step continues, when it declared one (spec §2.2) — a repair on a SHARED session is a different
+	// fact from one on a cold session, and neither `path` nor `attempt` distinguishes them.
+	| {
+			type: "agent-steer"
+			runId: string
+			path: string
+			attempt: number
+			violation: string
+			violationKind: AgentOutputViolationKind
+			resumeKey?: string
+			at: string
+	  }
 	// A turn that ended on a FAILED REQUEST rather than on anything the model did (see `AgentTurnError`).
 	// Recorded as its own event because the alternative is silence: the provider's message is stated
 	// nowhere else the engine can see, and the step failure it causes is otherwise indistinguishable from
@@ -47,6 +77,9 @@ export type RunEvent =
 	// not a repair number — a failed request never reaches the repair budget. `terminal` marks a failure
 	// no retry can clear: a resumed session whose transcript no longer fits the context window is over,
 	// and the run should say so once rather than re-discover it on every later step sharing the session.
+	// `resumeKey` is the conversation this step continues, when it declared one (spec §2.2): it is what
+	// separates "this SESSION is degrading" — a shared transcript growing past the context window, which
+	// every later step keyed to it will hit too — from "this step is hard".
 	| {
 			type: "agent-error"
 			runId: string
@@ -55,6 +88,7 @@ export type RunEvent =
 			kind: AgentTurnErrorKind
 			message: string
 			terminal: boolean
+			resumeKey?: string
 			at: string
 	  }
 	// One completed agent turn's token usage (spec §9.3), recorded as it happens rather than only summed

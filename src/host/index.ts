@@ -49,6 +49,31 @@ export { resumeAction } from "./resume-router.ts"
 export type { AcquireResult, ActiveRun, BeginResult, LockInfo, ProcessEnv, RunLock } from "./run-lock.ts"
 export { createProcessEnv, createRunLock } from "./run-lock.ts"
 export { summarizeRun } from "./summarize-run.ts"
+export type { PublishTelemetry, TelemetryMapper, TelemetryOptions, TelemetryStore } from "./telemetry-bridge.ts"
+export { createTelemetryMapper, withTelemetry } from "./telemetry-bridge.ts"
+export type {
+	AgentErrorPayload,
+	AgentSteeredPayload,
+	AnswersProvidedPayload,
+	QuestionnaireAskedPayload,
+	RunBlockedPayload,
+	RunCancelledPayload,
+	RunCompletedPayload,
+	RunCrashedPayload,
+	RunResumedPayload,
+	RunStartedPayload,
+	StepCancelledPayload,
+	StepCompletedPayload,
+	StepFailedPayload,
+	StepRetriedPayload,
+	StepStartedPayload,
+	WorkflowAgentEventCommon,
+	WorkflowEventCommon,
+	WorkflowEventPayload,
+	WorkflowEventType,
+	WorkflowStepEventCommon,
+} from "./telemetry-events.ts"
+export { MAX_ERROR_LENGTH, truncateError, WORKFLOW_TELEMETRY_CHANNEL } from "./telemetry-events.ts"
 export type { RunStore, RunSummary } from "./types.ts"
 export type { BrokenWorkflow, WorkflowCatalog, WorkflowEntry, WorkflowResolution } from "./workflow-catalog.ts"
 export { discoverWorkflows, resolveWorkflow, WORKFLOW_SUFFIX } from "./workflow-catalog.ts"

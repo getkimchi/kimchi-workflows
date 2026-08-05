@@ -42,7 +42,15 @@ describe("deriveStepStates (spec §5.1, §5.4): one state per case", () => {
 		const events: RunEvent[] = [
 			started,
 			{ type: "step-started", runId, path: "s", input: undefined, at },
-			{ type: "agent-steer", runId, path: "s", attempt: 1, violation: "bad json", at },
+			{
+				type: "agent-steer",
+				runId,
+				path: "s",
+				attempt: 1,
+				violation: "bad json",
+				violationKind: "schema-violation",
+				at,
+			},
 		]
 		expect(stepState(deriveStepStates(events), "s")).toBe("in_progress")
 	})

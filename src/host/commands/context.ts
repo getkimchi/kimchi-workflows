@@ -34,12 +34,19 @@ export type Notify = CommandCtx["ui"]["notify"]
  * release on every outcome (including `blocked` — blocked ≠ in_progress, spec §7.1). A successful
  * reclaim (spec §7.3) is announced too, since it silently rewrites another run's recorded status.
  * Returns the run result, or `undefined` when the lock could not be acquired.
+ *
+ * `store.observeResult` — present only when the store is the telemetry-decorated one
+ * (`host/telemetry-bridge.ts`) — is handed the outcome on the way out. This is the one run state with no
+ * event behind it: BLOCKING is the absence of a terminal event, so a bridge listening to the log alone
+ * cannot see it. It travels on the store rather than as a seventh parameter because the store is already
+ * the single object every execution's bookkeeping goes through here (`guard.begin` takes it for the same
+ * reason), and this is the only place every `RunResult` in the process passes.
  */
 export async function runGuarded(
 	guard: RunLock,
 	runId: string,
 	projectRoot: string,
-	store: Pick<RunStore, "appendEvent">,
+	store: Pick<RunStore, "appendEvent"> & { observeResult?: (result: RunResult) => void },
 	notify: Notify,
 	run: (signal: AbortSignal) => Promise<RunResult>,
 ): Promise<RunResult | undefined> {
@@ -55,7 +62,9 @@ export async function runGuarded(
 		)
 	}
 	try {
-		return await run(result.controller.signal)
+		const outcome = await run(result.controller.signal)
+		store.observeResult?.(outcome)
+		return outcome
 	} finally {
 		await guard.end(runId, projectRoot)
 	}

@@ -19,7 +19,7 @@ import { buildCorrectionMessage } from "./agent-output.ts"
 import { createRunContext, createStepLogger, iso, type RunState, type StepOutcome } from "./context.ts"
 import type { NodePath } from "./node-path.ts"
 import { readSubmittedPayload, SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "./output-tools.ts"
-import type { AgentTurn, AgentTurnError, HostPort, RetryReason } from "./types.ts"
+import type { AgentOutputViolationKind, AgentTurn, AgentTurnError, HostPort, RetryReason } from "./types.ts"
 
 /** Default in-session output-steering budget (spec §9.2) when an agent step declares none. */
 const DEFAULT_MAX_OUTPUT_REPAIRS = 2
@@ -385,6 +385,11 @@ async function runAgentSession(
 	const maxRepairs = noSteering ? 0 : Math.max(0, step.maxOutputRepairs ?? DEFAULT_MAX_OUTPUT_REPAIRS)
 	const steerSchema = step.outputSchema
 	const history = entry.kind === "answer" ? entry.conversation : undefined
+	// Resolved once, up front: the session's file name and the turn-level events below all need the
+	// same value, and a per-execution `resumable()` may read the run context, so re-resolving at call
+	// time is not free of consequence. The events record the key so a consumer can tell a failing
+	// session from a failing step (see `agent-error`).
+	const resumeKey = resolveResumeKey(step, ctx)
 	// `resumeKey` defaults to the step's own name: every execution of THIS step continues the same
 	// conversation, which is what makes a round-two worker pick up where round one was cut off (spec
 	// §2.2). A step declaring a STRING instead continues the conversation under THAT key, which several
@@ -403,7 +408,7 @@ async function runAgentSession(
 		attempt,
 		background: step.background,
 		isolated,
-		resumeKey: resolveResumeKey(step, ctx),
+		resumeKey,
 		// Handed over so a host running this out-of-process can register `submit_result` typed by it there.
 		outputSchema: step.outputSchema,
 		asks: step.asks,
@@ -442,6 +447,7 @@ async function runAgentSession(
 					kind: turn.error.kind,
 					message: turn.error.message,
 					terminal,
+					resumeKey,
 					at: iso(host),
 				})
 				const error = `step "${step.name}": ${turn.error.kind}: ${turn.error.message}`
@@ -486,6 +492,8 @@ async function runAgentSession(
 					path,
 					attempt: repair + 1,
 					violation: lastViolation,
+					violationKind: check.violationKind,
+					resumeKey,
 					at: iso(host),
 				})
 				message = buildCorrectionMessage(steerSchema, lastViolation, step.asks === true)
@@ -531,7 +539,10 @@ function resumes(step: AgentStep): boolean {
 type ReplyCheck =
 	| { ok: true; kind: "result"; value: unknown }
 	| { ok: true; kind: "questions"; questions: Questionnaire }
-	| { ok: false; violation: string }
+	// `violationKind` is classified HERE, where each case is already distinguished, rather than left for a
+	// consumer to recover by matching on `violation`'s wording (which names fields and tool names, and is
+	// written for the model being corrected — not as a stable vocabulary).
+	| { ok: false; violation: string; violationKind: AgentOutputViolationKind }
 
 /**
  * Read a step's output from one turn, in order of how displaceable each channel is.
@@ -551,6 +562,7 @@ function checkAgentTurn(step: AgentStep, turn: AgentTurn): ReplyCheck {
 	if (!submitted) {
 		return {
 			ok: false,
+			violationKind: "no-submission",
 			violation: step.asks
 				? `the turn ended without calling ${SUBMIT_RESULT_TOOL} or ${SUBMIT_QUESTIONS_TOOL}`
 				: `the turn ended without calling ${SUBMIT_RESULT_TOOL}`,
@@ -558,20 +570,25 @@ function checkAgentTurn(step: AgentStep, turn: AgentTurn): ReplyCheck {
 	}
 
 	if (submitted.kind === "malformed") {
-		return { ok: false, violation: `${submitted.tool}: ${submitted.reason}` }
+		return { ok: false, violationKind: "malformed-arguments", violation: `${submitted.tool}: ${submitted.reason}` }
 	}
 
 	if (submitted.kind === "questions") {
-		if (!step.asks) return { ok: false, violation: `${SUBMIT_QUESTIONS_TOOL}: this step cannot ask questions` }
+		if (!step.asks)
+			return {
+				ok: false,
+				violationKind: "asking-not-allowed",
+				violation: `${SUBMIT_QUESTIONS_TOOL}: this step cannot ask questions`,
+			}
 		const violation = describeSchemaViolations(QuestionnaireSchema, submitted.value)
 		return violation
-			? { ok: false, violation: `${SUBMIT_QUESTIONS_TOOL}: ${violation}` }
+			? { ok: false, violationKind: "invalid-questions", violation: `${SUBMIT_QUESTIONS_TOOL}: ${violation}` }
 			: { ok: true, kind: "questions", questions: submitted.value as Questionnaire }
 	}
 
 	const violation = describeSchemaViolations(step.outputSchema, submitted.value)
 	return violation
-		? { ok: false, violation: `${SUBMIT_RESULT_TOOL}: ${violation}` }
+		? { ok: false, violationKind: "schema-violation", violation: `${SUBMIT_RESULT_TOOL}: ${violation}` }
 		: { ok: true, kind: "result", value: submitted.value }
 }
 
