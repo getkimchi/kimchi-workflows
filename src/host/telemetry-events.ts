@@ -25,26 +25,36 @@
  * contract drift is therefore silent rather than a compile error), so this module is the one place a
  * change to either side has to be reconciled against.
  *
- * Two conventions meet at this boundary and neither bends: the channel name is `namespace:snake_case`
- * (the harness bus convention, as ferment's `ferment:step_started` already is), and `event` values are
- * snake_case (`run_started`), while the OTLP event names the subscriber translates them into are dotted
- * (`workflow.run.started`) — a mechanical derivation, `workflow.` + the discriminator with `_` → `.`.
- * Payload FIELDS are snake_case here — unlike ferment's camelCase payloads — because the subscriber's
- * job is then a pass-through rather than a rename table it could get wrong one field at a time.
+ * ## Telemetry speaks its own language
+ *
+ * These payloads carry domain shapes, not wire shapes and not engine internals. Three consequences:
+ *
+ *  - **Vocabulary is telemetry's own.** {@link WorkflowRetryReason} says `exception` where the engine's
+ *    run log says `thrown-error`, and it absorbs the agent-turn error kinds (`provider_error`,
+ *    `context_window`) that the engine records as a separate event. The mapper translates; internal
+ *    nomenclature stays internal.
+ *  - **Errors travel as an envelope**, {@link WorkflowError} — an object with a `message`, not a bare
+ *    string. The bus carries in-process objects; OTLP's flat-attribute format is the SUBSCRIBER'S
+ *    constraint, and the subscriber flattens (`error` → `error.message`, generically). The envelope is
+ *    the extension point: a future `retryable`, `source` or `kind` lands inside it without touching any
+ *    event's shape or any subscriber code.
+ *  - **Names are snake_case** (`run_started`), the channel is `namespace:snake_case` (the harness bus
+ *    convention), and the subscriber's OTLP event names are a mechanical derivation — `workflow.` + the
+ *    discriminator with `_` → `.` (`workflow.run.started`).
  *
  * ## What may travel (spec R2)
  *
- * Flat records of primitives, and nothing derived from what a run was ABOUT: no step input or output, no
- * questionnaire text, no answers, no `step-log` messages. Names, paths, statuses, counts, attempt
- * numbers, classifications, timestamps, durations — plus error messages, truncated
- * ({@link MAX_ERROR_LENGTH}), because a failure whose cause is unstated is not worth exporting. The
+ * Flat records of primitives — plus the one named envelope, {@link WorkflowError}, itself one level of
+ * primitives — and nothing derived from what a run was ABOUT: no step input or output, no questionnaire
+ * text, no answers, no `step-log` messages. Of the run's structure, only the leaf step NAME travels:
+ * dynamic node paths, static keys and resume keys stay in the run log. Error messages are truncated
+ * ({@link MAX_ERROR_LENGTH}), because a failure whose cause is unstated is not worth exporting; the
  * engine's error strings name schemas, fields and tools, never the values that failed them
  * (`describeSchemaViolations`), so the truncation is a size bound rather than a redaction.
  *
  * `test/telemetry-contract.test.ts` asserts this over every mapped event, so it is an executable rule
  * rather than a convention.
  */
-import type { AgentOutputViolationKind, AgentTurnErrorKind, RetryReason } from "../engine/types.ts"
 
 /**
  * The single channel this package publishes on. What arrives is always a {@link WorkflowEventPayload};
@@ -54,6 +64,37 @@ export const WORKFLOW_TELEMETRY_CHANNEL = "workflow:telemetry"
 
 /** How much of an error message travels (spec R2 — kimchi's own convention for the same field). */
 export const MAX_ERROR_LENGTH = 300
+
+/**
+ * Why a step attempt failed and was retried — telemetry's own taxonomy, translated from the engine's
+ * rather than inherited (see the module header):
+ *
+ *  - `exception` — the step's own code threw (the run log's `thrown-error`).
+ *  - `invalid_output` — the step produced output its declared schema rejects.
+ *  - `budget_exceeded` — the attempt ran past a declared budget.
+ *  - `provider_error` — an agent turn's REQUEST failed: the provider refused, nothing the model did.
+ *  - `context_window` — an agent turn's request exceeded the context window.
+ *
+ * The last two preserve the distinction the engine draws deliberately (provider-failed vs
+ * model-misbehaved) without a separate agent-error event: a failed request surfaces as the retry it
+ * causes, and a failure no retry can clear surfaces as the `step_failed` / `run_crashed` that follows.
+ */
+export type WorkflowRetryReason =
+	| "exception"
+	| "invalid_output"
+	| "budget_exceeded"
+	| "provider_error"
+	| "context_window"
+
+/**
+ * The error envelope (spec R2's one exception to flatness): one level of primitives, `message` today.
+ * The subscriber flattens object-valued fields generically (`error` → `error.message`), so fields added
+ * here later — `retryable`, `source`, a machine-readable `kind` — ship end to end with no subscriber
+ * change.
+ */
+export interface WorkflowError {
+	readonly message: string
+}
 
 /**
  * On every payload (spec R4). There is no trace context in this pipeline — flat attributes ARE the
@@ -82,36 +123,19 @@ export interface WorkflowEventCommon {
 /**
  * Added by every event that names a step (spec R4).
  *
- * All three are derived from the one dynamic node path the engine records (spec §8.5):
- *  - `path` — the full dynamic address, indices included (`phases@1/steps@0/attempts#2/step-turn`).
- *    Under concurrency the event ORDER is not deterministic, so a consumer correlates by this, never by
- *    adjacency.
- *  - `static_key` — the same path with loop iteration indices dropped and foreach item indices kept
- *    (`staticKeyOf`). The stable per-item identity: it is what makes "this step, across every iteration
- *    of the loop it sits in" a groupable series.
- *  - `step_name` — the leaf segment alone, for the common case where the enclosing structure does not
- *    matter.
+ * `step_name` is the LEAF of the dynamic node path the engine records (spec §8.5) — and deliberately
+ * the only piece of the run's structure that travels. Dynamic paths, static keys and resume keys stay
+ * in the run log, where local diagnosis reads them; the exported stream is minimized to the step's
+ * name alone. The accepted consequence: telemetry cannot tell two same-named steps in different
+ * constructs apart, nor separate a foreach item's series from its siblings' — a consumer aggregates by
+ * (`run_id`, `workflow_name`, `step_name`) and no finer.
  *
- * `attempt` is deliberately NOT here: it appears only on the events that record one (a retry, an agent
- * turn), because a step's lifecycle events do not — `step-started` is emitted once per execution, with
- * the retry loop inside it.
+ * `attempt` is deliberately NOT here: it appears only on `step_retried`, because a step's lifecycle
+ * events do not record one — `step-started` is emitted once per execution, with the retry loop inside
+ * it.
  */
 export interface WorkflowStepEventCommon extends WorkflowEventCommon {
-	readonly path: string
-	readonly static_key: string
 	readonly step_name: string
-}
-
-/**
- * Added by events raised during an agent step's turn.
- *
- * `resume_key` is the conversation the step continues (spec §2.2's `resumable`) — a short author-chosen
- * slug, content-free by construction (it becomes a filename). Present only when the step declared one.
- * It is what separates a degrading SESSION from a hard step: a shared transcript that has outgrown the
- * context window fails every later step keyed to it, which `path` alone reads as unrelated failures.
- */
-export interface WorkflowAgentEventCommon extends WorkflowStepEventCommon {
-	readonly resume_key?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -122,22 +146,17 @@ export interface RunStartedPayload extends WorkflowEventCommon {
 	readonly event: "run_started"
 }
 
-/** `from_path` is the node execution resumed at; absent when nothing remained to run. */
 export interface RunResumedPayload extends WorkflowEventCommon {
 	readonly event: "run_resumed"
-	readonly from_path?: string
 }
 
 /**
- * The run handed control back with questions outstanding (spec §10). Not a `RunEvent`: blocking is the
- * ABSENCE of a terminal event, so this is published where a `blocked` result is observed instead.
- *
- * `pending_questionnaires` counts every step currently blocked, not just the one being reported — under
- * concurrency several can block in the same round (spec §8.6).
+ * The run handed control back and is waiting on a human (spec §10). Not a `RunEvent`: blocking is the
+ * ABSENCE of a terminal event, so this is published where a `blocked` result is observed instead. What
+ * it is waiting FOR is a run-log detail; the exported fact is only that it waits.
  */
 export interface RunBlockedPayload extends WorkflowEventCommon {
 	readonly event: "run_blocked"
-	readonly pending_questionnaires: number
 }
 
 /**
@@ -149,18 +168,16 @@ export interface RunCompletedPayload extends WorkflowEventCommon {
 	readonly duration_ms?: number
 }
 
-/** `path` is absent when the failure belongs to no single step: input validation, or resume-time drift. */
+/** Where it crashed is the run log's to tell (its `run-crashed` records the path); only the cause travels. */
 export interface RunCrashedPayload extends WorkflowEventCommon {
 	readonly event: "run_crashed"
-	readonly path?: string
-	readonly error: string
+	readonly error: WorkflowError
 	readonly duration_ms?: number
 }
 
-/** A cooperative cancel (spec §8.6). `path` is the step it stopped at, if one was executing. */
+/** A cooperative cancel (spec §8.6). */
 export interface RunCancelledPayload extends WorkflowEventCommon {
 	readonly event: "run_cancelled"
-	readonly path?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -171,12 +188,12 @@ export interface StepStartedPayload extends WorkflowStepEventCommon {
 	readonly event: "step_started"
 }
 
-/** `attempt` is the 1-based attempt that just failed; `reason` is the engine's own retry taxonomy. */
+/** `attempt` is the 1-based attempt that just failed; `reason` is {@link WorkflowRetryReason}. */
 export interface StepRetriedPayload extends WorkflowStepEventCommon {
 	readonly event: "step_retried"
 	readonly attempt: number
-	readonly reason: RetryReason
-	readonly error: string
+	readonly reason: WorkflowRetryReason
+	readonly error: WorkflowError
 }
 
 export interface StepCompletedPayload extends WorkflowStepEventCommon {
@@ -193,61 +210,13 @@ export interface StepCompletedPayload extends WorkflowStepEventCommon {
  */
 export interface StepFailedPayload extends WorkflowStepEventCommon {
 	readonly event: "step_failed"
-	readonly error: string
+	readonly error: WorkflowError
 	readonly duration_ms?: number
 }
 
 /** A blocked step abandoned because a sibling crashed in the same concurrent construct (spec §9.5). */
 export interface StepCancelledPayload extends WorkflowStepEventCommon {
 	readonly event: "step_cancelled"
-}
-
-// ---------------------------------------------------------------------------
-// Human-in-the-loop
-// ---------------------------------------------------------------------------
-
-/** `question_count` only — the questions themselves are content (spec R2). */
-export interface QuestionnaireAskedPayload extends WorkflowStepEventCommon {
-	readonly event: "questionnaire_asked"
-	readonly question_count: number
-}
-
-/** `answer_count` only — the answers are the user's own words (spec R2). */
-export interface AnswersProvidedPayload extends WorkflowStepEventCommon {
-	readonly event: "answers_provided"
-	readonly answer_count: number
-}
-
-// ---------------------------------------------------------------------------
-// Agent turns
-// ---------------------------------------------------------------------------
-
-/**
- * A turn that ended on a FAILED REQUEST rather than on anything the model did.
- *
- * The distinction the engine draws deliberately, preserved across the boundary: `kind` separates a
- * provider that refused from a context window that overflowed, and `terminal` marks the failure no retry
- * can clear. Without it, a flaky gateway and a misbehaving model are one number.
- */
-export interface AgentErrorPayload extends WorkflowAgentEventCommon {
-	readonly event: "agent_error"
-	readonly attempt: number
-	readonly kind: AgentTurnErrorKind
-	readonly terminal: boolean
-	readonly error: string
-}
-
-/**
- * The model broke the step's output contract and was corrected inside the attempt (spec §9.2).
- *
- * Repairs happen WITHIN an attempt, so retry counts alone hide them entirely — which is what makes this
- * the leading indicator of a badly specified step: it climbs before anything starts failing. `attempt`
- * is the repair number, not the step's attempt.
- */
-export interface AgentSteeredPayload extends WorkflowAgentEventCommon {
-	readonly event: "agent_steered"
-	readonly attempt: number
-	readonly violation_kind: AgentOutputViolationKind
 }
 
 /** Every payload this package publishes, discriminated by `event`. */
@@ -263,10 +232,6 @@ export type WorkflowEventPayload =
 	| StepCompletedPayload
 	| StepFailedPayload
 	| StepCancelledPayload
-	| QuestionnaireAskedPayload
-	| AnswersProvidedPayload
-	| AgentErrorPayload
-	| AgentSteeredPayload
 
 /** The discriminator values — every kind of fact this package publishes. */
 export type WorkflowEventType = WorkflowEventPayload["event"]

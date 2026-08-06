@@ -133,11 +133,12 @@ const EXPECTED_EVENTS: { [K in RunEvent["type"]]: WorkflowEventType | undefined 
 	"step-completed": "step_completed",
 	"step-failed": "step_failed",
 	"step-cancelled": "step_cancelled",
-	"questionnaire-asked": "questionnaire_asked",
-	"answers-provided": "answers_provided",
-	"agent-error": "agent_error",
-	"agent-steer": "agent_steered",
-	// Deferred or excluded, each for its own reason — see the mapper's `switch`.
+	// Deferred or excluded, each for its own reason — see the mapper's `switch`. `agent-error` is
+	// observed (its kind resolves the retry reason that follows) but never published itself.
+	"questionnaire-asked": undefined,
+	"answers-provided": undefined,
+	"agent-error": undefined,
+	"agent-steer": undefined,
 	"run-meta": undefined,
 	"agent-usage": undefined,
 	"step-log": undefined,
@@ -183,8 +184,18 @@ describe("content-free payloads (spec R2)", () => {
 
 		expect(JSON.stringify(mapped)).not.toContain(SENTINEL)
 		for (const [key, value] of Object.entries(mapped)) {
-			expect(key).not.toMatch(/^(input|output|conversation|answers|questionnaire|violation|message|data)$/)
-			expect(["string", "number", "boolean", "undefined"]).toContain(typeof value)
+			expect(key).not.toMatch(
+				/^(input|output|conversation|answers|questionnaire|violation|message|data|path|from_path|static_key|resume_key)$/,
+			)
+			if (key === "error") {
+				// The one named envelope (spec R2): an object of exactly one level of primitives.
+				expect(value).toBeTypeOf("object")
+				for (const inner of Object.values(value as object)) {
+					expect(["string", "number", "boolean", "undefined"]).toContain(typeof inner)
+				}
+			} else {
+				expect(["string", "number", "boolean", "undefined"]).toContain(typeof value)
+			}
 		}
 	})
 
@@ -192,16 +203,16 @@ describe("content-free payloads (spec R2)", () => {
 		const error = "x".repeat(MAX_ERROR_LENGTH + 50)
 		const mapped = seeded().observe({ type: "step-failed", runId: RUN_ID, path: "review", error, at: AT })
 
-		const forwarded = (mapped as { error: string }).error
+		const forwarded = (mapped as unknown as { error: { message: string } }).error.message
 		expect(forwarded).toHaveLength(MAX_ERROR_LENGTH + 1) // the cut is marked, so it cannot read as complete
 		expect(forwarded.startsWith("x".repeat(MAX_ERROR_LENGTH))).toBe(true)
 		expect(forwarded.endsWith("…")).toBe(true)
 	})
 
-	it("leaves a short error message exactly as the engine wrote it", () => {
+	it("wraps a short error message in the envelope exactly as the engine wrote it", () => {
 		const mapped = seeded().observe(SAMPLES["step-failed"])
 
-		expect(mapped).toMatchObject({ error: "gate did not pass" })
+		expect(mapped).toMatchObject({ error: { message: "gate did not pass" } })
 	})
 })
 
@@ -223,51 +234,66 @@ describe("correlation attributes (spec R4)", () => {
 		expect(mapped).toMatchObject({ run_id: RUN_ID, workflow_name: "" })
 	})
 
-	it("carries the dynamic path, the static key and the leaf name for a step inside a foreach", () => {
-		// A foreach item's index is KEPT in the static key (spec §5.4): concurrent items are distinct series.
-		expect(seeded().observe(SAMPLES["step-started"])).toMatchObject({
-			path: "batch@2/review",
-			static_key: "batch@2/review",
-			step_name: "review",
-		})
+	it("reduces a step's address to its leaf name — no path, no static key travels", () => {
+		// Data minimization (spec R4): of the run's structure, only the step NAME is exported. The full
+		// dynamic path stays in the run log for local diagnosis.
+		const mapped = seeded().observe(SAMPLES["step-started"])
+
+		expect(mapped).toMatchObject({ step_name: "review" })
+		expect(mapped).not.toHaveProperty("path")
+		expect(mapped).not.toHaveProperty("static_key")
 	})
 
-	it("drops a loop iteration's index from the static key, so iterations of one step group together", () => {
+	it("names iterations of a looped step identically — telemetry sees one step, however often it runs", () => {
 		const mapper = seeded()
 		const first = mapper.observe({ type: "step-started", runId: RUN_ID, path: "rounds#1/work", input: 1, at: AT })
 		const second = mapper.observe({ type: "step-started", runId: RUN_ID, path: "rounds#2/work", input: 2, at: AT })
 
-		expect(first).toMatchObject({ path: "rounds#1/work", static_key: "rounds/work" })
-		expect(second).toMatchObject({ path: "rounds#2/work", static_key: "rounds/work" })
+		expect(first).toMatchObject({ step_name: "work" })
+		expect(second).toMatchObject({ step_name: "work" })
 	})
 
-	it("carries the resume key on agent-turn events, so a degrading session is separable from a hard step", () => {
-		expect(seeded().observe(SAMPLES["agent-error"])).toMatchObject({
-			resume_key: "orchestrator",
-			kind: "context-window-exceeded",
-			terminal: true,
-			attempt: 3,
+	it("reports a crash's cause without its location — where it crashed is the run log's to tell", () => {
+		const mapped = seeded().observe(SAMPLES["run-crashed"])
+
+		expect(mapped).toMatchObject({ error: { message: 'step "review" input: /id: expected string' } })
+		expect(mapped).not.toHaveProperty("path")
+	})
+})
+
+describe("the retry taxonomy — telemetry's own vocabulary (spec R1)", () => {
+	const retry = (reason: "thrown-error" | "invalid-output" | "budget-exceeded" | "agent-error") =>
+		({ ...SAMPLES["step-retry"], reason }) as RunEvent
+
+	it.each([
+		["thrown-error", "exception"],
+		["invalid-output", "invalid_output"],
+		["budget-exceeded", "budget_exceeded"],
+	] as const)("translates the engine's %s to %s", (engineReason, telemetryReason) => {
+		expect(seeded().observe(retry(engineReason))).toMatchObject({ reason: telemetryReason, attempt: 2 })
+	})
+
+	it("resolves an agent-error retry to the kind the preceding agent-error event recorded", () => {
+		const mapper = seeded()
+		expect(mapper.observe(SAMPLES["agent-error"])).toBeUndefined() // observed for state, never published
+		expect(mapper.observe(retry("agent-error"))).toMatchObject({ reason: "context_window" })
+	})
+
+	it("falls back to provider_error for an agent-error retry whose kind it never saw", () => {
+		expect(seeded().observe(retry("agent-error"))).toMatchObject({ reason: "provider_error" })
+	})
+
+	it("keeps agent-error kinds per step, so concurrent steps cannot inherit each other's cause", () => {
+		const mapper = seeded()
+		mapper.observe({ ...SAMPLES["agent-error"], path: "batch@0/work", kind: "context-window-exceeded" })
+		mapper.observe({ ...SAMPLES["agent-error"], path: "batch@1/work", kind: "provider-error" })
+
+		expect(mapper.observe({ ...retry("agent-error"), path: "batch@1/work" } as RunEvent)).toMatchObject({
+			reason: "provider_error",
 		})
-		expect(seeded().observe(SAMPLES["agent-steer"])).toMatchObject({
-			resume_key: "orchestrator",
-			violation_kind: "schema-violation",
-			attempt: 1,
+		expect(mapper.observe({ ...retry("agent-error"), path: "batch@0/work" } as RunEvent)).toMatchObject({
+			reason: "context_window",
 		})
-	})
-
-	it("omits the resume key for a step that continues no conversation", () => {
-		const { resumeKey: _dropped, ...cold } = SAMPLES["agent-error"]
-
-		expect(seeded().observe(cold)).toMatchObject({ resume_key: undefined })
-	})
-
-	it("counts questions and answers without carrying either", () => {
-		expect(seeded().observe(SAMPLES["questionnaire-asked"])).toMatchObject({ question_count: 2 })
-		expect(seeded().observe(SAMPLES["answers-provided"])).toMatchObject({ answer_count: 2 })
-	})
-
-	it("passes the engine's retry taxonomy through unchanged", () => {
-		expect(seeded().observe(SAMPLES["step-retry"])).toMatchObject({ reason: "invalid-output", attempt: 2 })
 	})
 })
 
@@ -337,46 +363,15 @@ describe("durations (spec R7: self-contained events)", () => {
 describe("run_blocked — the state no event records (spec R3)", () => {
 	it("publishes only for a blocked result, and dates it from the clock", () => {
 		const mapper = seeded()
-		mapper.observe(SAMPLES["questionnaire-asked"])
 
 		const blocked = mapper.blocked({ runId: RUN_ID, status: "blocked", path: "sign-off", questionnaire })
 
-		expect(blocked).toMatchObject({
+		// The bare fact alone: the run waits on a human. What it waits FOR is the run log's business.
+		expect(blocked).toEqual({
 			event: "run_blocked",
 			run_id: RUN_ID,
 			workflow_name: "demo",
 			at: AT,
-			pending_questionnaires: 1,
-		})
-	})
-
-	it("counts every blocked step, not just the one being reported (spec §8.6)", () => {
-		const mapper = seeded()
-		mapper.observe({ ...SAMPLES["questionnaire-asked"], path: "batch@0/ask" })
-		mapper.observe({ ...SAMPLES["questionnaire-asked"], path: "batch@1/ask" })
-
-		const blocked = mapper.blocked({ runId: RUN_ID, status: "blocked", path: "batch@0/ask", questionnaire })
-
-		expect(blocked).toMatchObject({ pending_questionnaires: 2 })
-	})
-
-	it("stops counting a step once its answers arrive", () => {
-		const mapper = seeded()
-		mapper.observe(SAMPLES["questionnaire-asked"])
-		mapper.observe(SAMPLES["answers-provided"])
-
-		expect(mapper.blocked({ runId: RUN_ID, status: "blocked", questionnaire })).toMatchObject({
-			pending_questionnaires: 0,
-		})
-	})
-
-	it("stops counting a blocked step that was abandoned when a sibling crashed (spec §9.5)", () => {
-		const mapper = seeded()
-		mapper.observe(SAMPLES["questionnaire-asked"])
-		mapper.observe({ type: "step-cancelled", runId: RUN_ID, path: "sign-off", at: AT })
-
-		expect(mapper.blocked({ runId: RUN_ID, status: "blocked", questionnaire })).toMatchObject({
-			pending_questionnaires: 0,
 		})
 	})
 

@@ -152,7 +152,7 @@ describe("the decorator's invariants (spec R5: telemetry never affects execution
 		expect(sink.published).toHaveLength(0) // history was already reported by whoever wrote it
 		// ...but the run's identity was learned from it, so this leg's own events are attributable.
 		await store.appendEvent({ type: "run-resumed", runId: RUN_ID, fromPath: "s", at: AT })
-		expect(sink.first("run_resumed")).toMatchObject({ workflow_name: "demo", from_path: "s" })
+		expect(sink.first("run_resumed")).toMatchObject({ workflow_name: "demo" })
 	})
 
 	it("forwards the reads and the delete it adds nothing to", async () => {
@@ -201,8 +201,6 @@ describe("what a run publishes (spec R3)", () => {
 		expect(sink.first("step_completed")).toMatchObject({
 			run_id: RUN_ID,
 			workflow_name: "demo",
-			path: "work",
-			static_key: "work",
 			step_name: "work",
 		})
 		for (const type of ["step_completed", "run_completed"]) {
@@ -210,7 +208,7 @@ describe("what a run publishes (spec R3)", () => {
 		}
 	})
 
-	it("a steering repair, which no retry count would show", async () => {
+	it("a steering repair publishes nothing — repairs are the run log's business, not telemetry's", async () => {
 		const step = createAgentStep({ name: "review", output: summary, maxOutputRepairs: 1, prompt: () => "go" })
 		const workflow = createWorkflow({ name: "demo" }).then(step).commit()
 		const agent = scriptedAgent([["not a submission", '{"summary":"ok"}']])
@@ -218,13 +216,8 @@ describe("what a run publishes (spec R3)", () => {
 
 		await runWorkflow(workflow, undefined, host)
 
-		expect(sink.first("agent_steered")).toMatchObject({
-			path: "review",
-			attempt: 1,
-			violation_kind: "no-submission",
-		})
-		expect(sink.events()).toContain("step_completed") // the repair worked; nothing retried
-		expect(sink.events()).not.toContain("step_retried")
+		// The repair worked inside the attempt: a clean run's sequence, nothing more.
+		expect(sink.events()).toEqual(["run_started", "step_started", "step_completed", "run_completed"])
 	})
 
 	it("a provider failure, told apart from a model that declined to answer", async () => {
@@ -244,15 +237,15 @@ describe("what a run publishes (spec R3)", () => {
 
 		await runWorkflow(workflow, undefined, host)
 
-		expect(sink.first("agent_error")).toMatchObject({
-			path: "review",
+		// No separate agent event travels: the failed request surfaces as the retry it caused, with the
+		// kind the engine recorded resolved into telemetry's own reason vocabulary.
+		expect(sink.events()).not.toContain("agent_error")
+		expect(sink.first("step_retried")).toMatchObject({
+			step_name: "review",
 			attempt: 1,
-			kind: "provider-error",
-			terminal: false,
-			error: "upstream 503",
-			resume_key: "orchestrator", // the session it would continue — a shared one degrades for everyone
+			reason: "provider_error",
+			error: { message: expect.stringContaining("upstream 503") },
 		})
-		expect(sink.first("step_retried")).toMatchObject({ reason: "agent-error", attempt: 1 })
 	})
 
 	it("an optional step's failure, which the run survives — the health signal for these workflows", async () => {
@@ -275,14 +268,14 @@ describe("what a run publishes (spec R3)", () => {
 
 		expect(result.status).toBe("completed") // a run can complete with failed steps in it
 		expect(sink.first("step_failed")).toMatchObject({
-			path: "gate",
-			error: expect.stringContaining("gate"),
+			step_name: "gate",
+			error: { message: expect.stringContaining("gate") },
 		})
 		expect(sink.events()).toContain("run_completed")
 		expect(sink.events()).not.toContain("run_crashed")
 	})
 
-	it("a crash, with the step it happened at", async () => {
+	it("a crash, with its cause in the error envelope", async () => {
 		const workflow = createWorkflow({ name: "demo" })
 			.then(
 				createStep({
@@ -300,12 +293,12 @@ describe("what a run publishes (spec R3)", () => {
 		await runWorkflow(workflow, undefined, host)
 
 		expect(sink.first("run_crashed")).toMatchObject({
-			path: "work",
-			error: expect.stringContaining("boom"),
+			error: { message: expect.stringContaining("boom") },
 		})
+		expect(sink.first("run_crashed")).not.toHaveProperty("path")
 	})
 
-	it("a loop's iterations as one series, keyed by the static path", async () => {
+	it("a loop's iterations as repeated events under the one step name", async () => {
 		let rounds = 0
 		const body = createWorkflow({ name: "round" })
 			.then(
@@ -326,10 +319,12 @@ describe("what a run publishes (spec R3)", () => {
 
 		await runWorkflow(workflow, undefined, host)
 
-		expect(sink.all("step_started").map((payload) => [payload.path, payload.static_key])).toEqual([
-			["rounds#1/work", "rounds/work"],
-			["rounds#2/work", "rounds/work"],
-		])
+		expect(sink.all("step_started").map((payload) => payload.step_name)).toEqual(["work", "work"])
+		// The iteration's address stays local: telemetry sees the same step twice, not two paths.
+		for (const payload of sink.all("step_started")) {
+			expect(payload).not.toHaveProperty("path")
+			expect(payload).not.toHaveProperty("static_key")
+		}
 	})
 })
 
@@ -362,12 +357,11 @@ describe("terminal-state completeness (spec R6)", () => {
 		)
 
 		expect(result?.status).toBe("blocked")
-		expect(sink.events()).toEqual(["run_started", "step_started", "questionnaire_asked", "run_blocked"])
-		expect(sink.first("questionnaire_asked")).toMatchObject({ path: "sign-off", question_count: 1 })
+		// The questionnaire itself is below telemetry's altitude — only the run-level wait is reported.
+		expect(sink.events()).toEqual(["run_started", "step_started", "run_blocked"])
 		expect(sink.first("run_blocked")).toMatchObject({
 			run_id: RUN_ID,
 			workflow_name: "demo",
-			pending_questionnaires: 1,
 		})
 	})
 
@@ -406,7 +400,7 @@ describe("terminal-state completeness (spec R6)", () => {
 			// Nothing in this invocation ever started or read that run's log, so its name is not in reach
 			// (spec R4): `run_id` is what joins this to the `run_started` the dead session published.
 			workflow_name: "",
-			error: expect.stringContaining("no longer alive"),
+			error: { message: expect.stringContaining("no longer alive") },
 		})
 	})
 })

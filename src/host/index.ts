@@ -52,10 +52,6 @@ export { summarizeRun } from "./summarize-run.ts"
 export type { PublishTelemetry, TelemetryMapper, TelemetryOptions, TelemetryStore } from "./telemetry-bridge.ts"
 export { createTelemetryMapper, withTelemetry } from "./telemetry-bridge.ts"
 export type {
-	AgentErrorPayload,
-	AgentSteeredPayload,
-	AnswersProvidedPayload,
-	QuestionnaireAskedPayload,
 	RunBlockedPayload,
 	RunCancelledPayload,
 	RunCompletedPayload,
@@ -67,10 +63,11 @@ export type {
 	StepFailedPayload,
 	StepRetriedPayload,
 	StepStartedPayload,
-	WorkflowAgentEventCommon,
+	WorkflowError,
 	WorkflowEventCommon,
 	WorkflowEventPayload,
 	WorkflowEventType,
+	WorkflowRetryReason,
 	WorkflowStepEventCommon,
 } from "./telemetry-events.ts"
 export { MAX_ERROR_LENGTH, truncateError, WORKFLOW_TELEMETRY_CHANNEL } from "./telemetry-events.ts"

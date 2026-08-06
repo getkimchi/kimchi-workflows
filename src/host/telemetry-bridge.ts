@@ -25,21 +25,38 @@
  * every subscriber, so a fresh payload object is built per event — nothing a subscriber does to what it
  * receives can reach engine state.
  */
-import { parsePath, staticKeyOf } from "../engine/node-path.ts"
-import type { RunEvent, RunResult } from "../engine/types.ts"
+import { parsePath } from "../engine/node-path.ts"
+import type { AgentTurnErrorKind, RetryReason, RunEvent, RunResult } from "../engine/types.ts"
 import {
-	type AgentErrorPayload,
-	type AgentSteeredPayload,
-	type AnswersProvidedPayload,
-	type QuestionnaireAskedPayload,
 	type RunBlockedPayload,
 	truncateError,
 	WORKFLOW_TELEMETRY_CHANNEL,
+	type WorkflowError,
 	type WorkflowEventCommon,
 	type WorkflowEventPayload,
+	type WorkflowRetryReason,
 	type WorkflowStepEventCommon,
 } from "./telemetry-events.ts"
 import type { RunStore } from "./types.ts"
+
+/**
+ * The engine's retry vocabulary → telemetry's (spec R1: internal nomenclature stays internal).
+ * `agent-error` is deliberately absent: it is resolved per-retry from the kind the preceding
+ * `agent-error` event recorded (see {@link RunTelemetryState.agentErrorKind}). Typed exhaustively over
+ * the engine's union so a `RetryReason` added later is a compile error HERE — a classification
+ * decision — rather than a silent misreport under whichever value a fallback would guess.
+ */
+const RETRY_REASONS: Record<Exclude<RetryReason, "agent-error">, WorkflowRetryReason> = {
+	"thrown-error": "exception",
+	"invalid-output": "invalid_output",
+	"budget-exceeded": "budget_exceeded",
+}
+
+/** The agent-turn error kinds → the retry reasons that absorbed them (no separate agent event travels). */
+const AGENT_REASONS: Record<AgentTurnErrorKind, WorkflowRetryReason> = {
+	"provider-error": "provider_error",
+	"context-window-exceeded": "context_window",
+}
 
 /** How an event leaves this package. Structurally the harness bus's `emit` — see the module header. */
 export type PublishTelemetry = (channel: string, data: unknown) => void
@@ -99,8 +116,13 @@ interface RunTelemetryState {
 	startedAt?: string
 	/** Dynamic path → the `step-started` timestamp its completion is measured against. */
 	readonly stepStartedAt: Map<string, string>
-	/** Static keys of the steps currently blocked on questions — `run_blocked`'s count (spec §8.6). */
-	readonly pending: Set<string>
+	/**
+	 * Dynamic path → the kind of the last `agent-error` the step recorded. The engine's `step-retry`
+	 * says only `agent-error`; the KIND (provider vs context window) lives on the preceding event, which
+	 * always lands in the log first — this is how the retry that follows can say `provider_error` or
+	 * `context_window` without a separate agent event in the contract.
+	 */
+	readonly agentErrorKind: Map<string, AgentTurnErrorKind>
 }
 
 export function createTelemetryMapper(options: TelemetryOptions = {}): TelemetryMapper {
@@ -117,7 +139,7 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 	const stateOf = (runId: string): RunTelemetryState => {
 		const existing = states.get(runId)
 		if (existing) return existing
-		const created: RunTelemetryState = { workflowName: "", stepStartedAt: new Map(), pending: new Set() }
+		const created: RunTelemetryState = { workflowName: "", stepStartedAt: new Map(), agentErrorKind: new Map() }
 		states.set(runId, created)
 		return created
 	}
@@ -128,24 +150,25 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 		at,
 	})
 
-	/** The three correlation fields every step-scoped payload carries (spec R4). */
+	/**
+	 * What a step-scoped payload carries beyond the run fields (spec R4): the leaf name alone. The full
+	 * path and its static key are read here for the mapper's own bookkeeping, but do not travel.
+	 */
 	const stepFields = (runId: string, path: string, at: string): Omit<WorkflowStepEventCommon, "event"> => {
 		const parsed = parsePath(path)
 		return {
 			...common(runId, at),
-			path,
-			static_key: staticKeyOf(parsed),
 			step_name: parsed[parsed.length - 1]?.name ?? path,
 		}
 	}
 
 	const runDuration = (runId: string, at: string): number | undefined => elapsed(states.get(runId)?.startedAt, at)
 
-	/** A step settled: its start no longer needs keeping, and it is no longer waiting on anyone. */
+	/** A step settled: its start and its last agent-error kind no longer need keeping. */
 	const settleStep = (runId: string, path: string): string | undefined => {
 		const state = states.get(runId)
 		if (!state) return undefined
-		state.pending.delete(staticKeyOf(parsePath(path)))
+		state.agentErrorKind.delete(path)
 		const startedAt = state.stepStartedAt.get(path)
 		state.stepStartedAt.delete(path)
 		return startedAt
@@ -158,7 +181,21 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 	const settleRun = (runId: string): void => {
 		const state = states.get(runId)
 		state?.stepStartedAt.clear()
-		state?.pending.clear()
+		state?.agentErrorKind.clear()
+	}
+
+	const errorOf = (message: string): WorkflowError => ({ message: truncateError(message) })
+
+	/**
+	 * The reason a retry travels with. For an agent turn's failed request, the engine's retry says only
+	 * `agent-error`; the kind recorded by the preceding `agent-error` event resolves it to
+	 * `provider_error` or `context_window`. The fallback is `provider_error` — a failed request is by
+	 * definition one of the two, and a kind this mapper never saw recorded means the provider-shaped one.
+	 */
+	const retryReason = (runId: string, path: string, reason: RetryReason): WorkflowRetryReason => {
+		if (reason !== "agent-error") return RETRY_REASONS[reason]
+		const kind = states.get(runId)?.agentErrorKind.get(path)
+		return kind ? AGENT_REASONS[kind] : "provider_error"
 	}
 
 	const observe = (event: RunEvent): WorkflowEventPayload | undefined => {
@@ -172,7 +209,7 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 
 			case "run-resumed":
 				stateOf(event.runId)
-				return { event: "run_resumed", ...common(event.runId, event.at), from_path: event.fromPath }
+				return { event: "run_resumed", ...common(event.runId, event.at) }
 
 			case "run-completed": {
 				const payload: WorkflowEventPayload = {
@@ -188,8 +225,7 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 				const payload: WorkflowEventPayload = {
 					event: "run_crashed",
 					...common(event.runId, event.at),
-					path: event.path,
-					error: truncateError(event.error),
+					error: errorOf(event.error),
 					duration_ms: runDuration(event.runId, event.at),
 				}
 				settleRun(event.runId)
@@ -200,7 +236,6 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 				const payload: WorkflowEventPayload = {
 					event: "run_cancelled",
 					...common(event.runId, event.at),
-					path: event.path,
 				}
 				settleRun(event.runId)
 				return payload
@@ -215,8 +250,8 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 					event: "step_retried",
 					...stepFields(event.runId, event.path, event.at),
 					attempt: event.attempt,
-					reason: event.reason,
-					error: truncateError(event.error),
+					reason: retryReason(event.runId, event.path, event.reason),
+					error: errorOf(event.error),
 				}
 
 			case "step-completed":
@@ -230,7 +265,7 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 				return {
 					event: "step_failed",
 					...stepFields(event.runId, event.path, event.at),
-					error: truncateError(event.error),
+					error: errorOf(event.error),
 					duration_ms: elapsed(settleStep(event.runId, event.path), event.at),
 				}
 
@@ -238,56 +273,26 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 				settleStep(event.runId, event.path)
 				return { event: "step_cancelled", ...stepFields(event.runId, event.path, event.at) }
 
-			case "questionnaire-asked": {
-				stateOf(event.runId).pending.add(staticKeyOf(parsePath(event.path)))
-				const payload: QuestionnaireAskedPayload = {
-					event: "questionnaire_asked",
-					...stepFields(event.runId, event.path, event.at),
-					question_count: event.questionnaire.questions.length,
-				}
-				return payload
-			}
+			// Observed for state, published never: the kind it records is what lets the retry that follows
+			// say `provider_error` or `context_window` (see `retryReason`). The failure itself reaches the
+			// stream as that retry — or, when no retry can clear it, as the step_failed / run_crashed after.
+			case "agent-error":
+				stateOf(event.runId).agentErrorKind.set(event.path, event.kind)
+				return undefined
 
-			case "answers-provided": {
-				states.get(event.runId)?.pending.delete(staticKeyOf(parsePath(event.path)))
-				const payload: AnswersProvidedPayload = {
-					event: "answers_provided",
-					...stepFields(event.runId, event.path, event.at),
-					answer_count: Object.keys(event.answers).length,
-				}
-				return payload
-			}
-
-			case "agent-error": {
-				const payload: AgentErrorPayload = {
-					event: "agent_error",
-					...stepFields(event.runId, event.path, event.at),
-					resume_key: event.resumeKey,
-					attempt: event.attempt,
-					kind: event.kind,
-					terminal: event.terminal,
-					error: truncateError(event.message),
-				}
-				return payload
-			}
-
-			case "agent-steer": {
-				const payload: AgentSteeredPayload = {
-					event: "agent_steered",
-					...stepFields(event.runId, event.path, event.at),
-					resume_key: event.resumeKey,
-					attempt: event.attempt,
-					violation_kind: event.violationKind,
-				}
-				return payload
-			}
-
-			// Deliberately unmapped in this iteration, each for its own reason (spec R3):
+			// Deliberately unmapped, each for its own reason (spec R3):
+			//  - `questionnaire-asked` / `answers-provided` are below telemetry's altitude: run-level waiting
+			//    is what operators care about, and `run_blocked` → `run_resumed` already carries it;
+			//  - `agent-steer` measures the author's prompt and schema complexity, not system health — the
+			//    run log keeps every repair with its violation kind for local diagnosis;
 			//  - `run-meta` carries a raw filesystem path (revisit with hashing, if dashboards need to tell
 			//    two projects' identically-named workflows apart);
 			//  - `step-log` is free text the author wrote, and its structured `data` is theirs too (spec R2);
 			//  - `agent-usage` waits on a double-counting policy against the harness's own request telemetry;
-			//  - node/branch/loop/foreach structure is already reconstructable from every step event's `path`.
+			//  - node/branch/loop/foreach structure is a run-log analysis, not a telemetry query (spec R4).
+			case "questionnaire-asked":
+			case "answers-provided":
+			case "agent-steer":
 			case "run-meta":
 			case "step-log":
 			case "agent-usage":
@@ -312,15 +317,11 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 
 		blocked(result: RunResult): RunBlockedPayload | undefined {
 			if (result.status !== "blocked") return undefined
-			const state = states.get(result.runId)
 			return {
 				event: "run_blocked",
 				run_id: result.runId,
-				workflow_name: state?.workflowName ?? "",
+				workflow_name: states.get(result.runId)?.workflowName ?? "",
 				at: now().toISOString(),
-				// The state's count is the authority (every blocked step, spec §8.6); the reported result is
-				// the fallback for a block this mapper never saw the question for.
-				pending_questionnaires: state?.pending.size ?? (result.questionnaire ? 1 : 0),
 			}
 		},
 
