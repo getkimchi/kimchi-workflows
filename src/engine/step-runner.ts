@@ -13,7 +13,7 @@ import {
 	type Questionnaire,
 	QuestionnaireSchema,
 } from "../flow/questionnaire.ts"
-import type { AgentStep, FunctionStep, RetryPolicy, RunContext, StepLogger } from "../flow/types.ts"
+import type { AgentStep, FunctionStep, RetryPolicy, RunContext, ScopeFrame, StepLogger } from "../flow/types.ts"
 import { describeSchemaViolations } from "../flow/validation.ts"
 import { buildCorrectionMessage } from "./agent-output.ts"
 import { createRunContext, createStepLogger, iso, type RunState, type StepOutcome } from "./context.ts"
@@ -138,9 +138,10 @@ export async function runFunctionStep(
 	state: RunState,
 	signal: AbortSignal,
 	parentPath: NodePath,
+	frames: readonly ScopeFrame[],
 	path: string,
 ): Promise<StepOutcome> {
-	const ctx = createRunContext(state, parentPath)
+	const ctx = createRunContext(state, parentPath, frames, path)
 	const logger = createStepLogger(host, state.runId, path)
 	return retryLoop(
 		step,
@@ -165,10 +166,11 @@ export async function runAgentStep(
 	state: RunState,
 	signal: AbortSignal,
 	parentPath: NodePath,
+	frames: readonly ScopeFrame[],
 	path: string,
 	entry: AgentEntry,
 ): Promise<StepOutcome> {
-	const ctx = createRunContext(state, parentPath)
+	const ctx = createRunContext(state, parentPath, frames, path)
 
 	// Budget carry across a block/answer boundary (spec §9.4): an answer-continuation is the SAME attempt
 	// resuming, not a fresh one, so the wall time and tokens spent before the block carry into THIS

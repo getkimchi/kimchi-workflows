@@ -25,7 +25,7 @@
  *
  * Zero imports from PI, `node:fs`, or any network lib — see src/engine/types.ts.
  */
-import type { ForeachNode, ParallelNode } from "../flow/types.ts"
+import type { ForeachNode, ParallelNode, ScopeFrame } from "../flow/types.ts"
 import {
 	createRunContext,
 	type ExecOutcome,
@@ -124,14 +124,16 @@ async function emitStepCancelled(host: HostPort, state: RunState, path: string):
 export async function runForeachNode(
 	walker: NodeWalker,
 	node: ForeachNode,
+	input: unknown,
 	host: HostPort,
 	state: RunState,
 	signal: AbortSignal,
 	parentPath: NodePath,
+	frames: readonly ScopeFrame[],
 	reentry?: Reentry,
 ): Promise<ExecOutcome> {
 	const foreachPath = appendSegment(parentPath, node.name)
-	const ctx = createRunContext(state, parentPath)
+	const ctx = createRunContext(state, parentPath, frames, formatPath(foreachPath))
 	const items = node.selector(ctx) // pure, deterministic — a resume re-runs it to the same array (spec §3.4)
 
 	// A non-array selector result is a deterministic wiring failure (spec §3.4), exactly like an
@@ -159,7 +161,20 @@ export async function runForeachNode(
 	const history = state.foreachItemHistory?.get(formatPath(foreachPath))
 
 	if (node.concurrency <= 1) {
-		return runForeachSequential(walker, node, host, state, signal, parentPath, foreachPath, items, history, reentry)
+		return runForeachSequential(
+			walker,
+			node,
+			input,
+			host,
+			state,
+			signal,
+			parentPath,
+			frames,
+			foreachPath,
+			items,
+			history,
+			reentry,
+		)
 	}
 	if (reentry) {
 		return runForeachConcurrentReentry(
@@ -169,23 +184,39 @@ export async function runForeachNode(
 			state,
 			signal,
 			parentPath,
+			frames,
 			foreachPath,
 			items,
 			history,
 			reentry,
 		)
 	}
-	return runForeachConcurrentFresh(walker, node, host, state, signal, parentPath, foreachPath, items, history)
+	return runForeachConcurrentFresh(walker, node, host, state, signal, parentPath, frames, foreachPath, items, history)
 }
 
-/** Pre-P3 sequential foreach body (concurrency 1, or the default) — UNCHANGED behaviour. */
+/** The foreach frame an item's body (or a step inside it) sees: position + the ITEM itself (spec 1.6). */
+function foreachFrame(node: ForeachNode, index: number, items: readonly unknown[]): ScopeFrame {
+	return { kind: "foreach", name: node.name, itemIndex: index, itemCount: items.length, input: items[index] }
+}
+
+/**
+ * Sequential foreach body (concurrency 1, or the default) — the pre-P3 code path, behaviour unchanged
+ * outside feedback mode. With `feedback` (foreach-feedback spec, Feature 3) the body's hand-off input
+ * is the PREVIOUS item's effective output — item 0 receives the foreach's upstream `input` — with the
+ * loop's pass-through rule (3.2: an item producing no output forwards what it received). The item
+ * itself is delivered through the frame (`ctx.scope(name)?.input`) in both modes. On resume the fed
+ * value is rebuilt by walking the recovered history prefix under the same pass-through rule, so a
+ * re-run item receives exactly what a continuous run would have fed it.
+ */
 async function runForeachSequential(
 	walker: NodeWalker,
 	node: ForeachNode,
+	input: unknown,
 	host: HostPort,
 	state: RunState,
 	signal: AbortSignal,
 	parentPath: NodePath,
+	frames: readonly ScopeFrame[],
 	foreachPath: NodePath,
 	items: readonly unknown[],
 	history: ReadonlyMap<number, unknown> | undefined,
@@ -196,10 +227,15 @@ async function runForeachSequential(
 		throw new Error(`resume: foreach "${node.name}" re-entry path is missing its item index (definition drift?)`)
 	}
 	const startIndex = targetIndex ?? firstMissingIndex(history, items.length)
+	const feedback = node.feedback === true
 
+	let fed = input
 	const results: unknown[] = new Array(items.length)
 	for (let index = 0; index < startIndex; index++) {
 		results[index] = history?.get(index)
+		// Pass-through over the recovered prefix (3.2): a recorded `undefined` (a failed optional item)
+		// forwards the value it received rather than erasing it.
+		if (results[index] !== undefined) fed = results[index]
 	}
 
 	let innerReentry: Reentry | undefined = reentry ? { path: reentry.path.slice(1), answer: reentry.answer } : undefined
@@ -222,15 +258,17 @@ async function runForeachSequential(
 			node.body.nodes,
 			host,
 			state,
-			items[index],
+			feedback ? fed : items[index],
 			signal,
 			itemPath,
+			[...frames, foreachFrame(node, index, items)],
 			0,
 			thisItemReentry,
 		)
 		if (outcome.kind !== "ok") return outcome
 
 		results[index] = outcome.output
+		if (outcome.output !== undefined) fed = outcome.output // pass-through (3.2)
 		await host.emit({
 			type: "foreach-item-completed",
 			runId: state.runId,
@@ -258,6 +296,7 @@ async function runForeachConcurrentFresh(
 	state: RunState,
 	signal: AbortSignal,
 	parentPath: NodePath,
+	frames: readonly ScopeFrame[],
 	foreachPath: NodePath,
 	items: readonly unknown[],
 	history: ReadonlyMap<number, unknown> | undefined,
@@ -291,6 +330,7 @@ async function runForeachConcurrentFresh(
 				items[index],
 				signal,
 				itemPath,
+				[...frames, foreachFrame(node, index, items)],
 				0,
 				undefined,
 			)
@@ -329,6 +369,7 @@ async function runForeachConcurrentReentry(
 	state: RunState,
 	signal: AbortSignal,
 	parentPath: NodePath,
+	frames: readonly ScopeFrame[],
 	foreachPath: NodePath,
 	items: readonly unknown[],
 	history: ReadonlyMap<number, unknown> | undefined,
@@ -367,6 +408,7 @@ async function runForeachConcurrentReentry(
 		items[targetIndex],
 		signal,
 		targetPath,
+		[...frames, foreachFrame(node, targetIndex, items)],
 		0,
 		itemReentry,
 	)
@@ -403,6 +445,7 @@ async function runForeachConcurrentReentry(
 			items[index],
 			signal,
 			extraPath,
+			[...frames, foreachFrame(node, index, items)],
 			0,
 			undefined,
 		)
@@ -457,9 +500,11 @@ export async function runParallelNode(
 	state: RunState,
 	signal: AbortSignal,
 	parentPath: NodePath,
+	frames: readonly ScopeFrame[],
 	reentry?: Reentry,
 ): Promise<ExecOutcome> {
 	const parallelPath = appendSegment(parentPath, node.name)
+	const armFrames: readonly ScopeFrame[] = [...frames, { kind: "parallel", name: node.name, input }]
 
 	if (reentry) {
 		// Unlike a branch arm (a PEER of the branch's own path), a parallel arm nests UNDER the parallel's
@@ -467,7 +512,7 @@ export async function runParallelNode(
 		// PARALLEL's own name (already consumed by `runNodeSequence`/`matchesReentryTarget` to dispatch
 		// here in the first place); pop it to reach the ARM's own segment before matching against arms.
 		const innerReentry: Reentry = { path: reentry.path.slice(1), answer: reentry.answer }
-		return runParallelReentry(walker, node, input, host, state, signal, parallelPath, innerReentry)
+		return runParallelReentry(walker, node, input, host, state, signal, parallelPath, armFrames, innerReentry)
 	}
 
 	await host.emit({
@@ -481,7 +526,7 @@ export async function runParallelNode(
 	const settled = await runConcurrent(
 		node.arms,
 		async (armStep) => {
-			const outcome = await walker.runStepNode(armStep, input, host, state, signal, parallelPath, undefined)
+			const outcome = await walker.runStepNode(armStep, input, host, state, signal, parallelPath, armFrames, undefined)
 			return { name: armStep.name, outcome }
 		},
 		// A parallel declares no cap of its own (spec §3.5) — its lane count IS the run's ceiling, so a
@@ -510,6 +555,7 @@ async function runParallelReentry(
 	state: RunState,
 	signal: AbortSignal,
 	parallelPath: NodePath,
+	armFrames: readonly ScopeFrame[],
 	reentry: Reentry,
 ): Promise<ExecOutcome> {
 	const targetName = walker.leafNameOf(reentry)
@@ -521,7 +567,7 @@ async function runParallelReentry(
 	for (const armStep of node.arms) {
 		if (armStep.name === targetName) {
 			const armReentry: Reentry = { path: reentry.path.slice(1), answer: reentry.answer }
-			targetOutcome = await walker.runStepNode(armStep, input, host, state, signal, parallelPath, armReentry)
+			targetOutcome = await walker.runStepNode(armStep, input, host, state, signal, parallelPath, armFrames, armReentry)
 			continue
 		}
 
@@ -541,7 +587,7 @@ async function runParallelReentry(
 			extraOutcomes.push({ kind: "cancelled" })
 			continue
 		}
-		const outcome = await walker.runStepNode(armStep, input, host, state, signal, parallelPath, undefined)
+		const outcome = await walker.runStepNode(armStep, input, host, state, signal, parallelPath, armFrames, undefined)
 		if (outcome.kind === "ok") output[armStep.name] = outcome.output
 		extraOutcomes.push(outcome)
 	}

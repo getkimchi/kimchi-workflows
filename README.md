@@ -240,7 +240,9 @@ Run it from inside PI:
 
 Two rules come with fan-out. **Concurrent steps must not touch the same files** — the engine can't know what an agent will edit, so overlapping side effects are yours to avoid; sequence anything that shares state. And **reading a step that's currently in flight throws** rather than returning `undefined`, because a silent `undefined` would make the value depend on who won the race.
 
-Step names need only be unique within their enclosing workflow — the same sub-workflow can be composed twice, and steps are addressed by **node path** (`audit/lint`, `until-valid#3/design`, `batch@7/review`). `ctx.getStepResult("lint")` resolves to the nearest enclosing scope; pass a full path when a bare name would be ambiguous.
+Step names need only be unique within their enclosing workflow — the same sub-workflow can be composed twice; the event log disambiguates instances by **node path** (`audit/lint`, `until-valid#3/design`, `batch@7/review`). Reads are **names-only**: `ctx.getStepResult("lint")` resolves the bare name lexically to the nearest enclosing scope that declares it — an unknown name throws (a provable wiring bug, listing what *is* visible), while a declared step that hasn't run reads `undefined`. Paths are identity in the log and resume addressing, not a query language: a construct's internals aren't readable from outside — its own output (a loop's final value, a foreach's item array, a nested workflow's result) is what a sibling reads, by the construct's name. A step can also ask where it is: `ctx.path` is its own dynamic path, and `ctx.scope(name?)` exposes each enclosing construct's position and input (loop iteration, foreach item/index/count, the fed-back value).
+
+Loops **feed forward**: each iteration's body receives the previous iteration's body output as its input (the first receives the loop's upstream input), an iteration that produces nothing passes its input through unchanged, and the loop's own output is the final value. A sequential `.foreach(…, { feedback: true })` threads the same way item-to-item, with the item itself moving to `ctx.scope(...)`.
 
 ---
 

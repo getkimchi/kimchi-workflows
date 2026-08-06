@@ -94,9 +94,11 @@ describe("fresh ≡ resume invariant (spec §8): resume state matches an interru
 		expect(resumeRun.calls.before).toBe(0)
 	})
 
-	it("a step inside a completed-prefix FOREACH stays readable by explicit path after a resume", async () => {
+	it("a completed-prefix FOREACH's output stays readable by bare name after a resume", async () => {
 		// A foreach keeps its item index in the static key (spec §5.4), so its inner steps are recorded as
-		// `each@0/inner` — the seeded prefix must recognize those as belonging to the completed `each` node.
+		// `each@0/inner` — the seeded prefix must recognize those as belonging to the completed `each`
+		// node. The reader consumes the foreach's own OUTPUT (its per-item array) by bare name: reaching
+		// into sibling items by path was removed with names-only addressing (spec 4.1).
 		const build = () => {
 			let failAfter = true
 			const body = createWorkflow({ name: "each-body" })
@@ -121,7 +123,7 @@ describe("fresh ≡ resume invariant (spec §8): resume state matches an interru
 								failAfter = false
 								throw new Error("boom in after")
 							}
-							seen.push(ctx.getStepResult("each@0/inner"), ctx.getStepResult("each@1/inner"))
+							seen.push(...(ctx.getStepResult<unknown[]>("each") ?? []))
 							return { n: 0 }
 						},
 					}),

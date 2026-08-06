@@ -20,6 +20,7 @@ import type {
 	LoopNode,
 	NestedWorkflowNode,
 	QuestionnaireStep,
+	ScopeFrame,
 	StepDefinition,
 	WorkflowDefinition,
 	WorkflowNode,
@@ -28,6 +29,7 @@ import { nodeName } from "../flow/types.ts"
 import { describeSchemaViolations } from "../flow/validation.ts"
 import { runForeachNode, runParallelNode } from "./concurrent-nodes.ts"
 import {
+	buildDeclaredNameIndex,
 	createRunContext,
 	type ExecOutcome,
 	emitNodeCompleted,
@@ -100,6 +102,9 @@ export async function execute(
 		defaultModel: workflow.defaultModel,
 		foreachItemHistory: cursor.foreachItemHistory,
 		pendingBlocks: cursor.pendingBlocks,
+		// Names addressable per scope (names-only addressing, spec 4.2) — built once per execution from
+		// the definition; identical on resume, since it is pure data derived from the committed tree.
+		nameIndex: buildDeclaredNameIndex(workflow.nodes),
 	}
 
 	const outcome = await runNodeSequence(
@@ -108,6 +113,7 @@ export async function execute(
 		state,
 		cursor.previousOutput,
 		stepSignal,
+		[],
 		[],
 		cursor.startIndex,
 		cursor.reentry,
@@ -158,6 +164,7 @@ export async function runNodeSequence(
 	previousOutput: unknown,
 	signal: AbortSignal,
 	parentPath: NodePath,
+	frames: readonly ScopeFrame[],
 	startIndex = 0,
 	reentry?: Reentry,
 ): Promise<ExecOutcome> {
@@ -193,7 +200,7 @@ export async function runNodeSequence(
 		if (signal.aborted) return { kind: "cancelled" }
 
 		const nodeReentry = activeReentry && i === effectiveStart ? activeReentry : undefined
-		const outcome = await runNode(node, output, host, state, signal, parentPath, nodeReentry)
+		const outcome = await runNode(node, output, host, state, signal, parentPath, frames, nodeReentry)
 		if (outcome.kind !== "ok") return outcome
 
 		output = outcome.output
@@ -238,21 +245,22 @@ function runNode(
 	state: RunState,
 	signal: AbortSignal,
 	parentPath: NodePath,
+	frames: readonly ScopeFrame[],
 	reentry?: Reentry,
 ): Promise<ExecOutcome> {
 	switch (node.kind) {
 		case "step":
-			return runStepNode(node.step, input, host, state, signal, parentPath, reentry)
+			return runStepNode(node.step, input, host, state, signal, parentPath, frames, reentry)
 		case "branch":
-			return runBranchNode(node, input, host, state, signal, parentPath, reentry)
+			return runBranchNode(node, input, host, state, signal, parentPath, frames, reentry)
 		case "loop":
-			return runLoopNode(node, input, host, state, signal, parentPath, reentry)
+			return runLoopNode(node, input, host, state, signal, parentPath, frames, reentry)
 		case "foreach":
-			return runForeachNode(walker, node, host, state, signal, parentPath, reentry)
+			return runForeachNode(walker, node, input, host, state, signal, parentPath, frames, reentry)
 		case "parallel":
-			return runParallelNode(walker, node, input, host, state, signal, parentPath, reentry)
+			return runParallelNode(walker, node, input, host, state, signal, parentPath, frames, reentry)
 		case "workflow":
-			return runNestedWorkflowNode(node, input, host, state, signal, parentPath, reentry)
+			return runNestedWorkflowNode(node, input, host, state, signal, parentPath, frames, reentry)
 	}
 }
 
@@ -274,6 +282,7 @@ export async function runStepNode(
 	state: RunState,
 	signal: AbortSignal,
 	parentPath: NodePath,
+	frames: readonly ScopeFrame[],
 	reentry?: Reentry,
 ): Promise<ExecOutcome> {
 	const path = appendSegment(parentPath, step.name)
@@ -286,7 +295,7 @@ export async function runStepNode(
 	// `getStepResult` throws rather than observing a torn/undefined value. Cleared on every exit path.
 	state.inFlight.add(inFlightKey)
 	try {
-		return await runStepNodeBody(step, input, host, state, signal, parentPath, formattedPath, reentry)
+		return await runStepNodeBody(step, input, host, state, signal, parentPath, frames, formattedPath, reentry)
 	} finally {
 		state.inFlight.delete(inFlightKey)
 		state.concurrencyGate.release()
@@ -300,6 +309,7 @@ async function runStepNodeBody(
 	state: RunState,
 	signal: AbortSignal,
 	parentPath: NodePath,
+	frames: readonly ScopeFrame[],
 	formattedPath: string,
 	reentry?: Reentry,
 ): Promise<ExecOutcome> {
@@ -309,7 +319,7 @@ async function runStepNodeBody(
 	//  - questionnaire (form) → reassemble the answers into `output` and validate (no `startAgent`).
 	if (reentry?.answer) {
 		if (step.kind === "agent") {
-			const outcome = await runAgentStep(step, undefined, host, state, signal, parentPath, formattedPath, {
+			const outcome = await runAgentStep(step, undefined, host, state, signal, parentPath, frames, formattedPath, {
 				kind: "answer",
 				answers: reentry.answer.answers,
 				conversation: reentry.answer.conversation,
@@ -358,8 +368,8 @@ async function runStepNodeBody(
 
 	const outcome =
 		step.kind === "agent"
-			? await runAgentStep(step, stepInput, host, state, signal, parentPath, formattedPath, { kind: "fresh" })
-			: await runFunctionStep(step, stepInput, host, state, signal, parentPath, formattedPath)
+			? await runAgentStep(step, stepInput, host, state, signal, parentPath, frames, formattedPath, { kind: "fresh" })
+			: await runFunctionStep(step, stepInput, host, state, signal, parentPath, frames, formattedPath)
 	return finishStep(formattedPath, host, state, outcome, step.optional === true)
 }
 
@@ -447,6 +457,7 @@ async function runBranchNode(
 	state: RunState,
 	signal: AbortSignal,
 	parentPath: NodePath,
+	frames: readonly ScopeFrame[],
 	reentry?: Reentry,
 ): Promise<ExecOutcome> {
 	const branchPath = appendSegment(parentPath, node.name)
@@ -460,7 +471,7 @@ async function runBranchNode(
 		})
 	}
 
-	const ctx = createRunContext(state, parentPath)
+	const ctx = createRunContext(state, parentPath, frames, formatPath(branchPath))
 	const decisions = node.arms.map((arm) => ({ arm, taken: arm.condition(ctx) })) // pure, side-effect-free (spec §3.2)
 	if (!reentry) {
 		for (const { arm, taken } of decisions) {
@@ -492,7 +503,10 @@ async function runBranchNode(
 		if (signal.aborted) return { kind: "cancelled" }
 		const armReentry: Reentry | undefined =
 			isTarget && activeReentry ? { path: activeReentry.path.slice(1), answer: activeReentry.answer } : undefined
-		const outcome = await runNodeSequence(arm.body.nodes, host, state, input, signal, armPath, 0, armReentry)
+		// The frame is the taken ARM, not the branch: arms are the peer scopes (spec §8.5), and the arm is
+		// what a body step is actually inside of. Carries the branch's upstream input (spec 1.6).
+		const armFrames: readonly ScopeFrame[] = [...frames, { kind: "branch-arm", name: arm.name, input }]
+		const outcome = await runNodeSequence(arm.body.nodes, host, state, input, signal, armPath, armFrames, 0, armReentry)
 		if (outcome.kind !== "ok") return outcome
 
 		result[arm.name] = outcome.output
@@ -511,6 +525,14 @@ async function runBranchNode(
  * seeding that iteration's hand-off input from the previous iteration's recorded body output. A loop
  * is inherently sequential (never concurrent — only ONE iteration is ever live), so this is unchanged
  * by P3 beyond the `appendLoopIteration` rename.
+ *
+ * Loop feedback (loop-feedback spec, Feature 2): each iteration's body receives the previous
+ * iteration's body output as its input — ordinary, schema-validated step I/O. An iteration that
+ * produces no output (a failed `optional` tail) passes its input through unchanged (spec 2.3): a
+ * failed round loses the round, never the best-so-far value. The construct's own output is the final
+ * effective value (spec 2.5), so downstream reads the loop by its bare name. The exit predicate still
+ * sees the RAW last body output (spec 2.4) — which may be `undefined` even when the fed value is not,
+ * since "this round produced nothing" is something a predicate may legitimately need to know.
  */
 async function runLoopNode(
 	node: LoopNode,
@@ -519,6 +541,7 @@ async function runLoopNode(
 	state: RunState,
 	signal: AbortSignal,
 	parentPath: NodePath,
+	frames: readonly ScopeFrame[],
 	reentry?: Reentry,
 ): Promise<ExecOutcome> {
 	const loopPath = appendSegment(parentPath, node.name)
@@ -539,10 +562,15 @@ async function runLoopNode(
 	let iteration = startIteration ?? 1
 	let iterationInput = input
 	if (reentry && iteration > 1) {
+		// Reseed from the last body node's recorded output. `stepOutputs` was rebuilt from
+		// `step-completed` events, and a failed `optional` tail records `step-failed` instead — so this
+		// naturally yields the last DEFINED body output, matching the pass-through rule (spec 2.3/2.6);
+		// when nothing ever completed, fall through to the loop's own upstream input, as pass-through would.
 		const lastBodyNode = node.body.nodes.at(-1)
-		iterationInput = lastBodyNode
+		const recorded = lastBodyNode
 			? state.stepOutputs.get(staticChildKey(parentPath, node.name, nodeName(lastBodyNode)))
-			: input
+			: undefined
+		iterationInput = recorded !== undefined ? recorded : input
 	}
 
 	let lastOutput: unknown
@@ -562,6 +590,13 @@ async function runLoopNode(
 			})
 		}
 
+		// The loop frame carries this iteration's effective input — the fed-back value (spec 1.6) — and is
+		// rebuilt identically on re-entry, since `iterationInput` is reseeded above before the first push.
+		const iterFrames: readonly ScopeFrame[] = [
+			...frames,
+			{ kind: "loop", name: node.name, iteration, input: iterationInput },
+		]
+
 		const outcome = await runNodeSequence(
 			node.body.nodes,
 			host,
@@ -569,6 +604,7 @@ async function runLoopNode(
 			iterationInput,
 			signal,
 			iterPath,
+			iterFrames,
 			0,
 			thisIterationReentry,
 		)
@@ -576,14 +612,18 @@ async function runLoopNode(
 		lastOutput = outcome.output
 		innerReentry = undefined
 
-		const ctx = createRunContext(state, iterPath) // live view; reflects this iteration's updates
+		// Pass-through (loop-feedback spec 2.3): a round that produced nothing forwards what it received.
+		// The predicate below still receives the RAW output (spec 2.4).
+		const effectiveOutput = outcome.output !== undefined ? outcome.output : iterationInput
+
+		const ctx = createRunContext(state, iterPath, iterFrames, formatPath(iterPath)) // live view; reflects this iteration's updates
 		const conditionMet = node.condition(ctx, lastOutput)
 		const stop = node.mode === "dowhile" ? !conditionMet : conditionMet
 		if (stop) {
-			await emitNodeCompleted(host, state, loopPath, lastOutput)
-			return { kind: "ok", output: lastOutput }
+			await emitNodeCompleted(host, state, loopPath, effectiveOutput)
+			return { kind: "ok", output: effectiveOutput }
 		}
-		iterationInput = lastOutput
+		iterationInput = effectiveOutput
 	}
 
 	return {
@@ -607,6 +647,7 @@ async function runNestedWorkflowNode(
 	state: RunState,
 	signal: AbortSignal,
 	parentPath: NodePath,
+	frames: readonly ScopeFrame[],
 	reentry?: Reentry,
 ): Promise<ExecOutcome> {
 	const nestedPath = appendSegment(parentPath, node.name)
@@ -623,7 +664,18 @@ async function runNestedWorkflowNode(
 	const innerReentry: Reentry | undefined = reentry
 		? { path: reentry.path.slice(1), answer: reentry.answer }
 		: undefined
-	const outcome = await runNodeSequence(node.workflow.nodes, host, state, input, signal, nestedPath, 0, innerReentry)
+	const nestedFrames: readonly ScopeFrame[] = [...frames, { kind: "workflow", name: node.name, input }]
+	const outcome = await runNodeSequence(
+		node.workflow.nodes,
+		host,
+		state,
+		input,
+		signal,
+		nestedPath,
+		nestedFrames,
+		0,
+		innerReentry,
+	)
 	if (outcome.kind !== "ok") return outcome
 
 	await emitNodeCompleted(host, state, nestedPath, outcome.output)

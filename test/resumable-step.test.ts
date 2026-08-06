@@ -41,7 +41,7 @@ describe("resumable isolated steps", () => {
 			)
 			.commit()
 		const workflow = createWorkflow({ name: "resumable" })
-			.dowhile(body, (ctx) => (ctx.getStepResult<{ n: number }>("rounds")?.n ?? 0) < 2, {
+			.dowhile(body, (ctx) => (ctx.scope("loop")?.iteration ?? 0) < 2, {
 				name: "loop",
 				maxIterations: 3,
 			})

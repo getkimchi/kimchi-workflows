@@ -2,8 +2,9 @@
  * Shared execution state and per-run helpers for the engine. Pure — no PI/fs/network.
  */
 import type { Questionnaire } from "../flow/questionnaire.ts"
-import type { RunContext, StepLogger } from "../flow/types.ts"
-import { formatPath, type NodePath, parsePath, staticKeyOf, staticPathOf } from "./node-path.ts"
+import type { RunContext, ScopeFrame, StepLogger, WorkflowNode } from "../flow/types.ts"
+import { nodeName } from "../flow/types.ts"
+import { formatPath, type NodePath, staticPathOf } from "./node-path.ts"
 import type { ConcurrencyGate } from "./scheduler.ts"
 import type { HostPort } from "./types.ts"
 
@@ -60,6 +61,57 @@ export interface RunState {
 	 * deleted from this map by the caller before execution starts, since it is being resolved right now.
 	 */
 	readonly pendingBlocks?: ReadonlyMap<string, PendingBlock>
+	/**
+	 * Names addressable from each scope (names-only addressing, spec 4.2), keyed by the scope's name
+	 * chain (indices stripped, `/`-joined, `""` for the root) — built once per `execute()` from the
+	 * definition by {@link buildDeclaredNameIndex}. What lets `getStepResult` prove an unknown name is a
+	 * wiring bug (throw) while a declared-but-absent one stays a legitimate `undefined`.
+	 */
+	readonly nameIndex: ReadonlyMap<string, ReadonlySet<string>>
+}
+
+/**
+ * Walk the committed tree and enumerate, per scope, the names a bare `getStepResult` may resolve there
+ * (names-only addressing, spec 4.2). Mirrors `assertScopeNames`' pools exactly (create-workflow.ts): a
+ * branch contributes its own name AND its arm names to the enclosing scope (arms are PEER scopes, spec
+ * §8.5), while a parallel contributes only its own name — its arms form their own child scope. Scope
+ * keys carry no indices: membership is a property of the definition, not of a particular iteration or
+ * item; value lookups keep using the static keys (foreach `@i` preserved).
+ */
+export function buildDeclaredNameIndex(nodes: readonly WorkflowNode[]): Map<string, ReadonlySet<string>> {
+	const index = new Map<string, Set<string>>()
+	const childChain = (chain: string, name: string) => (chain === "" ? name : `${chain}/${name}`)
+	const scopeNames = (chain: string): Set<string> => {
+		const existing = index.get(chain)
+		if (existing) return existing
+		const created = new Set<string>()
+		index.set(chain, created)
+		return created
+	}
+
+	const walk = (scope: readonly WorkflowNode[], chain: string): void => {
+		const names = scopeNames(chain)
+		for (const node of scope) {
+			if (node.kind === "branch") {
+				names.add(node.name)
+				for (const arm of node.arms) {
+					names.add(arm.name)
+					walk(arm.body.nodes, childChain(chain, arm.name))
+				}
+			} else if (node.kind === "parallel") {
+				names.add(node.name)
+				const armScope = scopeNames(childChain(chain, node.name))
+				for (const arm of node.arms) armScope.add(arm.name)
+			} else {
+				names.add(nodeName(node))
+				if (node.kind === "loop" || node.kind === "foreach") walk(node.body.nodes, childChain(chain, node.name))
+				else if (node.kind === "workflow") walk(node.workflow.nodes, childChain(chain, node.name))
+			}
+		}
+	}
+
+	walk(nodes, "")
+	return index
 }
 
 /** Outcome of running a step under its policies (step-runner). Identity (`path`) is attached by the caller. */
@@ -142,6 +194,7 @@ export interface NodeWalker {
 		previousOutput: unknown,
 		signal: AbortSignal,
 		parentPath: NodePath,
+		frames: readonly ScopeFrame[],
 		startIndex?: number,
 		reentry?: Reentry,
 	): Promise<ExecOutcome>
@@ -152,6 +205,7 @@ export interface NodeWalker {
 		state: RunState,
 		signal: AbortSignal,
 		parentPath: NodePath,
+		frames: readonly ScopeFrame[],
 		reentry?: Reentry,
 	): Promise<ExecOutcome>
 	leafNameOf(reentry: Reentry): string
@@ -181,56 +235,79 @@ export async function emitNodeCompleted(
  * Build the run context a step body / condition / selector sees (spec §2.5/§3.9). `callerParentPath`
  * is the CALLING node's own enclosing scope (its ancestors, itself excluded) — indices are dropped
  * internally, since `stepOutputs` is static-keyed throughout (see {@link RunState.stepOutputs}).
+ * `frames` are the enclosing construct frames, innermost last (iteration-context spec, Feature 1),
+ * and `ownPath` is the caller's own formatted DYNAMIC path (a step's own path; for a
+ * condition/selector/predicate, the construct's own path).
  */
-export function createRunContext(state: RunState, callerParentPath: NodePath): RunContext {
+export function createRunContext(
+	state: RunState,
+	callerParentPath: NodePath,
+	frames: readonly ScopeFrame[],
+	ownPath: string,
+): RunContext {
 	const staticParent = staticPathOf(callerParentPath)
 	return {
 		runId: state.runId,
 		workflowName: state.workflowName,
-		getStepResult: <T>(nameOrPath: string) =>
-			resolveStepResult(state.stepOutputs, state.inFlight, staticParent, nameOrPath) as T | undefined,
+		path: ownPath,
+		scope: (name?: string) => {
+			if (name === undefined) return frames.at(-1)
+			for (let i = frames.length - 1; i >= 0; i--) {
+				const frame = frames[i]
+				if (frame && frame.name === name) return frame
+			}
+			return undefined
+		},
+		getStepResult: <T>(name: string) => resolveStepResult(state, staticParent, name) as T | undefined,
 		getInitData: <T>() => state.initialInput as T | undefined,
 	}
 }
 
-/** `nameOrPath` names an explicit node path rather than a bare, lexically-resolved name (spec §3.9). */
-function isExplicitPath(nameOrPath: string): boolean {
-	return nameOrPath.includes("/") || nameOrPath.includes("#") || nameOrPath.includes("@")
-}
-
 /**
- * Resolve a `getStepResult` argument (spec §3.9): an explicit path (contains `/`, `#`, or `@`) is
- * looked up exactly, by its static key — always unambiguous, since a path names one node. A bare name
- * is resolved lexically to the nearest enclosing scope: search the caller's own scope, then each
- * ancestor scope outward to the root, returning the first match. This is deterministic by
- * construction — at every level there is at most one node with a given name (enclosing scopes are
- * validated unique at `.commit()`, spec §3) — so a bare read never guesses; it just may find nothing (a
- * step not yet reached, or one outside the caller's lexical scope, reads `undefined`).
+ * Resolve a `getStepResult` argument (names-only addressing, spec 4.1/4.2): a BARE name, resolved
+ * lexically to the nearest enclosing scope that DECLARES it — search the caller's own scope, then each
+ * ancestor scope outward to the root. The nearest declaring scope wins outright: its value is returned
+ * even when that is `undefined` (a step not yet reached, or skipped — a legitimate structural fact),
+ * never falling through to a same-named node further out. This is deterministic by construction — at
+ * every level there is at most one node with a given name (validated unique at `.commit()`, spec §3).
  *
- * **Reads never race** (spec §3.9): a key currently in `inFlight` THROWS instead of falling through to
- * `undefined` (or to some more-distant, unrelated match of the same bare name) — a concurrently
- * executing step's result is not an honest `undefined`, and silently preferring a further-out match
- * would make the answer depend on who won the race. Checked at EVERY level of the lexical walk, in
- * lexical-priority order, so the nearest in-flight match wins over a coincidental match further out.
+ * Two hard errors, both provable wiring bugs rather than structural facts:
+ *  - path syntax (`/`, `#`, `@`) in the argument — the path form was removed outright (spec 4.1);
+ *  - a name NO scope on the caller's chain declares (spec 4.2) — the error lists what IS visible,
+ *    which is strictly better than discovering the typo as a silent `undefined` three steps later.
+ *
+ * **Reads never race** (spec §3.9): a key currently in `inFlight` THROWS instead of resolving — a
+ * concurrently executing step's result is not an honest `undefined`. Checked at every level of the
+ * lexical walk, in lexical-priority order, so the nearest in-flight match wins over a coincidental
+ * match further out.
  */
-function resolveStepResult(
-	stepOutputs: ReadonlyMap<string, unknown>,
-	inFlight: ReadonlySet<string>,
-	staticCallerParentPath: NodePath,
-	nameOrPath: string,
-): unknown {
-	if (isExplicitPath(nameOrPath)) {
-		const key = staticKeyOf(parsePath(nameOrPath))
-		assertNotInFlight(inFlight, key, nameOrPath)
-		return stepOutputs.get(key)
+function resolveStepResult(state: RunState, staticCallerParentPath: NodePath, name: string): unknown {
+	if (name.includes("/") || name.includes("#") || name.includes("@")) {
+		throw new Error(
+			`getStepResult("${name}"): path arguments were removed (names-only addressing, spec 4.1) — pass the bare step/construct name; it resolves lexically to the nearest enclosing scope that declares it`,
+		)
 	}
 	for (let i = staticCallerParentPath.length; i >= 0; i--) {
 		const prefix = staticCallerParentPath.slice(0, i)
-		const key = prefix.length === 0 ? nameOrPath : `${formatPath(prefix)}/${nameOrPath}`
-		assertNotInFlight(inFlight, key, nameOrPath)
-		if (stepOutputs.has(key)) return stepOutputs.get(key)
+		const key = prefix.length === 0 ? name : `${formatPath(prefix)}/${name}`
+		assertNotInFlight(state.inFlight, key, name)
+		const scopeChain = prefix.map((segment) => segment.name).join("/")
+		if (state.nameIndex.get(scopeChain)?.has(name)) {
+			return state.stepOutputs.get(key) // may be undefined: declared but not yet run / skipped (spec 4.2)
+		}
 	}
-	return undefined
+
+	const visible = new Set<string>()
+	for (let i = staticCallerParentPath.length; i >= 0; i--) {
+		const scopeChain = staticCallerParentPath
+			.slice(0, i)
+			.map((segment) => segment.name)
+			.join("/")
+		for (const declared of state.nameIndex.get(scopeChain) ?? []) visible.add(declared)
+	}
+	throw new Error(
+		`getStepResult("${name}"): no step or construct named "${name}" is visible from this scope (names-only addressing, spec 4.2) — a mis-addressed read is a wiring bug, not a structural fact. Visible names: ${[...visible].sort().join(", ")}`,
+	)
 }
 
 function assertNotInFlight(inFlight: ReadonlySet<string>, key: string, requested: string): void {

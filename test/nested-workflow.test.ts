@@ -94,20 +94,24 @@ describe("nested-workflow node (Phase 7a, spec §2.3/§11)", () => {
 		)
 	})
 
-	it("keeps a nested step's output addressable via getStepResult from a later parent node, using an explicit path", async () => {
-		// A bare "parse" would NOT resolve here (spec §3.9): `reader` is a sibling of the nested
-		// workflow, not a descendant of it, so "parse" is outside its lexical scope — the nested
-		// workflow's own path segment (spec §8.5/§11.1) disambiguates it explicitly.
+	it("a later parent node reads the nested workflow's OUTPUT by bare name; its internals are not addressable (spec 4.1)", async () => {
+		// `reader` is a sibling of the nested workflow, not a descendant of it, so `parse` is outside its
+		// lexical scope — and the path form that used to reach it (`pipeline/parse`) was removed outright
+		// (names-only addressing). What a sibling reads is the nested workflow's own output, by its name.
 		const reader = createStep({
 			name: "reader",
-			output: Type.Object({ firstWord: Type.String() }),
-			run: ({ ctx }) => ({ firstWord: ctx.getStepResult<{ words: string[] }>("pipeline/parse")?.words[0] ?? "" }),
+			output: Type.Object({ summary: Type.String() }),
+			run: ({ ctx }) => {
+				expect(() => ctx.getStepResult("pipeline/parse")).toThrow(/path arguments were removed/)
+				expect(() => ctx.getStepResult("parse")).toThrow(/no step or construct named "parse"/)
+				return { summary: ctx.getStepResult<{ summary: string }>("pipeline")?.summary ?? "" }
+			},
 		})
 		const parent = createWorkflow({ name: "reader-parent" }).workflow(pipelineWorkflow).then(reader).commit()
 
 		const { host } = createTestHost()
 		const result = await runWorkflow(parent, undefined, host)
 		expect(result.status).toBe("completed")
-		expect(result.output).toEqual({ firstWord: "hello" })
+		expect(result.output).toEqual({ summary: '3 words, starting with "hello"' })
 	})
 })

@@ -100,9 +100,10 @@ const reconClock = createStep({
 	output: Type.Object({ remainingSec: Type.Number(), pass: Type.Number() }),
 	run: ({ ctx }) => {
 		const task = ctx.getInitData<{ deadlineIso: string }>()
-		const previous = ctx.getStepResult<{ pass: number }>("recon/recon-check")
 		const remainingSec = (new Date(task?.deadlineIso ?? Date.now()).getTime() - Date.now()) / 1000
-		return { remainingSec, pass: (previous?.pass ?? 0) + 1 }
+		// The pass number IS the loop iteration (iteration-context spec 1.2) — the engine supplies it;
+		// this step no longer re-derives it from its own previous iteration's output.
+		return { remainingSec, pass: ctx.scope("recon")?.iteration ?? 1 }
 	},
 })
 
@@ -119,12 +120,20 @@ const reconClock = createStep({
 const reconCheck = createStep({
 	name: "recon-check",
 	description: "Decide whether another recon pass is needed and affordable",
-	output: Type.Object({ hasCriteria: Type.Boolean(), mustStop: Type.Boolean(), pass: Type.Number() }),
+	// `design` rides this output because the recon loop's OUTPUT is this step's output (its last body
+	// node), and `implement`/`verify` — sibling constructs, outside the recon loop's scope — read the
+	// contract from it by the loop's bare name (names-only addressing): the body's output IS the
+	// explicit memory record, rather than state that later readers path-spelunk for.
+	output: Type.Object({
+		hasCriteria: Type.Boolean(),
+		mustStop: Type.Boolean(),
+		pass: Type.Number(),
+		design: Type.Optional(planSchema),
+	}),
 	run: ({ ctx, logger }) => {
 		const task = ctx.getInitData<{ deadlineIso: string }>()
 		const design = ctx.getStepResult<Static<typeof planSchema>>("survey")
-		const opened = ctx.getStepResult<{ pass: number }>("recon-clock")
-		const pass = opened?.pass ?? 1
+		const pass = ctx.scope("recon")?.iteration ?? 1
 		const remainingSec = (new Date(task?.deadlineIso ?? Date.now()).getTime() - Date.now()) / 1000
 		const hasCriteria = (design?.criteria?.length ?? 0) > 0
 		// Recon must never starve the work. Stop the moment another pass would eat the smallest round that
@@ -132,7 +141,7 @@ const reconCheck = createStep({
 		const reserveSec = (SURVEY_LANDING_MS + IMPLEMENT_FLOOR_MS + VERIFY_CAP_MS) / 1000 + ROUND_MARGIN_SEC
 		const mustStop = remainingSec < reserveSec || pass >= RECON_MAX_PASSES
 		logger.info("recon pass finished", { pass, hasCriteria, remainingSec: Math.round(remainingSec), mustStop })
-		return { hasCriteria, mustStop, pass }
+		return { hasCriteria, mustStop, pass, design }
 	},
 })
 
@@ -155,8 +164,8 @@ const survey = createAgentStep({
 	// smaller box (see SURVEY_LANDING_MS). Sizing this from run state is what makes the recon loop cheap
 	// enough to be worth having.
 	maxDurationMs: ({ ctx }) => {
-		const recon = ctx.getStepResult<{ pass: number; remainingSec: number }>("recon-clock")
-		const box = (recon?.pass ?? 1) > 1 ? SURVEY_LANDING_MS : SURVEY_CAP_MS
+		const recon = ctx.getStepResult<{ remainingSec: number }>("recon-clock")
+		const box = (ctx.scope("recon")?.iteration ?? 1) > 1 ? SURVEY_LANDING_MS : SURVEY_CAP_MS
 		return Math.max(30_000, Math.min(box, (recon?.remainingSec ?? 0) * 1000 - ROUND_MARGIN_SEC * 1000))
 	},
 	optional: true,
@@ -169,11 +178,11 @@ const survey = createAgentStep({
 	resumable: true,
 	prompt: ({ ctx }) => {
 		const task = ctx.getInitData<{ instruction: string }>()
-		const recon = ctx.getStepResult<{ remainingSec: number; pass: number }>("recon-clock")
+		const recon = ctx.getStepResult<{ remainingSec: number }>("recon-clock")
 		const remainingSec = recon?.remainingSec ?? 0
 		// A later pass has already looked; sending it back to explore is how a recon loop becomes a budget
 		// leak. It gets the landing prompt and a much smaller box instead.
-		return (recon?.pass ?? 1) > 1
+		return (ctx.scope("recon")?.iteration ?? 1) > 1
 			? surveyLandingPrompt(SURVEY_LANDING_MS / 1000, remainingSec)
 			: surveyPrompt(task?.instruction ?? "(missing)", SURVEY_CAP_MS / 1000, remainingSec)
 	},
@@ -186,11 +195,10 @@ const budget = createStep({
 	output: Type.Object({ remainingSec: Type.Number(), round: Type.Number() }),
 	run: ({ ctx }) => {
 		const task = ctx.getInitData<{ deadlineIso: string }>()
-		// The PREVIOUS round's checkpoint — never this step's own key, which is in flight right now
-		// (spec §3.9: a step cannot observe itself, and the engine throws rather than lie about it).
-		const previous = ctx.getStepResult<{ round: number }>("solve/checkpoint")
 		const remainingSec = (new Date(task?.deadlineIso ?? Date.now()).getTime() - Date.now()) / 1000
-		return { remainingSec, round: (previous?.round ?? 0) + 1 }
+		// The round number IS the loop iteration (iteration-context spec 1.2) — no more re-deriving it
+		// from the previous round's checkpoint.
+		return { remainingSec, round: ctx.scope("solve")?.iteration ?? 1 }
 	},
 })
 
@@ -218,7 +226,8 @@ const implement = createAgentStep({
 	resumable: true,
 	prompt: ({ ctx }) => {
 		const task = ctx.getInitData<{ instruction: string }>()
-		const design = ctx.getStepResult<Static<typeof planSchema>>("recon/survey")
+		// The contract rides the recon LOOP's output (see `recon-check`) — read by the loop's bare name.
+		const design = ctx.getStepResult<{ design?: Static<typeof planSchema> }>("recon")?.design
 		const round = ctx.getStepResult<{ remainingSec: number; round: number }>("budget")
 		const remainingSec = round?.remainingSec ?? 0
 		return implementPrompt({
@@ -227,7 +236,7 @@ const implement = createAgentStep({
 			// Both of the previous round's checks, not just the first: when the audit is the reason this round
 			// exists, its findings are the ONLY description of what is wrong — `verify` said the task was done.
 			failures: mergedFailures(ctx.getStepResult<Verdict>("verify"), auditVerdict(ctx)),
-			continuing: (round?.round ?? 1) > 1,
+			continuing: (ctx.scope("solve")?.iteration ?? 1) > 1,
 			stepSec: implementBoxMs(remainingSec) / 1000,
 			remainingSec,
 		})
@@ -250,7 +259,7 @@ const verify = createAgentStep({
 	retry: { maxRetry: 0 },
 	prompt: ({ ctx }) => {
 		const task = ctx.getInitData<{ instruction: string }>()
-		const design = ctx.getStepResult<Static<typeof planSchema>>("recon/survey")
+		const design = ctx.getStepResult<{ design?: Static<typeof planSchema> }>("recon")?.design
 		const round = ctx.getStepResult<{ remainingSec: number }>("budget")
 		return verifyPrompt({
 			instruction: task?.instruction ?? "(missing)",
@@ -333,8 +342,7 @@ const checkpoint = createStep({
 		// The safe reading here is the OPPOSITE of `verify`'s — silence is no objection, because the first
 		// check has already said done and an audit that never spoke is not evidence against it.
 		const audited = auditVerdict(ctx)
-		const opened = ctx.getStepResult<{ round: number; remainingSec: number }>("budget")
-		const round = opened?.round ?? 0
+		const round = ctx.scope("solve")?.iteration ?? 0
 		const remainingSec = (new Date(task?.deadlineIso ?? Date.now()).getTime() - Date.now()) / 1000
 		// Stop when the NEXT round — whose size is now known exactly, because `implement` takes a fixed
 		// share of whatever is left — would not fit in what remains.
@@ -386,7 +394,8 @@ const report = createStep({
 	description: "Summarize the run for the log",
 	output: Type.Object({ allPass: Type.Boolean(), rounds: Type.Number(), remainingSec: Type.Number() }),
 	run: ({ ctx }) => {
-		const final = ctx.getStepResult<{ allPass: boolean; remainingSec: number; round: number }>("solve/checkpoint")
+		// The solve LOOP's output is its last body step's (`checkpoint`) output — the bare name suffices.
+		const final = ctx.getStepResult<{ allPass: boolean; remainingSec: number; round: number }>("solve")
 		return {
 			allPass: final?.allPass === true,
 			rounds: final?.round ?? 0,
