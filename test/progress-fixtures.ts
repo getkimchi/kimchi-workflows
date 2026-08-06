@@ -310,7 +310,15 @@ export function blockedRetryRun(): Scenario {
 				error: "bad json",
 				at: at(3000),
 			},
-			{ type: "agent-steer", runId: RUN_ID, path: "flaky", attempt: 1, violation: "no json", at: at(3500) },
+			{
+				type: "agent-steer",
+				runId: RUN_ID,
+				path: "flaky",
+				attempt: 1,
+				violation: "no json",
+				violationKind: "no-submission",
+				at: at(3500),
+			},
 			{ type: "step-started", runId: RUN_ID, path: "sign-off", input: undefined, at: at(4000) },
 			{
 				type: "questionnaire-asked",

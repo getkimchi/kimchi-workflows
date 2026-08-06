@@ -32,6 +32,7 @@ import { bindProgress } from "./progress-sink.ts"
 import { runArtifactsDir } from "./project-dir.ts"
 import { createRunLock } from "./run-lock.ts"
 import { registerStepOutputToolsFromEnv } from "./step-output-tools.ts"
+import { withTelemetry } from "./telemetry-bridge.ts"
 
 export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 	// A process spawned as a workflow STEP is not a workflow host: it registers the step's output tools
@@ -59,7 +60,12 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 			// this extension is loaded. Everything a run writes — its event log and every step session — lands
 			// in this one directory (project-dir.ts).
 			const runDir = runArtifactsDir(ctx.cwd, ctx.sessionManager.getSessionDir())
-			const store = createFsStore(runDir)
+			// Telemetry (telemetry spec R1–R7) attaches HERE, at the one store every command path shares, so
+			// every event a run records — including the two terminals the engine never emits, the cold cancel
+			// and the stale-lock reclaim — is published without each write site having to remember to. It only
+			// publishes on the harness bus; whether anything ships is a subscriber's decision, and with no
+			// subscriber loaded (plain PI) the whole thing is inert.
+			const store = withTelemetry(createFsStore(runDir), (channel, data) => pi.events.emit(channel, data))
 			const startAgent = bindAgentStarter(ctx.modelRegistry, runDir)
 			// The live surface, chosen per invocation from `ctx.mode` (progress §7.2) — the context is what
 			// knows whether there is a terminal to draw in, and it does not exist until a command runs.
