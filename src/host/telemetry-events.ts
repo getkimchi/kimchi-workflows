@@ -77,7 +77,7 @@ export const MAX_ERROR_LENGTH = 300
  *
  * The last two preserve the distinction the engine draws deliberately (provider-failed vs
  * model-misbehaved) without a separate agent-error event: a failed request surfaces as the retry it
- * causes, and a failure no retry can clear surfaces as the `step_failed` / `run_crashed` that follows.
+ * causes, and a failure no retry can clear surfaces as the `step_failed` / `run_failed` that follows.
  */
 export type WorkflowRetryReason =
 	| "exception"
@@ -169,8 +169,8 @@ export interface RunCompletedPayload extends WorkflowEventCommon {
 }
 
 /** Where it crashed is the run log's to tell (its `run-crashed` records the path); only the cause travels. */
-export interface RunCrashedPayload extends WorkflowEventCommon {
-	readonly event: "run_crashed"
+export interface RunFailedPayload extends WorkflowEventCommon {
+	readonly event: "run_failed"
 	readonly error: WorkflowError
 	readonly duration_ms?: number
 }
@@ -204,7 +204,7 @@ export interface StepCompletedPayload extends WorkflowStepEventCommon {
 /**
  * An `optional` step exhausted its retries and the run carried on without its output (spec §9.1).
  *
- * This — not `run_crashed` — is the failure signal that matters for workflows built the way the shipped
+ * This — not `run_failed` — is the failure signal that matters for workflows built the way the shipped
  * ones are: they mark nearly every agent step `optional`, so a failed turn degrades the run rather than
  * ending it, and a run can therefore complete "successfully" with many failed steps.
  */
@@ -225,7 +225,7 @@ export type WorkflowEventPayload =
 	| RunResumedPayload
 	| RunBlockedPayload
 	| RunCompletedPayload
-	| RunCrashedPayload
+	| RunFailedPayload
 	| RunCancelledPayload
 	| StepStartedPayload
 	| StepRetriedPayload

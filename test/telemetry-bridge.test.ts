@@ -272,7 +272,7 @@ describe("what a run publishes (spec R3)", () => {
 			error: { message: expect.stringContaining("gate") },
 		})
 		expect(sink.events()).toContain("run_completed")
-		expect(sink.events()).not.toContain("run_crashed")
+		expect(sink.events()).not.toContain("run_failed")
 	})
 
 	it("a crash, with its cause in the error envelope", async () => {
@@ -292,10 +292,10 @@ describe("what a run publishes (spec R3)", () => {
 
 		await runWorkflow(workflow, undefined, host)
 
-		expect(sink.first("run_crashed")).toMatchObject({
+		expect(sink.first("run_failed")).toMatchObject({
 			error: { message: expect.stringContaining("boom") },
 		})
-		expect(sink.first("run_crashed")).not.toHaveProperty("path")
+		expect(sink.first("run_failed")).not.toHaveProperty("path")
 	})
 
 	it("a loop's iterations as repeated events under the one step name", async () => {
@@ -395,7 +395,7 @@ describe("terminal-state completeness (spec R6)", () => {
 		)
 		await reclaimer.begin(RUN_ID, projectRoot, store)
 
-		expect(sink.first("run_crashed")).toMatchObject({
+		expect(sink.first("run_failed")).toMatchObject({
 			run_id: "workflow-demo-deadbeef",
 			// Nothing in this invocation ever started or read that run's log, so its name is not in reach
 			// (spec R4): `run_id` is what joins this to the `run_started` the dead session published.
