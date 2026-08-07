@@ -26,12 +26,19 @@ import path from "node:path"
 import { type Static, Type } from "typebox"
 import { createAgentStep, createQuestionnaireStep, createStep, createWorkflow } from "../../flow/index.ts"
 import type { RunContext } from "../../flow/types.ts"
-import { loadWorkflowFile } from "../load-workflow.ts"
-import { appName, workflowsDir } from "../project-dir.ts"
-import { WORKFLOW_SUFFIX } from "../workflow-catalog.ts"
+import { loadWorkflowFile, WORKFLOW_SUFFIX } from "../load-workflow.ts"
 
-/** Initial input: the extension supplies the project root so steps can resolve paths without a cwd assumption. */
-export const createInputSchema = Type.Object({ projectRoot: Type.String() })
+/**
+ * Initial input: the extension supplies the project root so steps can resolve paths without a cwd
+ * assumption, and the workflows directory as the RUNNING harness names it (`.<app>/workflows/`,
+ * project-dir.ts). The directory arrives as DATA because this module may not compute it: it is loaded
+ * back through `loadWorkflowFile`'s restricted loader (on resume, and by the attended loop), where
+ * project-dir.ts's `@earendil-works/pi-coding-agent` import does not resolve.
+ */
+export const createInputSchema = Type.Object({
+	projectRoot: Type.String(),
+	workflowsDir: Type.Optional(Type.String()),
+})
 
 /** What the interview must establish before any code is generated. */
 export const specSchema = Type.Object({
@@ -52,7 +59,7 @@ const briefSchema = Type.Object({
 	goal: Type.String({ title: "Goal", description: "What should this workflow do?", chat: true }),
 	fileName: Type.String({
 		title: "File name",
-		description: `File to write, e.g. \`deploy.workflow.ts\` (saved under .${appName()}/workflows/).`,
+		description: "File to write, e.g. `deploy.workflow.ts` (saved under the project's workflows directory).",
 	}),
 })
 
@@ -257,13 +264,15 @@ const generate = createAgentStep({
  * project root.
  */
 function resolveTarget(ctx: RunContext): string {
-	const { projectRoot } = ctx.getInitData<{ projectRoot: string }>() ?? { projectRoot: process.cwd() }
+	const init = ctx.getInitData<Static<typeof createInputSchema>>() ?? { projectRoot: process.cwd() }
+	const projectRoot = init.projectRoot
+	// `.pi` is the same "we are not being told a name" fallback project-dir.ts documents; the extension
+	// always passes the real directory.
+	const workflowsDir = init.workflowsDir ?? path.join(projectRoot, ".pi", "workflows")
 	const { fileName } = ctx.getStepResult<{ fileName: string }>("brief") ?? { fileName: "untitled.workflow.ts" }
 	const named = fileName.endsWith(".ts") ? fileName : `${fileName}${WORKFLOW_SUFFIX}`
 	const target =
-		named.includes(path.sep) || named.includes("/")
-			? path.resolve(projectRoot, named)
-			: path.join(workflowsDir(projectRoot), named)
+		named.includes(path.sep) || named.includes("/") ? path.resolve(projectRoot, named) : path.join(workflowsDir, named)
 
 	// Containment: `/workflow create` writes into the project, never outside it. `fileName` is free
 	// text from the opening form, so `../../elsewhere.ts` would otherwise resolve anywhere on disk.

@@ -15,11 +15,10 @@ import { existsSync } from "node:fs"
 import { readdir } from "node:fs/promises"
 import path from "node:path"
 import type { WorkflowDefinition } from "../flow/types.ts"
-import { loadWorkflowFile } from "./load-workflow.ts"
+import { loadWorkflowFile, WORKFLOW_SUFFIX } from "./load-workflow.ts"
 import { workflowsDir } from "./project-dir.ts"
 
-/** The file suffix that marks a workflow module inside the workflows directory. */
-export const WORKFLOW_SUFFIX = ".workflow.ts"
+export { WORKFLOW_SUFFIX } from "./load-workflow.ts"
 
 /** A discovered workflow: what `/workflow list` shows and what a name resolves to. */
 export interface WorkflowEntry {
