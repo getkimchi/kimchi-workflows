@@ -82,6 +82,15 @@ export interface ForeachOptions {
 	 * Rejected at `.commit()` if it exceeds the workflow's `maxConcurrency` ceiling (spec §3.6).
 	 */
 	concurrency?: number
+	/**
+	 * Sequential feedback (foreach-feedback spec, Feature 3): item N's body receives item N−1's body
+	 * output as its input — item 0 receives the foreach's upstream input — with the same pass-through
+	 * rule as a loop (an item producing no output forwards what it received). The ITEM itself is read
+	 * from the frame instead: `ctx.scope(foreachName)?.input`. The engine defines delivery, not
+	 * aggregation — thread accumulations (e.g. a list of prior summaries) inside the fed value yourself.
+	 * Rejected at `.commit()` with `concurrency > 1`: there is no defined order to thread along.
+	 */
+	feedback?: boolean
 }
 
 /** Options for a `.parallel()` construct. */
@@ -118,9 +127,18 @@ export interface WorkflowBuilder {
 	 * output is an object keyed by the executed arm names (each arm name is its body's workflow name).
 	 */
 	branch(arms: readonly BranchArmSpec[], options?: BranchOptions): WorkflowBuilder
-	/** Loop (spec §3.3): run `body`, then repeat while `condition` holds; output is the last body output. */
+	/**
+	 * Loop (spec §3.3): run `body`, then repeat while `condition` holds.
+	 *
+	 * **Feedback** (loop-feedback spec, Feature 2): each iteration's body receives the PREVIOUS
+	 * iteration's body output as its input — the first iteration receives the value flowing into the
+	 * loop from upstream. It is ordinary, schema-validated step I/O, so the body's input and output
+	 * schemas must agree (checked at `.commit()` where both are declared). An iteration that produces
+	 * no output (a failed `optional` tail) passes its input through unchanged, and the loop's own
+	 * output is the final effective value — readable downstream by the loop's bare name.
+	 */
 	dowhile(body: WorkflowDefinition, condition: LoopCondition, options?: LoopOptions): WorkflowBuilder
-	/** Loop (spec §3.3): run `body`, then repeat until `condition` holds; output is the last body output. */
+	/** Loop (spec §3.3): run `body`, then repeat until `condition` holds. Feedback: see {@link WorkflowBuilder.dowhile}. */
 	dountil(body: WorkflowDefinition, condition: LoopCondition, options?: LoopOptions): WorkflowBuilder
 	/**
 	 * Foreach (spec §3.4): run `body` once per item selected by `selector` (pure), with the item as the
@@ -206,6 +224,7 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
 				body,
 				selector,
 				concurrency: foreachOptions?.concurrency ?? DEFAULT_FOREACH_CONCURRENCY,
+				feedback: foreachOptions?.feedback ?? false,
 			})
 			return builder
 		},
@@ -225,6 +244,7 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
 			assertWellFormed(options.name, nodes)
 			assertScopeNames(options.name, nodes)
 			assertConcurrencyWithinCeiling(options.name, nodes, maxConcurrency)
+			assertFeedbackIsSequential(options.name, nodes)
 			assertNoBackgroundAsks(options.name, nodes)
 			return {
 				name: options.name,
@@ -246,9 +266,11 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
 		loopOptions?: LoopOptions,
 	): WorkflowNode {
 		loopCount += 1
+		const name = loopOptions?.name ?? `loop-${loopCount}`
+		assertLoopFeedbackSchemas(options.name, name, body)
 		return {
 			kind: "loop",
-			name: loopOptions?.name ?? `loop-${loopCount}`,
+			name,
 			mode,
 			body,
 			condition,
@@ -257,6 +279,47 @@ export function createWorkflow<TInputSchema extends TSchema | undefined = undefi
 	}
 
 	return builder
+}
+
+/**
+ * Loop feedback wiring check (loop-feedback spec 2.2): the body's output becomes the next iteration's
+ * input, so a body whose FIRST node declares an input schema and whose LAST node declares an output
+ * schema must agree between the two — a loop whose body cannot consume its own output is a wiring
+ * error caught at authoring time, not at iteration two.
+ *
+ * Best-effort by design: a first/last node that is a construct, or a step with no schema (an agent
+ * step that acts, a `.map()`), leaves nothing to compare — runtime input validation (spec §3.8)
+ * remains the backstop. An unconstrained first-node schema (`Type.Any()`/`Type.Unknown()` — no
+ * JSON-visible keys) accepts anything, its own output included, so it passes. Equality is the schema
+ * REFERENCE or structural JSON equality — conservatively strict, per the plan's risk note.
+ */
+function assertLoopFeedbackSchemas(workflowName: string, loopName: string, body: WorkflowDefinition): void {
+	const first = body.nodes[0]
+	const last = body.nodes.at(-1)
+	if (first?.kind !== "step" || last?.kind !== "step") return
+	const inputSchema = first.step.inputSchema
+	const outputSchema = last.step.outputSchema
+	if (!inputSchema || !outputSchema) return
+	if (Object.keys(inputSchema).length === 0) return // unconstrained (Any/Unknown): consumes anything
+	if (inputSchema === outputSchema || deepJsonEqual(inputSchema, outputSchema)) return
+	throw new Error(
+		`workflow "${workflowName}": loop "${loopName}" feeds each iteration's body output back as the next iteration's input (loop-feedback spec 2.1), but its body's first step "${first.step.name}" declares an input schema that differs from the last step "${last.step.name}"'s output schema — the body cannot consume its own output (spec 2.2); align the two schemas (or widen the head step's input)`,
+	)
+}
+
+/** Structural equality over the JSON-visible portion of two TypeBox schemas (symbol metadata ignored). */
+function deepJsonEqual(a: unknown, b: unknown): boolean {
+	if (a === b) return true
+	if (typeof a !== typeof b) return false
+	if (typeof a !== "object" || a === null || b === null) return false
+	if (Array.isArray(a) !== Array.isArray(b)) return false
+	if (Array.isArray(a) && Array.isArray(b)) {
+		return a.length === b.length && a.every((item, i) => deepJsonEqual(item, b[i]))
+	}
+	const aKeys = Object.keys(a as Record<string, unknown>)
+	const bKeys = Object.keys(b as Record<string, unknown>)
+	if (aKeys.length !== bKeys.length) return false
+	return aKeys.every((key) => deepJsonEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]))
 }
 
 /** The three things `.then()` (and a `.parallel()` arm) accepts — anything else is not a step (spec §2). */
@@ -407,6 +470,21 @@ function assertConcurrencyWithinCeiling(
 		if (node.kind === "foreach" && node.concurrency > maxConcurrency) {
 			throw new Error(
 				`workflow "${workflowName}": foreach "${node.name}" declares concurrency ${node.concurrency}, above the workflow's ceiling of ${maxConcurrency} (spec §3.6) — raise maxConcurrency or lower this construct's concurrency`,
+			)
+		}
+	})
+}
+
+/**
+ * Feedback threads a value item-to-item, which only means something when items run one at a time in a
+ * defined order — with `concurrency > 1` "the previous item" is a race, so the combination is rejected
+ * statically (foreach-feedback spec 3.3), in the same walk style as the ceiling check above.
+ */
+function assertFeedbackIsSequential(workflowName: string, nodes: readonly WorkflowNode[]): void {
+	forEachNode(nodes, (node) => {
+		if (node.kind === "foreach" && node.feedback === true && node.concurrency > 1) {
+			throw new Error(
+				`workflow "${workflowName}": foreach "${node.name}" declares feedback with concurrency ${node.concurrency} — feedback threads each item's output to the NEXT item, which has no defined order once items run concurrently (foreach-feedback spec 3.3); keep concurrency at 1, or drop feedback`,
 			)
 		}
 	})

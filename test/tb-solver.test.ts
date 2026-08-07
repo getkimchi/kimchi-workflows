@@ -456,7 +456,12 @@ describe("tb-solver: what the steps are told", () => {
 		const surveyBox = steps.get("survey")?.maxDurationMs
 		expect(typeof surveyBox).toBe("function")
 		const surveyFor = (pass: number): number =>
-			(surveyBox as (a: { ctx: unknown }) => number)({ ctx: { getStepResult: () => ({ pass, remainingSec: 3600 }) } })
+			(surveyBox as (a: { ctx: unknown }) => number)({
+				ctx: {
+					getStepResult: () => ({ remainingSec: 3600 }),
+					scope: () => ({ kind: "loop", name: "recon", iteration: pass, input: undefined }),
+				},
+			})
 		expect(surveyFor(1)).toBe(225_000) // explore
 		expect(surveyFor(2)).toBe(60_000) // land it
 

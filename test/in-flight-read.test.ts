@@ -7,6 +7,10 @@ import { createStep, createWorkflow } from "../src/flow/index.ts"
 import { createTestHost } from "./helpers.ts"
 import { createStepBarrier } from "./step-barrier.ts"
 
+function nameIndex(entries: Record<string, readonly string[]>): Map<string, ReadonlySet<string>> {
+	return new Map(Object.entries(entries).map(([scope, names]) => [scope, new Set(names)]))
+}
+
 function baseState(overrides: Partial<RunState> = {}): RunState {
 	return {
 		runId: "r1",
@@ -15,6 +19,7 @@ function baseState(overrides: Partial<RunState> = {}): RunState {
 		stepOutputs: new Map(),
 		inFlight: new Set(),
 		concurrencyGate: createConcurrencyGate(4),
+		nameIndex: nameIndex({ "": ["a", "b", "each", "par"], par: ["b", "reader"], each: ["process"] }),
 		...overrides,
 	}
 }
@@ -22,32 +27,28 @@ function baseState(overrides: Partial<RunState> = {}): RunState {
 describe("getStepResult never observes an in-flight step (spec §3.9)", () => {
 	it("throws for a bare name that is currently executing (nearest enclosing scope)", () => {
 		const state = baseState({ inFlight: new Set(["par/b"]) })
-		const ctx = createRunContext(state, [{ name: "par" }]) // caller's own scope is "par"
+		const ctx = createRunContext(state, [{ name: "par" }], [], "par/reader") // caller's own scope is "par"
 		expect(() => ctx.getStepResult("b")).toThrow(/currently executing/)
 	})
 
-	it("throws for an explicit path that is currently executing", () => {
-		const state = baseState({ inFlight: new Set(["each@3/process"]) })
-		const ctx = createRunContext(state, [])
-		expect(() => ctx.getStepResult("each@3/process")).toThrow(/currently executing/)
-	})
-
 	it("does NOT throw for a DIFFERENT item's in-flight step — per-item keying keeps them independent (spec §5.4)", () => {
+		// The caller sits inside item 4; item 3's same-named step is mid-flight. Static keys keep the
+		// foreach item index, so the two never collide.
 		const state = baseState({ inFlight: new Set(["each@3/process"]) })
-		const ctx = createRunContext(state, [])
-		expect(() => ctx.getStepResult("each@4/process")).not.toThrow()
-		expect(ctx.getStepResult("each@4/process")).toBeUndefined() // not reached (not completed either)
+		const ctx = createRunContext(state, [{ name: "each", index: 4, indexKind: "foreach" }], [], "each@4/process")
+		expect(() => ctx.getStepResult("process")).not.toThrow()
+		expect(ctx.getStepResult("process")).toBeUndefined() // not reached (not completed either)
 	})
 
-	it("a step not yet reached still reads undefined — todo is a structural fact, not a race", () => {
+	it("a DECLARED step not yet reached reads undefined — todo is a structural fact, not a race", () => {
 		const state = baseState()
-		const ctx = createRunContext(state, [])
-		expect(ctx.getStepResult("never-touched")).toBeUndefined()
+		const ctx = createRunContext(state, [], [], "reader")
+		expect(ctx.getStepResult("a")).toBeUndefined()
 	})
 
 	it("a step recorded complete (not in-flight) reads its value normally", () => {
 		const state = baseState({ stepOutputs: new Map([["a", { n: 1 }]]) })
-		const ctx = createRunContext(state, [])
+		const ctx = createRunContext(state, [], [], "reader")
 		expect(ctx.getStepResult("a")).toEqual({ n: 1 })
 	})
 
@@ -59,8 +60,34 @@ describe("getStepResult never observes an in-flight step (spec §3.9)", () => {
 			stepOutputs: new Map([["b", { far: true }]]),
 			inFlight: new Set(["par/b"]),
 		})
-		const ctx = createRunContext(state, [{ name: "par" }])
+		const ctx = createRunContext(state, [{ name: "par" }], [], "par/reader")
 		expect(() => ctx.getStepResult("b")).toThrow(/currently executing/)
+	})
+})
+
+describe("getStepResult is names-only (spec 4.1/4.2)", () => {
+	it("rejects path syntax outright — the path form was removed", () => {
+		const state = baseState()
+		const ctx = createRunContext(state, [], [], "reader")
+		for (const arg of ["each@3/process", "until-valid/design", "rounds#2", "each@4"]) {
+			expect(() => ctx.getStepResult(arg)).toThrow(/path arguments were removed/)
+		}
+	})
+
+	it("throws on a name no enclosing scope declares, listing what IS visible", () => {
+		const state = baseState()
+		const ctx = createRunContext(state, [{ name: "par" }], [], "par/reader")
+		expect(() => ctx.getStepResult("never-declared")).toThrow(/no step or construct named "never-declared"/)
+		// The error carries the union of names visible from the caller's chain — better than mustRead.
+		expect(() => ctx.getStepResult("never-declared")).toThrow(/Visible names: .*\breader\b/)
+	})
+
+	it("an inner declaration SHADOWS an outer same-named value: not-yet-run inner reads undefined, never the outer match", () => {
+		// "b" is declared in the caller's own scope ("par") but has not run; a completed top-level "b"
+		// exists. Lexical resolution stops at the nearest DECLARING scope (spec 4.2).
+		const state = baseState({ stepOutputs: new Map([["b", { far: true }]]) })
+		const ctx = createRunContext(state, [{ name: "par" }], [], "par/reader")
+		expect(ctx.getStepResult("b")).toBeUndefined()
 	})
 })
 

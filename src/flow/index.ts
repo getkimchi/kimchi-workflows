@@ -51,6 +51,7 @@ export type {
 	QuestionnaireStep,
 	RetryPolicy,
 	RunContext,
+	ScopeFrame,
 	StepDefinition,
 	StepLogger,
 	StepNode,

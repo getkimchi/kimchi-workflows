@@ -112,7 +112,15 @@ const sourceSchema = Type.Object({
 	 */
 	verification: Type.String({ description: "Which checks you ran and their result, or why you could not run any." }),
 })
-const checkSchema = Type.Object({ ok: Type.Boolean(), source: Type.String(), error: Type.Optional(Type.String()) })
+const checkSchema = Type.Object({
+	ok: Type.Boolean(),
+	source: Type.String(),
+	error: Type.Optional(Type.String()),
+	// Carried through from `generate`'s output (names-only addressing, spec 4.1): the loop's output is
+	// the body's LAST step's output, so anything a downstream reader needs must ride in it — `write`
+	// reads this from its own input rather than path-reaching into the loop's internals.
+	verification: Type.Optional(Type.String()),
+})
 
 /** Step 1 — the opening form. Deterministic, no LLM: two questions derived from the schema. */
 const brief = createQuestionnaireStep({
@@ -195,7 +203,31 @@ const approve = createQuestionnaireStep({
 	output: approveSchema,
 })
 
-const reviewBody = createWorkflow({ name: "review-body" }).then(design).then(approve).commit()
+/**
+ * The `review` loop's output must carry everything downstream readers need (names-only addressing,
+ * spec 4.1): a loop's output is its body's LAST step's output, and `generate` — a sibling construct,
+ * outside this loop's scope — reads the approved plan from it by the loop's bare name. This tail step
+ * widens the approval decision with the plan itself, replacing `generate`'s old path-form reach into
+ * `review/design`.
+ */
+const reviewOutcomeSchema = Type.Object({
+	decision: approveSchema.properties.decision,
+	feedback: Type.Optional(Type.String()),
+	plan: specSchema,
+})
+const reviewOutcome = createStep({
+	name: "review-outcome",
+	description: "Bundle the approval decision with the plan it approved",
+	input: approveSchema,
+	output: reviewOutcomeSchema,
+	run: ({ input, ctx }) => {
+		const plan = ctx.getStepResult<Static<typeof specSchema>>("design")
+		if (!plan) throw new Error("review-outcome: the design step produced no plan")
+		return { decision: input.decision, feedback: input.feedback, plan }
+	},
+})
+
+const reviewBody = createWorkflow({ name: "review-body" }).then(design).then(approve).then(reviewOutcome).commit()
 
 /**
  * Step 4a — generate the file's TypeScript. On a retry the previous validation error is in run
@@ -208,11 +240,11 @@ const generate = createAgentStep({
 	// iteration's `check` output, not the spec — so the spec is read from run context instead.
 	output: sourceSchema,
 	prompt: ({ ctx }) => {
-		// Explicit path (spec §3.9): `design` lives inside the `review` loop, a SIBLING of `until-valid`
-		// (not an ancestor of it), so a bare "design" would not resolve here — `generate` is outside its
-		// lexical scope. The node path reaches it directly regardless of scope.
-		const input = ctx.getStepResult<Static<typeof specSchema>>("review/design")
-		if (!input) throw new Error("generate: the design step produced no spec")
+		// `design` lives inside the `review` loop, a SIBLING of `until-valid` — outside this step's
+		// lexical scope. The approved plan rides the review loop's own OUTPUT (review-outcome), read here
+		// by the loop's bare name (names-only addressing, spec 4.1).
+		const input = ctx.getStepResult<Static<typeof reviewOutcomeSchema>>("review")?.plan
+		if (!input) throw new Error("generate: the review loop produced no approved plan")
 		const previous = ctx.getStepResult<{ ok: boolean; error?: string }>("check")
 		const retry = previous?.error ? ["", "Your previous attempt FAILED to load with:", previous.error, "Fix it."] : []
 		return [
@@ -314,9 +346,14 @@ const check = createStep({
 			// Imports must resolve and `commit()` must accept every step — the commit-time shape check
 			// (src/flow/create-workflow.ts) is what rejects a hallucinated builder API here.
 			await loadWorkflowFile(probe)
-			return { ok: true, source: input.source }
+			return { ok: true, source: input.source, verification: input.verification }
 		} catch (err) {
-			return { ok: false, source: input.source, error: err instanceof Error ? err.message : String(err) }
+			return {
+				ok: false,
+				source: input.source,
+				error: err instanceof Error ? err.message : String(err),
+				verification: input.verification,
+			}
 		} finally {
 			await rm(probe, { force: true })
 		}
@@ -335,10 +372,9 @@ const write = createStep({
 		// Re-resolved here (not carried from `check`) so the availability guard is re-applied against the
 		// filesystem as it is now, immediately before the write.
 		const target = resolveTarget(ctx)
-		// Explicit path (spec §3.9): `generate` lives inside the `until-valid` loop, not `write`'s own
-		// top-level scope, so a bare "generate" would not resolve here.
-		const verification = ctx.getStepResult<{ verification?: string }>("until-valid/generate")?.verification
-		if (verification) logger.info(`generator's own checks: ${verification}`)
+		// `generate` lives inside the `until-valid` loop; its verification rides the loop's output
+		// (checkSchema) into this step's own input — no reaching into the loop's internals (spec 4.1).
+		if (input.verification) logger.info(`generator's own checks: ${input.verification}`)
 
 		await mkdir(path.dirname(target), { recursive: true })
 		await writeFile(target, input.source, "utf8")

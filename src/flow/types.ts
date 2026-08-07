@@ -7,6 +7,33 @@
 import type { TSchema } from "typebox"
 import type { Questionnaire } from "./questionnaire.ts"
 
+/**
+ * One enclosing construct's position and input, exposed through {@link RunContext.scope}
+ * (iteration-context spec, Feature 1). Values are pure data derived from the engine's walk state:
+ * deterministic, identical on resume (rebuilt as re-entry descends), and identical regardless of
+ * concurrency interleaving. Retry attempt is deliberately NOT here (spec 1.5): loop iteration and
+ * retry attempt are different axes, and conflating them would invite resume keys that fork per retry.
+ */
+export interface ScopeFrame {
+	/** Which construct this frame belongs to. A branch contributes its taken ARM (the peer scope), not itself. */
+	readonly kind: "loop" | "foreach" | "branch-arm" | "parallel" | "workflow"
+	/** The construct's addressing name (for a branch arm: the arm's own name). */
+	readonly name: string
+	/** Loop frames only: the current iteration, 1-based — the same number the dynamic path's `#n` records. */
+	readonly iteration?: number
+	/** Foreach frames only: the current item's index, 0-based — the same number the dynamic path's `@n` records. */
+	readonly itemIndex?: number
+	/** Foreach frames only: how many items the selector produced. */
+	readonly itemCount?: number
+	/**
+	 * What this scope received (spec 1.6): the foreach frame carries the ITEM (even when feedback mode
+	 * redirects the body's hand-off input — the item stays readable here); the loop frame carries the
+	 * iteration's effective input (the fed-back value); branch-arm/parallel/workflow frames carry the
+	 * construct's upstream input.
+	 */
+	readonly input: unknown
+}
+
 /** Prior step outputs, workflow init data, and run identity, exposed to a step's body. */
 export interface RunContext {
 	/** The run's generated id. */
@@ -14,13 +41,28 @@ export interface RunContext {
 	/** The workflow's declared name. */
 	readonly workflowName: string
 	/**
-	 * Look up a prior step's output (spec §3.9), either by a BARE name — resolved lexically to the
-	 * nearest enclosing scope, walking outward from the calling step's own scope to the root — or by
-	 * an explicit node path (`until-valid/design`, spec §8.5; `/`/`#` in the argument select this
-	 * form). A step that has not been reached, or was skipped, reads `undefined` — a structural fact,
-	 * not an error. Undefined if not yet run.
+	 * The caller's own DYNAMIC node path (iteration-context spec 1.1) — the exact string the event log
+	 * records for it (`attempts#3/step-turn`, `phases@1/steps@0/draft`). For a step this is the step's
+	 * own path; for a branch/loop predicate or foreach selector, the construct's own path.
 	 */
-	getStepResult<T = unknown>(stepNameOrPath: string): T | undefined
+	readonly path: string
+	/**
+	 * The enclosing construct frames (iteration-context spec 1.2/1.6). Called with no argument it
+	 * returns the NEAREST enclosing frame; called with a construct name it walks outward to that
+	 * construct (a nested loop-in-foreach is addressable by name, not just the innermost). Returns
+	 * `undefined` at the top level, or when no enclosing construct carries the given name.
+	 */
+	scope(name?: string): ScopeFrame | undefined
+	/**
+	 * Look up a prior step's or construct's output by its BARE name (names-only addressing, spec 4.1) —
+	 * resolved lexically to the nearest enclosing scope that declares it, walking outward from the
+	 * calling step's own scope to the root. A declared name whose step has not been reached, or was
+	 * skipped, reads `undefined` — a structural fact, not an error. A name NO enclosing scope declares
+	 * THROWS (a provable wiring bug, spec 4.2), as does any argument carrying path syntax (`/`, `#`,
+	 * `@`) — the path form was removed outright. Paths remain identity in the event log and resume
+	 * addressing; they are no longer an authoring query language.
+	 */
+	getStepResult<T = unknown>(stepName: string): T | undefined
 	/** The workflow's initial input, if any (undefined for workflows with no input schema). */
 	getInitData<T = unknown>(): T | undefined
 }
@@ -196,8 +238,11 @@ export interface AgentStep extends StepBase {
 	 * A FUNCTION computes the key per execution, which is the only way to say "each ITEM continues its
 	 * own conversation". `true` cannot express that: it keys by the step's NAME, and every item of a
 	 * `.foreach` runs the same named step, so they would all land in one file. A per-item key closes
-	 * that — `resumable: ({ ctx }) => \`step-${ctx.getStepResult<Item>("item").index}\`` — and it is what
-	 * lets a re-entered step meet its own prior work rather than a summary of it.
+	 * that — built from position alone via the iteration context (spec 1.3), no echo steps:
+	 * `resumable: ({ ctx }) => \`step-${ctx.scope("batch")?.itemIndex}\`` — and it is what lets a
+	 * re-entered step meet its own prior work rather than a summary of it. (Loop iteration is fine in a
+	 * key; retry attempt is deliberately not exposed — a key that forked per retry would be exactly
+	 * wrong, spec 1.5.)
 	 *
 	 * Its result cannot be checked at `.commit()` (it does not exist until the step runs), so the two
 	 * guarantees a static key gets are enforced at runtime instead: the produced key is syntax-checked
@@ -237,7 +282,13 @@ export type StepDefinition = FunctionStep | AgentStep | QuestionnaireStep
 /** A pure branch predicate over the run context (spec §3.2) — side-effect-free, keeps transitions deterministic. */
 export type BranchCondition = (ctx: RunContext) => boolean
 
-/** A pure loop predicate (spec §3.3) over the run context and the body's most recent output. */
+/**
+ * A pure loop predicate (spec §3.3) over the run context and the body's most recent output.
+ * `lastOutput` is the RAW body output (loop-feedback spec 2.4): it may be `undefined` when the round
+ * produced nothing (a failed `optional` tail) even though the fed-back value passes through defined —
+ * a predicate may legitimately need to know the round came up empty. The fed value itself is readable
+ * as `ctx.scope(loopName)?.input`.
+ */
 export type LoopCondition = (ctx: RunContext, lastOutput: unknown) => boolean
 
 /**
@@ -275,7 +326,12 @@ export interface BranchNode {
 	readonly arms: readonly BranchArm[]
 }
 
-/** Loop node (spec §3.3): run `body`, evaluate `condition`, repeat; output is the last iteration's output. */
+/**
+ * Loop node (spec §3.3): run `body`, evaluate `condition`, repeat. Feedback (loop-feedback spec,
+ * Feature 2): each iteration's body receives the previous iteration's body output as its input; an
+ * iteration producing no output passes its input through unchanged (spec 2.3), and the loop's own
+ * output is the final effective value (spec 2.5).
+ */
 export interface LoopNode {
 	readonly kind: "loop"
 	readonly name: string
@@ -299,6 +355,14 @@ export interface ForeachNode {
 	readonly body: WorkflowDefinition
 	readonly selector: ForeachSelector
 	readonly concurrency: number
+	/**
+	 * Sequential feedback (foreach-feedback spec, Feature 3): item N's body receives item N−1's body
+	 * output as its INPUT (item 0 receives the foreach's upstream input); the item itself moves to the
+	 * frame — `ctx.scope(name)?.input`. An item producing no output forwards what it received (3.2).
+	 * Only defined at `concurrency` 1 — `.commit()` rejects the combination with `concurrency > 1`,
+	 * where there is no defined order to thread along (3.3).
+	 */
+	readonly feedback?: boolean
 }
 
 /**
