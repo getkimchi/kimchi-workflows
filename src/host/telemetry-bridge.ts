@@ -223,7 +223,7 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 
 			case "run-crashed": {
 				const payload: WorkflowEventPayload = {
-					event: "run_crashed",
+					event: "run_failed",
 					...common(event.runId, event.at),
 					error: errorOf(event.error),
 					duration_ms: runDuration(event.runId, event.at),
@@ -275,7 +275,7 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 
 			// Observed for state, published never: the kind it records is what lets the retry that follows
 			// say `provider_error` or `context_window` (see `retryReason`). The failure itself reaches the
-			// stream as that retry — or, when no retry can clear it, as the step_failed / run_crashed after.
+			// stream as that retry — or, when no retry can clear it, as the step_failed / run_failed after.
 			case "agent-error":
 				stateOf(event.runId).agentErrorKind.set(event.path, event.kind)
 				return undefined

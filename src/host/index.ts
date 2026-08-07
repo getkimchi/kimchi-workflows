@@ -55,7 +55,7 @@ export type {
 	RunBlockedPayload,
 	RunCancelledPayload,
 	RunCompletedPayload,
-	RunCrashedPayload,
+	RunFailedPayload,
 	RunResumedPayload,
 	RunStartedPayload,
 	StepCancelledPayload,

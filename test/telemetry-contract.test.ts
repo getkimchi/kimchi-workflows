@@ -126,7 +126,7 @@ const EXPECTED_EVENTS: { [K in RunEvent["type"]]: WorkflowEventType | undefined 
 	"run-started": "run_started",
 	"run-resumed": "run_resumed",
 	"run-completed": "run_completed",
-	"run-crashed": "run_crashed",
+	"run-crashed": "run_failed",
 	"run-cancelled": "run_cancelled",
 	"step-started": "step_started",
 	"step-retry": "step_retried",
