@@ -51,6 +51,14 @@ const workflowModules = {
 	"@kimchi-dev/kimchi-workflows/engine": engine,
 }
 
+/**
+ * The file suffix that marks a workflow module inside the workflows directory. Lives here rather than
+ * in workflow-catalog.ts so that files loaded UNDER this loader (builtin/create.workflow.ts) can name
+ * it without importing catalog machinery, whose graph reaches `@earendil-works/pi-coding-agent` — a
+ * module that only resolves in the extension's own loader, never in this one.
+ */
+export const WORKFLOW_SUFFIX = ".workflow.ts"
+
 function isWorkflowDefinition(value: unknown): value is WorkflowDefinition {
 	return (
 		typeof value === "object" &&
