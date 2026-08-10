@@ -36,7 +36,7 @@ const GOAL = [
 	"A workflow that reviews a git diff.",
 	"Step 1: an agent step that reads a diff string and returns a list of review comments.",
 	"Step 2: a function step that counts the comments and returns a one-line verdict.",
-	"No user input beyond the diff. Keep it to exactly two steps.",
+	"No user input beyond the diff. Keep it to exactly two steps and one workflow file.",
 ].join(" ")
 
 /** Does this option mean "yes, go ahead"? Used to approve the plan whatever wording the model chose. */
@@ -75,8 +75,16 @@ async function createWorkflowE2E(
 	model: string,
 	fileName: string,
 	projectRoot: string,
+	writtenFiles: Set<string>,
 ): Promise<{ result: RunResult; rounds: number }> {
-	const { host, store } = createTestHost({ startAgent: createKimiAgentStarter(apiKey ?? "") })
+	const target = path.join(workflowsDir(projectRoot), fileName)
+	const { host, store } = createTestHost({
+		startAgent: createKimiAgentStarter(apiKey ?? "", {
+			fileToolsRoot: workflowsDir(projectRoot),
+			writtenFiles,
+			overwriteFiles: new Set([target]),
+		}),
+	})
 
 	// Pin every agent step in the meta-workflow to the model under test.
 	const underTest = { ...createWorkflowWorkflow, defaultModel: model }
@@ -108,10 +116,16 @@ async function createWorkflowE2E(
 	// not the bare name — its dynamic path carries the iteration index.
 	for (const event of await store.loadEvents(result.runId)) {
 		if (event.type === "step-completed" && staticKeyOf(parsePath(event.path)) === "until-valid/check") {
-			const output = event.output as { ok: boolean; error?: string; source: string }
+			const output = event.output as { ok: boolean; error?: string; entryPath: string }
 			if (!output.ok) {
 				console.log(`[create-e2e ${model}] check REJECTED: ${output.error}`)
-				console.log(`[create-e2e ${model}] source was:\n${output.source.slice(0, 1200)}`)
+				try {
+					console.log(
+						`[create-e2e ${model}] entry file was:\n${(await readFile(output.entryPath, "utf8")).slice(0, 1200)}`,
+					)
+				} catch {
+					console.log(`[create-e2e ${model}] entry file could not be read: ${output.entryPath}`)
+				}
 			}
 		}
 	}
@@ -166,11 +180,12 @@ describe.skipIf(!apiKey)("/workflow create E2E (open-weight models)", () => {
 			const projectRoot = path.resolve(import.meta.dirname, "..")
 			const fileName = `e2e-${model.split("/")[1]}.workflow.ts`
 			const target = path.join(workflowsDir(projectRoot), fileName)
+			const writtenFiles = new Set<string>()
 			await mkdir(workflowsDir(projectRoot), { recursive: true })
 			await rm(target, { force: true })
 
 			try {
-				const { result, rounds } = await createWorkflowE2E(model, fileName, projectRoot)
+				const { result, rounds } = await createWorkflowE2E(model, fileName, projectRoot, writtenFiles)
 
 				console.log(`[create-e2e ${model}] status=${result.status} rounds=${rounds}`, result.error ?? "")
 				expect(result.status).toBe("completed")
@@ -192,8 +207,10 @@ describe.skipIf(!apiKey)("/workflow create E2E (open-weight models)", () => {
 				console.log(`[create-e2e ${model}] smoke run: ${smoke.status}`, smoke.error ?? "")
 				expect(smoke.status).toBe("completed")
 			} finally {
-				// KEEP_GENERATED=1 leaves the generated file behind for inspection.
-				if (!process.env.KEEP_GENERATED) await rm(target, { force: true })
+				// KEEP_GENERATED=1 leaves every file the generator wrote behind for inspection.
+				if (!process.env.KEEP_GENERATED) {
+					await Promise.all([...writtenFiles, target].map((file) => rm(file, { force: true })))
+				}
 			}
 			// Generous: an interview plus up to three whole-file generations, all against a live model.
 		}, 600_000)

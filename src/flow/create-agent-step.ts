@@ -6,6 +6,17 @@ type InferInput<TInputSchema extends TSchema | undefined> = TInputSchema extends
 	? Static<TInputSchema>
 	: undefined
 
+/**
+ * Agent-step configuration, including model selection, output repair, budgets, isolation, and resumability.
+ *
+ * @remarks
+ * An acting agent omits `output`. A reporting agent declares `output`; an asking agent additionally sets
+ * `asks: true`. Asking cannot be combined with `background`. Static resumable keys cannot be shared by
+ * executions that may overlap.
+ *
+ * @workflowCapability steps
+ * @workflowCapability advanced-agent
+ */
 export interface CreateAgentStepOptions<TInputSchema extends TSchema | undefined, TOutputSchema extends TSchema> {
 	/** Unique step name — used for data-flow addressing and event-log matching (spec §3). */
 	name: string
@@ -60,7 +71,26 @@ export interface CreateAgentStepOptions<TInputSchema extends TSchema | undefined
 	resumable?: boolean | string | ((args: { ctx: RunContext }) => string)
 }
 
-/** Agent step (spec §2.2). Runs the agent loop via the host and validates its structured output. */
+/**
+ * Creates an agent step that acts, reports structured output, or interactively asks for information.
+ *
+ * @remarks
+ * Omit `output` for an acting step whose result is its side effects. Declare `output` for a reporting
+ * step; the agent must call `submit_result` with a matching value. Add `asks: true` when it may submit
+ * questionnaire batches before its result. Never combine `asks: true` with `background: true`.
+ *
+ * @example
+ * ```ts
+ * const review = createAgentStep({
+ *   name: "review",
+ *   input: changeSchema,
+ *   output: reviewSchema,
+ *   prompt: ({ input }) => `Review ${input.path}`,
+ * })
+ * ```
+ *
+ * @workflowCapability steps
+ */
 export function createAgentStep<
 	TInputSchema extends TSchema | undefined = undefined,
 	TOutputSchema extends TSchema = TSchema,

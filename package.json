@@ -61,9 +61,10 @@
 			"./src/host/extension.ts"
 		]
 	},
-	"//scripts": "`prepack` (not `prepare`) builds for the tarball: `prepare` would also run for git installs, where PI installs with --omit=dev and TypeScript is therefore absent.",
+	"//scripts": "`prepack` (not `prepare`) builds for the tarball: `prepare` would also wastefully build git installs, where PI loads the checked-in TypeScript source and omits the development-only typebox pin.",
 	"scripts": {
 		"build": "tsc -p tsconfig.build.json",
+		"docs:authoring": "node scripts/generate-authoring-reference.mjs && biome format --write src/host/builtin/generated/authoring-reference.ts",
 		"prepack": "npm run build",
 		"test": "vitest run",
 		"test:integration": "vitest run --config vitest.integration.config.ts",
@@ -72,9 +73,11 @@
 		"lint:fix": "biome check --write .",
 		"check": "pnpm run lint && pnpm run typecheck && pnpm run test"
 	},
-	"//dependencies": "`jiti` only. PI does NOT provide it to extensions (verified: a package importing it with no node_modules fails to load), and workflow loading needs it at runtime.",
+	"//dependencies": "PI does not provide jiti or the TypeScript compiler to extensions. jiti loads workflows; TypeScript performs mandatory pre-write candidate validation even in dependency-free target projects.",
 	"dependencies": {
-		"jiti": "^2.7.0"
+		"@types/node": "^26.2.0",
+		"jiti": "^2.7.0",
+		"typescript": "^7.0.2"
 	},
 	"//peerDependencies": "The packages PI bundles and hands to extensions itself (docs/packages.md: \"list them in peerDependencies with a \\\"*\\\" range and do not bundle them\"). PI's extension loader aliases these specifiers to its own copies and that alias WINS over the consuming project's node_modules — so a range narrower than `*` would describe a resolution we do not control.",
 	"peerDependencies": {
@@ -86,7 +89,6 @@
 		"@biomejs/biome": "^2.5.6",
 		"@earendil-works/pi-coding-agent": "^0.80.10",
 		"typebox": "1.1.38",
-		"typescript": "^7.0.2",
 		"vitest": "^4.1.10"
 	}
 }

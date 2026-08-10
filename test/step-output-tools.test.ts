@@ -81,14 +81,25 @@ describe("registration inside a spawned step", () => {
 		expect(plain.registerTool.mock.calls.map((c) => (c[0] as { name: string }).name)).toEqual([SUBMIT_RESULT_TOOL])
 	})
 
-	it("acknowledges a submission without carrying the payload — the transcript does that", async () => {
+	it("terminates PI after either submission without carrying the payload — the transcript does that", async () => {
 		const { pi, registerTool } = fakePi()
-		registerStepOutputTools(pi, { outputSchema })
-		const tool = registerTool.mock.calls[0]?.[0] as { execute: (args: unknown) => Promise<{ content: unknown[] }> }
+		registerStepOutputTools(pi, { outputSchema, asks: true })
+		const tools = new Map(
+			registerTool.mock.calls.map((call) => {
+				const tool = call[0] as {
+					name: string
+					execute: () => Promise<{ content: unknown[]; terminate?: boolean }>
+				}
+				return [tool.name, tool] as const
+			}),
+		)
 
-		await expect(tool.execute({ result: { grade: "A" } })).resolves.toMatchObject({
-			content: [{ type: "text" }],
-		})
+		for (const name of [SUBMIT_RESULT_TOOL, SUBMIT_QUESTIONS_TOOL]) {
+			await expect(tools.get(name)?.execute()).resolves.toMatchObject({
+				content: [{ type: "text" }],
+				terminate: true,
+			})
+		}
 	})
 
 	it("registers nothing in an ordinary session, which is not a step", () => {

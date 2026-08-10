@@ -8,8 +8,10 @@
  * before it loads — hence a file whose path travels in the environment. The process boundary is what
  * makes per-step tool schemas possible at all; a single long-lived process could not do it.
  *
- * The handlers deliberately do nothing but acknowledge. The payload is read back off the TRANSCRIPT
- * (pi-agent-messages.ts), because a subprocess handler's return value has no way to reach the engine.
+ * The handlers deliberately do nothing but acknowledge and terminate the PI tool loop. The payload is
+ * read back off the TRANSCRIPT (pi-agent-messages.ts), because a subprocess handler's return value has
+ * no way to reach the engine. Termination is essential: without it PI asks the model for another reply,
+ * delaying the engine's questionnaire/result and allowing a later duplicate submission to replace it.
  */
 import { readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
@@ -77,7 +79,11 @@ export function registerStepOutputTools(pi: ExtensionAPI, spec: StepOutputToolSp
 			description:
 				"Submit this step's result. Pass the result as the `result` argument. Call this once you are done; you may explain your reasoning around the call.",
 			parameters: submitResultParameters(spec.outputSchema),
-			execute: async () => ({ content: [{ type: "text", text: "Result submitted." }], details: undefined }),
+			execute: async () => ({
+				content: [{ type: "text", text: "Result submitted." }],
+				details: undefined,
+				terminate: true,
+			}),
 		}),
 	)
 
@@ -91,8 +97,9 @@ export function registerStepOutputTools(pi: ExtensionAPI, spec: StepOutputToolSp
 				"Ask the user for information instead of submitting a result. Batch every question you need into one call. The run pauses until the answers come back.",
 			parameters: submitQuestionsParameters(),
 			execute: async () => ({
-				content: [{ type: "text", text: "Questions submitted. Stop now — the run will resume with the answers." }],
+				content: [{ type: "text", text: "Questions submitted. The run will resume with the answers." }],
 				details: undefined,
+				terminate: true,
 			}),
 		}),
 	)

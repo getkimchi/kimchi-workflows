@@ -2,10 +2,10 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { describe, expect, it } from "vitest"
-import createWorkflowWorkflow, { API_EXAMPLE } from "../src/host/builtin/create.workflow.ts"
+import createWorkflowWorkflow from "../src/host/builtin/create.workflow.ts"
 import { loadWorkflowFile } from "../src/host/load-workflow.ts"
 import { workflowsDir } from "../src/host/project-dir.ts"
-import { ask, createTestRun, reply } from "../src/testing/index.ts"
+import { ask, createTestRun, reply, withSideEffect } from "../src/testing/index.ts"
 
 /**
  * The `/workflow create` meta-workflow, driven end-to-end offline: its `design` agent and `approve`
@@ -22,11 +22,26 @@ const validSource = [
 	`export default createWorkflow({ name: "greeter", description: "says hi" }).then(greet).commit();`,
 ].join("\n")
 
+const typeInvalidSource = [
+	'import { Type } from "typebox";',
+	`import { createStep, createWorkflow } from "${flowImport}";`,
+	`const greet = createStep({ name: "greet", output: Type.Object({ message: Type.String() }), run: () => ({ message: 42 }) });`,
+	`export default createWorkflow({ name: "greeter", description: "says hi" }).then(greet).commit();`,
+].join("\n")
+
 const spec = {
 	name: "greeter",
 	description: "says hi",
 	summary: "One function step that returns a greeting.",
-	steps: [{ name: "greet", kind: "function" as const, purpose: "return a greeting" }],
+	schemas: [],
+	nodes: [
+		{
+			name: "greet",
+			kind: "function" as const,
+			purpose: "return a greeting",
+			inputSource: "none" as const,
+		},
+	],
 }
 
 const revisedSpec = { ...spec, summary: "One function step that returns a personalized greeting." }
@@ -37,35 +52,22 @@ const clarify = ask({
 
 const projectRoot = () => mkdtemp(path.join(tmpdir(), "pi-create-"))
 
-/**
- * `validSource` above imports by absolute path, so nothing else here exercises the package specifier
- * the generator is actually told to emit — a scope renamed everywhere but line 77 of create.workflow.ts
- * would ship a generator writing unresolvable imports, with this suite green.
- */
-describe("the worked example handed to the generator", () => {
-	it("loads as a real workflow, so the API it demonstrates is the API that exists", async () => {
-		const root = await projectRoot()
-		await mkdir(workflowsDir(root), { recursive: true })
-		const file = path.join(workflowsDir(root), "writer.workflow.ts")
-		await writeFile(file, API_EXAMPLE, "utf8")
-
-		const workflow = await loadWorkflowFile(file)
-
-		expect(workflow.name).toBe("writer")
-		expect(workflow.nodes).toHaveLength(3)
-	})
-})
+/** Simulate the real agent's filesystem edit, then submit only the entry-file path. */
+function generated(entryPath: string, source: string, verification = "framework validation only") {
+	return withSideEffect(reply({ entryPath, verification }), () => writeFile(entryPath, source, "utf8"))
+}
 
 describe("/workflow create meta-workflow", () => {
 	it("interviews, revises on request, approves, and writes the approved workflow into the project's workflows dir (spec §6.6)", async () => {
 		const root = await projectRoot()
+		const written = path.join(workflowsDir(root), "greeter.workflow.ts")
 
 		// 1. The opening form (deterministic, no LLM).
 		const brief = await createTestRun(createWorkflowWorkflow, {
-			input: { projectRoot: root },
+			input: { projectRoot: root, workflowsDir: workflowsDir(root) },
 			agents: {
 				design: [clarify, reply(spec), reply(revisedSpec)], // iteration 1: clarify then propose; iteration 2: revise
-				generate: [reply({ source: validSource, verification: "ran tsc --noEmit: clean" })],
+				generate: [generated(written, validSource, "ran tsc --noEmit: clean")],
 			},
 		})
 
@@ -99,11 +101,12 @@ describe("/workflow create meta-workflow", () => {
 		// exactly the distinction spec §8.4 draws between question suspension and a fresh attempt.
 		expect(revising.agent("design").sessions).toBe(3)
 
-		// 4. Approval releases the loop; generate → check → write follow with no further questions.
+		// 4. Approval reserves the final path; generate edits it, then check → complete follows.
 		const done = await revising.answer({ decision: "approve" })
-		expect(done.status).toBe("completed")
+		expect(done.status, `${done.error}; check=${JSON.stringify(done.stepOutput("until-valid/check"))}`).toBe(
+			"completed",
+		)
 
-		const written = path.join(workflowsDir(root), "greeter.workflow.ts")
 		expect(done.output).toEqual({ path: written })
 		expect(await readFile(written, "utf8")).toBe(validSource)
 
@@ -115,14 +118,15 @@ describe("/workflow create meta-workflow", () => {
 
 	it("retries generation when the produced source does not load, and reports the error to the agent", async () => {
 		const root = await projectRoot()
+		const written = path.join(workflowsDir(root), "greeter.workflow.ts")
 
 		const run = await createTestRun(createWorkflowWorkflow, {
-			input: { projectRoot: root },
+			input: { projectRoot: root, workflowsDir: workflowsDir(root) },
 			agents: {
 				design: [reply(spec)],
 				generate: [
-					reply({ source: "export default { not: 'a workflow' };", verification: "no tooling available" }),
-					reply({ source: validSource, verification: "ran tsc --noEmit: clean" }),
+					generated(written, "export default { not: 'a workflow' };", "no tooling available"),
+					generated(written, validSource, "ran tsc --noEmit: clean"),
 				],
 			},
 		})
@@ -131,21 +135,46 @@ describe("/workflow create meta-workflow", () => {
 		expect(proposed.status).toBe("blocked")
 		const done = await proposed.answer({ decision: "approve" })
 
-		expect(done.status).toBe("completed")
+		expect(done.status, `${done.error}; check=${JSON.stringify(done.stepOutput("until-valid/check"))}`).toBe(
+			"completed",
+		)
 		expect(done.eventsOf("loop-iteration").filter((event) => event.path.startsWith("until-valid#"))).toHaveLength(2) // first generation rejected, second accepted
 		// The retry prompt carried the loader's complaint, so the agent could see what was wrong.
-		expect(done.agent("generate").messages[1]).toMatch(/previous attempt FAILED/)
+		expect(done.agent("generate").messages[1]).toMatch(/files currently on disk FAILED/)
 		expect(done.agent("generate").messages[1]).toMatch(/does not export a workflow/)
-		expect(await readFile(path.join(workflowsDir(root), "greeter.workflow.ts"), "utf8")).toBe(validSource)
+		expect(done.agent("generate").messages[1]).not.toContain("export default { not: 'a workflow' }")
+		expect(await readFile(written, "utf8")).toBe(validSource)
 	})
 
-	it("crashes rather than writing a broken workflow when generation never validates", async () => {
+	it("rejects a type-invalid candidate and sends the compiler diagnostic into the repair turn", async () => {
 		const root = await projectRoot()
-		const bad = reply({ source: "export default { not: 'a workflow' };", verification: "no tooling available" })
+		const written = path.join(workflowsDir(root), "greeter.workflow.ts")
+		const run = await createTestRun(createWorkflowWorkflow, {
+			input: { projectRoot: root, workflowsDir: workflowsDir(root) },
+			agents: {
+				design: [reply(spec)],
+				generate: [generated(written, typeInvalidSource), generated(written, validSource)],
+			},
+		})
+
+		const proposed = await run.answer({ goal: "greet", fileName: "greeter.workflow.ts" })
+		const done = await proposed.answer({ decision: "approve" })
+
+		expect(done.status).toBe("completed")
+		expect(done.agent("generate").messages[1]).toContain("TypeScript validation failed")
+		expect(done.agent("generate").messages[1]).toMatch(/number.*not assignable.*string/i)
+		expect(done.agent("generate").messages[1]).not.toContain(typeInvalidSource)
+		expect(await readFile(written, "utf8")).toBe(validSource)
+	})
+
+	it("does not complete when the files never validate, leaving the in-place candidate available for inspection", async () => {
+		const root = await projectRoot()
+		const written = path.join(root, ".pi", "workflows", "greeter.workflow.ts")
+		const bad = () => generated(written, "export default { not: 'a workflow' };", "no tooling available")
 
 		const run = await createTestRun(createWorkflowWorkflow, {
 			input: { projectRoot: root },
-			agents: { design: [reply(spec)], generate: [bad, bad, bad] },
+			agents: { design: [reply(spec)], generate: [bad(), bad(), bad()] },
 		})
 
 		const proposed = await run.answer({ goal: "greet", fileName: "greeter.workflow.ts" })
@@ -153,17 +182,19 @@ describe("/workflow create meta-workflow", () => {
 
 		expect(crashed.status).toBe("crashed")
 		expect(crashed.error).toMatch(/exceeded its max of 3 iterations/)
-		expect(crashed.eventsOf("step-completed").some((event) => event.path === "write")).toBe(false)
+		expect(crashed.eventsOf("step-completed").some((event) => event.path === "complete")).toBe(false)
+		expect(await readFile(written, "utf8")).toContain("not: 'a workflow'")
 	})
 
 	it("appends the .workflow.ts suffix when the user gives a bare name", async () => {
 		const root = await projectRoot()
+		const written = path.join(workflowsDir(root), "greeter.workflow.ts")
 
 		const run = await createTestRun(createWorkflowWorkflow, {
-			input: { projectRoot: root },
+			input: { projectRoot: root, workflowsDir: workflowsDir(root) },
 			agents: {
 				design: [reply(spec)],
-				generate: [reply({ source: validSource, verification: "ran tsc --noEmit: clean" })],
+				generate: [generated(written, validSource, "ran tsc --noEmit: clean")],
 			},
 		})
 
@@ -171,17 +202,18 @@ describe("/workflow create meta-workflow", () => {
 		const done = await proposed.answer({ decision: "approve" })
 
 		expect(done.status).toBe("completed")
-		expect(done.output).toEqual({ path: path.join(workflowsDir(root), "greeter.workflow.ts") })
+		expect(done.output).toEqual({ path: written })
 	})
 
 	it("treats a name containing a separator as a path relative to the project root", async () => {
 		const root = await projectRoot()
+		const written = path.join(root, "flows", "greeter.workflow.ts")
 
 		const run = await createTestRun(createWorkflowWorkflow, {
 			input: { projectRoot: root },
 			agents: {
 				design: [reply(spec)],
-				generate: [reply({ source: validSource, verification: "ran tsc --noEmit: clean" })],
+				generate: [generated(written, validSource, "ran tsc --noEmit: clean")],
 			},
 		})
 
@@ -189,15 +221,78 @@ describe("/workflow create meta-workflow", () => {
 		const done = await proposed.answer({ decision: "approve" })
 
 		expect(done.status).toBe("completed")
-		expect(done.output).toEqual({ path: path.join(root, "flows", "greeter.workflow.ts") })
+		expect(done.output).toEqual({ path: written })
+	})
+
+	it("validates a multi-file workflow through relative imports and submits only its main entry path", async () => {
+		const root = await projectRoot()
+		const entryPath = path.join(workflowsDir(root), "greeter.workflow.ts")
+		const helperPath = path.join(workflowsDir(root), "greet-step.ts")
+		const entrySource = [
+			`import { createWorkflow } from "${flowImport}";`,
+			'import { greet } from "./greet-step.ts";',
+			'export default createWorkflow({ name: "greeter", description: "says hi" }).then(greet).commit();',
+		].join("\n")
+		const helperSource = [
+			`import { createStep } from "${flowImport}";`,
+			'export const greet = createStep({ name: "greet", run: () => ({ message: "hi" }) });',
+		].join("\n")
+		const helperWithPlaceholder = [
+			`import { createStep } from "${flowImport}";`,
+			'export const greet = createStep({ name: "greet", run: () => { throw new Error("TODO_WORKFLOW: greet") } });',
+		].join("\n")
+
+		const incomplete = withSideEffect(reply({ entryPath, verification: "framework validation only" }), async () => {
+			await Promise.all([
+				writeFile(entryPath, entrySource, "utf8"),
+				writeFile(helperPath, helperWithPlaceholder, "utf8"),
+			])
+		})
+		const repaired = withSideEffect(reply({ entryPath, verification: "framework validation only" }), async () => {
+			await Promise.all([writeFile(entryPath, entrySource, "utf8"), writeFile(helperPath, helperSource, "utf8")])
+		})
+		const run = await createTestRun(createWorkflowWorkflow, {
+			input: { projectRoot: root, workflowsDir: workflowsDir(root) },
+			agents: { design: [reply(spec)], generate: [incomplete, repaired] },
+		})
+
+		const proposed = await run.answer({ goal: "greet", fileName: "greeter.workflow.ts" })
+		const done = await proposed.answer({ decision: "approve" })
+
+		expect(done.status).toBe("completed")
+		expect(done.output).toEqual({ path: entryPath })
+		expect((done.stepOutput("until-valid/generate") as Record<string, unknown>).source).toBeUndefined()
+		expect(done.agent("generate").messages[1]).toContain("source still contains TODO_WORKFLOW")
+		expect((await loadWorkflowFile(entryPath)).nodes).toHaveLength(1)
+	})
+
+	it("rejects a submitted entry path other than the path reserved by this run", async () => {
+		const root = await projectRoot()
+		const entryPath = path.join(workflowsDir(root), "greeter.workflow.ts")
+		const wrongPath = path.join(workflowsDir(root), "different.workflow.ts")
+		const wrongSubmission = withSideEffect(
+			reply({ entryPath: wrongPath, verification: "framework validation only" }),
+			() => writeFile(entryPath, validSource, "utf8"),
+		)
+		const run = await createTestRun(createWorkflowWorkflow, {
+			input: { projectRoot: root, workflowsDir: workflowsDir(root) },
+			agents: { design: [reply(spec)], generate: [wrongSubmission, generated(entryPath, validSource)] },
+		})
+
+		const proposed = await run.answer({ goal: "greet", fileName: "greeter.workflow.ts" })
+		const done = await proposed.answer({ decision: "approve" })
+
+		expect(done.status).toBe("completed")
+		expect(done.agent("generate").messages[1]).toMatch(/submitted entryPath resolves to/)
+		expect(done.agent("generate").messages[1]).toContain(entryPath)
 	})
 })
 
 describe("/workflow create never destroys existing work (adversarial regression)", () => {
-	const scripted = {
+	const scripted = (entryPath: string) => ({
 		design: [reply(spec)],
-		generate: [reply({ source: validSource, verification: "ran tsc --noEmit: clean" })],
-	}
+		generate: [generated(entryPath, validSource, "ran tsc --noEmit: clean")],
+	})
 
 	it("rejects a taken name before the interview, so nothing is spent on it", async () => {
 		const root = await projectRoot()
@@ -206,7 +301,9 @@ describe("/workflow create never destroys existing work (adversarial regression)
 
 		// No agent scripts at all: if the interview were reached, the double would throw for the
 		// unscripted `design` step. Crashing cleanly proves the name is settled before any model runs.
-		const run = await createTestRun(createWorkflowWorkflow, { input: { projectRoot: root } })
+		const run = await createTestRun(createWorkflowWorkflow, {
+			input: { projectRoot: root, workflowsDir: workflowsDir(root) },
+		})
 		const clash = await run.answer({ goal: "greet", fileName: "greeter.workflow.ts" })
 
 		expect(clash.status).toBe("crashed")
@@ -233,20 +330,45 @@ describe("/workflow create never destroys existing work (adversarial regression)
 
 		// `target` settles (and rejects) the destination right after `brief`, before the review loop
 		// ever starts (spec §6.6) — so this crashes without ever reaching `design`.
-		const run = await createTestRun(createWorkflowWorkflow, { input: { projectRoot: root }, agents: scripted })
+		const run = await createTestRun(createWorkflowWorkflow, {
+			input: { projectRoot: root, workflowsDir: workflowsDir(root) },
+			agents: scripted(taken),
+		})
 		const clash = await run.answer({ goal: "greet", fileName: "greeter.workflow.ts" })
 
 		expect(clash.status).toBe("crashed")
 		expect(clash.error).toMatch(/already exists/)
 		expect(clash.error).toMatch(/re-run with a different name/)
 		expect(await readFile(taken, "utf8")).toBe("// hand-written, precious\n") // untouched
-		expect(clash.eventsOf("step-completed").some((event) => event.path === "write")).toBe(false)
+		expect(clash.eventsOf("step-completed").some((event) => event.path === "complete")).toBe(false)
+	})
+
+	it("uses an exclusive scaffold write if the target appears while the plan is being reviewed", async () => {
+		const root = await projectRoot()
+		const target = path.join(workflowsDir(root), "greeter.workflow.ts")
+		const run = await createTestRun(createWorkflowWorkflow, {
+			input: { projectRoot: root, workflowsDir: workflowsDir(root) },
+			agents: scripted(target),
+		})
+		const proposed = await run.answer({ goal: "greet", fileName: "greeter.workflow.ts" })
+		await mkdir(path.dirname(target), { recursive: true })
+		await writeFile(target, "// created while reviewing\n", "utf8")
+
+		const raced = await proposed.answer({ decision: "approve" })
+
+		expect(raced.status).toBe("crashed")
+		expect(raced.error).toMatch(/appeared before it could be reserved/)
+		expect(await readFile(target, "utf8")).toBe("// created while reviewing\n")
+		expect(raced.agent("generate").sessions).toBe(0)
 	})
 
 	it("refuses a file name that escapes the project root", async () => {
 		const root = await projectRoot()
 
-		const run = await createTestRun(createWorkflowWorkflow, { input: { projectRoot: root }, agents: scripted })
+		const run = await createTestRun(createWorkflowWorkflow, {
+			input: { projectRoot: root },
+			agents: scripted(path.join(root, ".pi", "workflows", "escaped.workflow.ts")),
+		})
 		const escaped = await run.answer({ goal: "greet", fileName: "../escaped.workflow.ts" })
 
 		// `target` settles (and rejects) the destination right after `brief`, before the review loop ever
