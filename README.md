@@ -183,11 +183,12 @@ expect(run.status).toBe("completed");
 
 1. **`brief`** — a questionnaire step: what should this do, and what should the file be called?
 2. **`target`** — settle the destination straight away, so a bad or taken name fails in milliseconds rather than after the interview.
-3. **`design`** — a Q&A agent asks clarifying questions in batches, then presents the plan for **Approve / Revise** in a `.dountil` loop, revising until you approve.
-4. **`until-valid`** — generate the TypeScript, then load it back with the real loader; on failure the agent sees the loader's error and retries. A workflow that never loads crashes the run rather than writing a broken file.
-5. **`write`** — save it. A bare name lands in `.pi/workflows/`, so the new workflow is immediately visible to `/workflow list` and runnable by name.
+3. **`design`** — a Q&A agent asks clarifying questions in batches, then presents a structured blueprint for **Approve / Revise** in a `.dountil` loop. The blueprint records schemas, data sources, agent modes, and recursive control flow rather than reducing the design to a flat prose step list.
+4. **`scaffold`** — reserve the final entry path with an exclusive write and place the deterministic imports, TypeBox schemas, step constructors, control-flow builders, and committed export there.
+5. **`until-valid`** — the generator edits that entry file directly and may add relative helper modules for a multi-file workflow. It submits only the main `entryPath`, not source code. The framework typechecks the entry and its imported graph, loads it through the real workflow loader, and compares the result with the approved structure; on failure the agent repairs the files in place. Formatting is deliberately not a creation gate.
+6. **`complete`** — report the already-written, validated entry path. There is no final source-writing handoff.
 
-It never destroys existing work. A name that already exists fails the run and leaves the file untouched — pick a different name, or delete the old one first. A name resolving outside the project is rejected too. Both are checked at step 2, before a single model call.
+It never destroys an existing entry file. A name that already exists fails the run and leaves the file untouched — pick a different name, or delete the old one first. A name resolving outside the project is rejected too. The early check happens at step 2, and the exclusive scaffold create closes the race if the path appears during plan review. Because generation now edits the final location, an invalid candidate remains there for inspection if all repair attempts fail.
 
 ---
 

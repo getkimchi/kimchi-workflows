@@ -13,6 +13,7 @@ import type { Questionnaire } from "./questionnaire.ts"
  * deterministic, identical on resume (rebuilt as re-entry descends), and identical regardless of
  * concurrency interleaving. Retry attempt is deliberately NOT here (spec 1.5): loop iteration and
  * retry attempt are different axes, and conflating them would invite resume keys that fork per retry.
+ * @workflowCapability data-flow
  */
 export interface ScopeFrame {
 	/** Which construct this frame belongs to. A branch contributes its taken ARM (the peer scope), not itself. */
@@ -51,6 +52,7 @@ export interface RunContext {
 	 * returns the NEAREST enclosing frame; called with a construct name it walks outward to that
 	 * construct (a nested loop-in-foreach is addressable by name, not just the innermost). Returns
 	 * `undefined` at the top level, or when no enclosing construct carries the given name.
+	 * @workflowCapability data-flow
 	 */
 	scope(name?: string): ScopeFrame | undefined
 	/**
@@ -61,9 +63,13 @@ export interface RunContext {
 	 * THROWS (a provable wiring bug, spec 4.2), as does any argument carrying path syntax (`/`, `#`,
 	 * `@`) — the path form was removed outright. Paths remain identity in the event log and resume
 	 * addressing; they are no longer an authoring query language.
+	 * @workflowCapability data-flow
 	 */
 	getStepResult<T = unknown>(stepName: string): T | undefined
-	/** The workflow's initial input, if any (undefined for workflows with no input schema). */
+	/**
+	 * The workflow's initial input, or `undefined` when the workflow has no input schema.
+	 * @workflowCapability data-flow
+	 */
 	getInitData<T = unknown>(): T | undefined
 }
 
@@ -89,6 +95,7 @@ export type StepRunFn<TInput, TOutput> = (args: StepRunArgs<TInput>) => TOutput 
  * prior step outputs (`getStepResult`) and workflow init data (`getInitData`). Pure and
  * deterministic; it has no host, network, or LLM access beyond `ctx`. The returned value is
  * validated by the downstream step's input schema, so a map declares no schema of its own.
+ * @workflowCapability map
  */
 export type MapFn<TOutput = unknown> = (ctx: RunContext) => TOutput
 
@@ -101,6 +108,7 @@ export interface AgentPromptArgs<TInput> {
 /**
  * Unified repeat policy for a step (spec §9.1). Covers thrown errors and invalid output uniformly;
  * an input-schema violation is a deterministic wiring failure and is never retried.
+ * @workflowCapability advanced-agent
  */
 export interface RetryPolicy {
 	/** Attempts after the first (default 0 = run once, no retry). */
@@ -279,7 +287,10 @@ export interface QuestionnaireStep extends StepBase {
 /** A step at rest is one of the step kinds; the engine branches on `kind`. */
 export type StepDefinition = FunctionStep | AgentStep | QuestionnaireStep
 
-/** A pure branch predicate over the run context (spec §3.2) — side-effect-free, keeps transitions deterministic. */
+/**
+ * A pure branch predicate over the run context; it must be side-effect-free to keep transitions deterministic.
+ * @workflowCapability branch
+ */
 export type BranchCondition = (ctx: RunContext) => boolean
 
 /**
@@ -288,6 +299,7 @@ export type BranchCondition = (ctx: RunContext) => boolean
  * produced nothing (a failed `optional` tail) even though the fed-back value passes through defined —
  * a predicate may legitimately need to know the round came up empty. The fed value itself is readable
  * as `ctx.scope(loopName)?.input`.
+ * @workflowCapability loop
  */
 export type LoopCondition = (ctx: RunContext, lastOutput: unknown) => boolean
 
@@ -295,6 +307,7 @@ export type LoopCondition = (ctx: RunContext, lastOutput: unknown) => boolean
  * A pure item selector for a foreach (spec §3.4): derives the collection to iterate from the run
  * context. Must be side-effect-free and deterministic — a resume re-runs it and relies on it
  * yielding the same array so recorded per-item outputs line up by index.
+ * @workflowCapability foreach
  */
 export type ForeachSelector = (ctx: RunContext) => readonly unknown[]
 

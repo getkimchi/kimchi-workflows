@@ -73,13 +73,14 @@ function isWorkflowDefinition(value: unknown): value is WorkflowDefinition {
  * loader ... on `/workflow run`"). Uses `jiti` — the same TS-loading approach PI's own CLI
  * depends on — so no separate build step is required for workflow authors.
  *
- * A fresh jiti per call, deliberately: its module cache is per-instance, so a workflow edited between
- * two runs of the same session is re-read rather than served stale.
+ * Runtime caching is disabled deliberately. A fresh jiti still integrates with Node's process-wide
+ * CommonJS cache by default, which would return the first failed candidate after `/workflow create`
+ * repaired that same entry path (and can likewise retain a stale relative helper module).
  *
  * Accepts either `export default workflow` or `export const workflow = ...`.
  */
 export async function loadWorkflowFile(absolutePath: string): Promise<WorkflowDefinition> {
-	const jiti = createJiti(import.meta.url, { virtualModules: workflowModules })
+	const jiti = createJiti(import.meta.url, { virtualModules: workflowModules, moduleCache: false })
 	const moduleExports = (await jiti.import(absolutePath)) as Record<string, unknown>
 
 	const candidate = moduleExports.default ?? moduleExports.workflow

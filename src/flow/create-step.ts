@@ -11,6 +11,16 @@ type InferOutput<TOutputSchema extends TSchema | undefined> = TOutputSchema exte
 	? Static<TOutputSchema>
 	: unknown
 
+/**
+ * Configuration shared by a function step, including retry, duration, and optional-failure controls.
+ *
+ * @remarks
+ * `retry.maxRetry` counts attempts after the first. `optional` should only be used when downstream
+ * nodes do not require this step's output, because a final failure produces `undefined`.
+ *
+ * @workflowCapability steps
+ * @workflowCapability advanced-agent
+ */
 export interface CreateStepOptions<
 	TInputSchema extends TSchema | undefined = undefined,
 	TOutputSchema extends TSchema | undefined = undefined,
@@ -32,7 +42,26 @@ export interface CreateStepOptions<
 	run: StepRunFn<InferInput<TInputSchema>, InferOutput<TOutputSchema>>
 }
 
-/** Function step (spec §2.1). */
+/**
+ * Creates a TypeScript function step whose input and output types are inferred from its TypeBox schemas.
+ *
+ * @remarks
+ * The engine validates `input` before calling `run` and validates the returned value against `output`.
+ * The callback may use `ctx` for earlier results, `abortSignal` for cancellation, and `logger` for
+ * structured run-log messages.
+ *
+ * @example
+ * ```ts
+ * const summarize = createStep({
+ *   name: "summarize",
+ *   input: Type.Array(Type.String()),
+ *   output: Type.String(),
+ *   run: ({ input }) => input.join("\n"),
+ * })
+ * ```
+ *
+ * @workflowCapability steps
+ */
 export function createStep<
 	TInputSchema extends TSchema | undefined = undefined,
 	TOutputSchema extends TSchema | undefined = undefined,

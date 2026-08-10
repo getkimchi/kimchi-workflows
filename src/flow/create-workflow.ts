@@ -32,6 +32,12 @@ export const DEFAULT_MAX_CONCURRENCY = 4
 /** Default foreach concurrency (spec §3.4): sequential unless the author opts in. */
 export const DEFAULT_FOREACH_CONCURRENCY = 1
 
+/**
+ * Root workflow configuration. The optional TypeBox `input` schema validates initial run data and
+ * infers its author-facing type; `maxConcurrency` defaults to 4.
+ *
+ * @workflowCapability data-flow
+ */
 export interface CreateWorkflowOptions<TInputSchema extends TSchema | undefined = undefined> {
 	/** Unique workflow name/id — used by `/workflow list` and the run store (spec §1.5, §8.9). */
 	name: string
@@ -53,19 +59,19 @@ export interface CreateWorkflowOptions<TInputSchema extends TSchema | undefined 
 	maxConcurrency?: number
 }
 
-/** Options for a `.map()` construct. */
+/** Options for a `.map()` construct. @workflowCapability map */
 export interface MapOptions {
 	/** Override the auto-generated step name (`map-1`, `map-2`, ...) used in the event log / run context. */
 	name?: string
 }
 
-/** Options for a `.branch()` construct. */
+/** Options for a `.branch()` construct. @workflowCapability branch */
 export interface BranchOptions {
 	/** Override the auto-generated node name (`branch-1`, ...). */
 	name?: string
 }
 
-/** Options for a loop construct. */
+/** Options shared by `.dowhile()` and `.dountil()`; `maxIterations` defaults to 100. @workflowCapability loop */
 export interface LoopOptions {
 	/** Override the auto-generated node name (`loop-1`, ...). */
 	name?: string
@@ -73,7 +79,12 @@ export interface LoopOptions {
 	maxIterations?: number
 }
 
-/** Options for a `.foreach()` construct. */
+/**
+ * Options for `.foreach()`; `concurrency` defaults to 1. Feedback threads each body's output into the
+ * next item and therefore requires `concurrency: 1`; the current item remains available through
+ * `ctx.scope(foreachName)?.input`.
+ * @workflowCapability foreach
+ */
 export interface ForeachOptions {
 	/** Override the auto-generated node name (`foreach-1`, ...). */
 	name?: string
@@ -93,19 +104,22 @@ export interface ForeachOptions {
 	feedback?: boolean
 }
 
-/** Options for a `.parallel()` construct. */
+/** Options for a `.parallel()` construct. @workflowCapability parallel */
 export interface ParallelOptions {
 	/** Override the auto-generated node name (`parallel-1`, ...). */
 	name?: string
 }
 
-/** Options for a `.workflow()` (nested-workflow) construct. */
+/** Options for a `.workflow()` nested-workflow construct. @workflowCapability workflow */
 export interface NestedWorkflowOptions {
 	/** Override the node name (defaults to the sub-workflow's name). */
 	name?: string
 }
 
-/** One `.branch()` arm: a pure condition paired with the sub-workflow to run when it holds. */
+/**
+ * One `.branch()` arm: a pure condition paired with the committed sub-workflow to run when it holds.
+ * @workflowCapability branch
+ */
 export type BranchArmSpec = readonly [BranchCondition, WorkflowDefinition]
 
 /**
@@ -115,16 +129,22 @@ export type BranchArmSpec = readonly [BranchCondition, WorkflowDefinition]
  * executed recursively by the same engine.
  */
 export interface WorkflowBuilder {
-	/** Append a step node to run next in sequence (spec §3.1). */
+	/**
+	 * Append a step node in sequence. Its input is the previous node's output and is validated against
+	 * the step's input schema.
+	 * @workflowCapability data-flow
+	 */
 	then(step: StepDefinition): WorkflowBuilder
 	/**
 	 * Insert a pure transform whose result becomes the next node's input via the linear hand-off
 	 * (spec §3.7). Reads earlier, non-adjacent outputs via `ctx.getStepResult` / `ctx.getInitData`.
+	 * @workflowCapability map
 	 */
 	map(transform: MapFn, options?: MapOptions): WorkflowBuilder
 	/**
 	 * Multi-match branch (spec §3.2): every arm whose condition holds runs sequentially; the node's
 	 * output is an object keyed by the executed arm names (each arm name is its body's workflow name).
+	 * @workflowCapability branch
 	 */
 	branch(arms: readonly BranchArmSpec[], options?: BranchOptions): WorkflowBuilder
 	/**
@@ -136,9 +156,14 @@ export interface WorkflowBuilder {
 	 * schemas must agree (checked at `.commit()` where both are declared). An iteration that produces
 	 * no output (a failed `optional` tail) passes its input through unchanged, and the loop's own
 	 * output is the final effective value — readable downstream by the loop's bare name.
+	 *
+	 * @workflowCapability loop
 	 */
 	dowhile(body: WorkflowDefinition, condition: LoopCondition, options?: LoopOptions): WorkflowBuilder
-	/** Loop (spec §3.3): run `body`, then repeat until `condition` holds. Feedback: see {@link WorkflowBuilder.dowhile}. */
+	/**
+	 * Run `body`, then repeat until `condition` holds. Feedback follows {@link WorkflowBuilder.dowhile}.
+	 * @workflowCapability loop
+	 */
 	dountil(body: WorkflowDefinition, condition: LoopCondition, options?: LoopOptions): WorkflowBuilder
 	/**
 	 * Foreach (spec §3.4): run `body` once per item selected by `selector` (pure), with the item as the
@@ -151,6 +176,8 @@ export interface WorkflowBuilder {
 	 * resources; anything shared across items (two agents editing the same file, say) must be sequenced
 	 * — either keep `concurrency` at 1, or restructure so the shared resource is touched outside the
 	 * fan-out.
+	 *
+	 * @workflowCapability foreach
 	 */
 	foreach(body: WorkflowDefinition, selector: ForeachSelector, options?: ForeachOptions): WorkflowBuilder
 	/**
@@ -163,18 +190,47 @@ export interface WorkflowBuilder {
 	 * the same file, branch, or external resource, since the engine has no way to detect or prevent two
 	 * concurrent agents rewriting the same working-tree state. Sequence anything that shares state with
 	 * `.then()` instead of putting it in the same `.parallel([...])`.
+	 *
+	 * @workflowCapability parallel
 	 */
 	parallel(arms: readonly StepDefinition[], options?: ParallelOptions): WorkflowBuilder
 	/**
 	 * Nested workflow (spec §2.3/§11): run a committed sub-workflow's nodes here, transparently folding
 	 * into the parent run/log. Output is the sub-workflow's final output. Every step/node name must be
 	 * unique across the flattened tree, so nesting the *same* sub-workflow twice is a `commit()` error.
+	 *
+	 * @workflowCapability workflow
 	 */
 	workflow(subWorkflow: WorkflowDefinition, options?: NestedWorkflowOptions): WorkflowBuilder
-	/** Finalize the workflow definition. */
+	/**
+	 * Finalize and validate the workflow definition.
+	 * @workflowCapability data-flow
+	 */
 	commit(): WorkflowDefinition
 }
 
+/**
+ * Starts a fluent workflow definition and returns its builder. Append at least one node and call
+ * `.commit()` to obtain a loadable {@link WorkflowDefinition}.
+ *
+ * @remarks
+ * Linear hand-off passes every node's output to the next node. Use `ctx.getStepResult()` for a
+ * non-adjacent result, `ctx.getInitData()` for the root input, and `ctx.scope()` for enclosing
+ * loop/foreach/branch/parallel input. Node names must be unique and cannot contain `/`, `#`, or `@`.
+ *
+ * @example
+ * ```ts
+ * export default createWorkflow({ name: "review", input: requestSchema })
+ *   .then(loadRequest)
+ *   .then(reviewRequest)
+ *   .commit()
+ * ```
+ *
+ * @throws If the workflow is empty, names are invalid or duplicated, concurrency exceeds its ceiling,
+ * or incompatible execution options are combined.
+ *
+ * @workflowCapability data-flow
+ */
 export function createWorkflow<TInputSchema extends TSchema | undefined = undefined>(
 	options: CreateWorkflowOptions<TInputSchema>,
 ): WorkflowBuilder {

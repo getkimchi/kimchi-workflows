@@ -4,29 +4,37 @@
  * It is an ordinary `WorkflowDefinition` — same authoring API, same engine, same event log — which
  * means it blocks, resumes, retries, and is testable exactly like any workflow a user writes.
  *
- * Shape (five top-level nodes, spec §6.6):
+ * Shape (six top-level nodes, spec §6.6):
  *
  *   brief          questionnaire step — what to build, and what to call the file
  *   target         function            — settle the destination, failing fast on a bad or taken name
  *   review         loop (.dountil)     — design proposes/revises a plan; approve asks approve/revise
  *     design         Q&A agent           — interview → propose (or revise) a plan
  *     approve        questionnaire       — approve this plan, or ask for changes
- *   until-valid    loop                — generate the source, load it back, retry on failure
- *   write          function            — write the validated source into the project's workflows dir
+ *   scaffold       function            — reserve the final entry path with a deterministic starter module
+ *   until-valid    loop                — edit files in place, validate the entry graph, retry on failure
+ *   complete       function            — report the already-written, validated entry path
  *
  * A block is now legal anywhere in the tree (spec §8.5), so the Approve/Revise cycle is an ordinary
  * `.dountil` loop around a real questionnaire step, rather than a whole interview crammed into one
  * agent step re-batching internally — this is the phase's proof that re-entry into a blocked loop
  * iteration works.
  */
-import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
-import { mkdir, rm, writeFile } from "node:fs/promises"
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { type Static, Type } from "typebox"
 import { createAgentStep, createQuestionnaireStep, createStep, createWorkflow } from "../../flow/index.ts"
 import type { RunContext } from "../../flow/types.ts"
-import { loadWorkflowFile, WORKFLOW_SUFFIX } from "../load-workflow.ts"
+import { WORKFLOW_SUFFIX } from "../load-workflow.ts"
+import { validateWorkflowFile } from "../workflow-candidate-validator.ts"
+import {
+	describeSourceConformance,
+	renderAuthoringGuide,
+	renderWorkflowScaffold,
+	type WorkflowBlueprint,
+	workflowBlueprintSchema,
+} from "./workflow-authoring.ts"
 
 /**
  * Initial input: the extension supplies the project root so steps can resolve paths without a cwd
@@ -41,19 +49,7 @@ export const createInputSchema = Type.Object({
 })
 
 /** What the interview must establish before any code is generated. */
-export const specSchema = Type.Object({
-	name: Type.String({ description: "The workflow's name (kebab-case)." }),
-	description: Type.String({ description: "One line describing what the workflow does." }),
-	summary: Type.String({ description: "The current plan, in prose." }),
-	steps: Type.Array(
-		Type.Object({
-			name: Type.String(),
-			kind: Type.Union([Type.Literal("function"), Type.Literal("agent"), Type.Literal("questionnaire")]),
-			purpose: Type.String(),
-		}),
-		{ description: "The steps to generate, in order." },
-	),
-})
+export const specSchema = workflowBlueprintSchema
 
 const briefSchema = Type.Object({
 	goal: Type.String({ title: "Goal", description: "What should this workflow do?", chat: true }),
@@ -72,59 +68,22 @@ const approveSchema = Type.Object({
 	feedback: Type.Optional(Type.String({ title: "Feedback", description: "If revising, what should change?" })),
 })
 
-/**
- * A worked example of the authoring API, given to the generator verbatim.
- *
- * Naming the helper functions is not enough: models reliably hallucinate a fluent, Mastra-style API
- * (`.then(w => w.addStep(...))`, positional `createStep("name", {...})`) that type-checks in their
- * heads and imports cleanly, so only a shape check at `commit()` catches it. Showing the real shape
- * is what actually prevents it.
- */
-export const API_EXAMPLE = `import { Type } from "typebox";
-import { createStep, createAgentStep, createQuestionnaireStep, createWorkflow } from "@kimchi-dev/kimchi-workflows";
-
-const askSchema = Type.Object({
-  topic: Type.String({ description: "What should we write about?" }),
-});
-const draftSchema = Type.Object({ draft: Type.String() });
-
-const ask = createQuestionnaireStep({ name: "ask", output: askSchema });
-
-const write = createAgentStep({
-  name: "write",
-  input: askSchema,
-  output: draftSchema,
-  prompt: ({ input }) => \`Write a short paragraph about \${input.topic}.\`,
-});
-
-const count = createStep({
-  name: "count",
-  input: draftSchema,
-  output: Type.Object({ words: Type.Number() }),
-  run: ({ input }) => ({ words: input.draft.split(/\\s+/).length }),
-});
-
-export default createWorkflow({ name: "writer", description: "Draft a paragraph and count its words" })
-  .then(ask)
-  .then(write)
-  .then(count)
-  .commit();`
-
-const sourceSchema = Type.Object({
-	source: Type.String(),
+const generatedFilesSchema = Type.Object({
+	entryPath: Type.String({
+		description: "Path to the main .workflow.ts entry file written on disk. Do not submit source code here.",
+	}),
 	/**
-	 * What the agent did to check its own work. In the real harness an agent step runs the PI tool
-	 * loop (see host/pi-agent.ts), so it can actually run the project's `tsc`/`biome`; offline it
-	 * cannot, and is told to say so here rather than claim a check it never ran.
+	 * Any additional check the agent performed itself. The framework independently runs its mandatory
+	 * TypeScript/runtime/conformance checks.
 	 */
-	verification: Type.String({ description: "Which checks you ran and their result, or why you could not run any." }),
+	verification: Type.String({ description: "Any extra checks you ran, or `framework validation only`." }),
 })
 const checkSchema = Type.Object({
 	ok: Type.Boolean(),
-	source: Type.String(),
+	entryPath: Type.String(),
 	error: Type.Optional(Type.String()),
 	// Carried through from `generate`'s output (names-only addressing, spec 4.1): the loop's output is
-	// the body's LAST step's output, so anything a downstream reader needs must ride in it — `write`
+	// the body's LAST step's output, so anything a downstream reader needs must ride in it — `complete`
 	// reads this from its own input rather than path-reaching into the loop's internals.
 	verification: Type.Optional(Type.String()),
 })
@@ -140,10 +99,9 @@ const brief = createQuestionnaireStep({
  * Step 2 — settle the destination before spending anything on it.
  *
  * `resolveTarget` rejects a name that escapes the project or is already taken, and both are knowable
- * the moment the form is answered. Checking here costs milliseconds; checking at the write (where the
- * guard also runs, against a filesystem that may have changed since) would burn the whole interview
- * and a generation round first — and could not be recovered, since `brief` is already complete and a
- * resume would re-run the write with the same name.
+ * the moment the form is answered. Checking here costs milliseconds; checking only after the review
+ * would burn the whole interview first. `scaffold` later repeats the availability guarantee with an
+ * exclusive create, covering the filesystem race between these two points.
  */
 const settleTarget = createStep({
 	name: "target",
@@ -175,9 +133,15 @@ const design = createAgentStep({
 				"",
 				`Their goal: ${goal}`,
 				"",
-				"Ask batched questions until you genuinely know what to build: the steps, their order, which",
-				"need an LLM, which need input from the user, and how the workflow decides it is finished. Do",
-				"not guess at anything that would change the generated code. Do not ask what you can infer.",
+				"Ask batched questions until you genuinely know what to build: its initial input, schemas, data",
+				"sources, control-flow constructs, which steps need an LLM or user input, and how it finishes.",
+				"Represent that design in the structured blueprint schema you were given. Use a named schema for",
+				"every workflow/step input or output. A schema reference must exactly match an entry in `schemas`.",
+				"Schema `kind` is exactly one of: string, number, integer, boolean, unknown, literal, array, object,",
+				"or union. Object schemas use `fields`; array schemas use `items`. Do not emit TypeBox source here.",
+				"Use mode `act` for an agent whose product is side effects, `report` for structured output, and",
+				"`ask` only when the agent itself must clarify. Do not put asking agents in parallel/foreach fan-out.",
+				"Do not guess at anything that would change generated behavior. Do not ask what you can infer.",
 				"",
 				"Once confident, emit your result: a proposed plan. Do NOT ask for approval yourself — a",
 				"separate step presents your plan and collects the decision.",
@@ -228,7 +192,7 @@ const reviewOutcome = createStep({
 	input: approveSchema,
 	output: reviewOutcomeSchema,
 	run: ({ input, ctx }) => {
-		const plan = ctx.getStepResult<Static<typeof specSchema>>("design")
+		const plan = ctx.getStepResult<WorkflowBlueprint>("design")
 		if (!plan) throw new Error("review-outcome: the design step produced no plan")
 		return { decision: input.decision, feedback: input.feedback, plan }
 	},
@@ -237,52 +201,85 @@ const reviewOutcome = createStep({
 const reviewBody = createWorkflow({ name: "review-body" }).then(design).then(approve).then(reviewOutcome).commit()
 
 /**
- * Step 4a — generate the file's TypeScript. On a retry the previous validation error is in run
- * context, so the agent sees precisely why its last attempt failed to load.
+ * Step 4 — claim the final entry path and put the deterministic scaffold there.
+ *
+ * The exclusive write closes the race between `target`'s early availability check and authoring: if
+ * another process creates the requested file while the user is reviewing the plan, creation fails
+ * here rather than handing an agent permission to overwrite it. From this point on the entry file is
+ * this run's workspace and the agent may edit it in place.
+ */
+const scaffold = createStep({
+	name: "scaffold",
+	description: "Reserve the final entry path with the approved workflow scaffold",
+	input: reviewOutcomeSchema,
+	output: Type.Object({ entryPath: Type.String() }),
+	run: async ({ input, ctx }) => {
+		const entryPath = plannedTarget(ctx)
+		await mkdir(path.dirname(entryPath), { recursive: true })
+		try {
+			await writeFile(entryPath, renderWorkflowScaffold(input.plan), { encoding: "utf8", flag: "wx" })
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+				throw new Error(`workflow entry appeared before it could be reserved at ${entryPath}; choose another name`)
+			}
+			throw error
+		}
+		return { entryPath }
+	},
+})
+
+/**
+ * Step 5a — author the workflow files directly at their final location. On a retry the previous
+ * validation error is in run context, so the same agent can inspect and repair the files in place.
  */
 const generate = createAgentStep({
 	name: "generate",
-	description: "Write the workflow file's TypeScript source",
+	description: "Edit the workflow entry file and any helper modules in place",
 	// Deliberately no input schema (spec §3.6): on a retry the loop hands this step the previous
 	// iteration's `check` output, not the spec — so the spec is read from run context instead.
-	output: sourceSchema,
+	output: generatedFilesSchema,
 	prompt: ({ ctx }) => {
 		// `design` lives inside the `review` loop, a SIBLING of `until-valid` — outside this step's
 		// lexical scope. The approved plan rides the review loop's own OUTPUT (review-outcome), read here
 		// by the loop's bare name (names-only addressing, spec 4.1).
-		const input = ctx.getStepResult<Static<typeof reviewOutcomeSchema>>("review")?.plan
+		const input = ctx.getStepResult<{ plan: WorkflowBlueprint }>("review")?.plan
 		if (!input) throw new Error("generate: the review loop produced no approved plan")
-		const previous = ctx.getStepResult<{ ok: boolean; error?: string }>("check")
-		const retry = previous?.error ? ["", "Your previous attempt FAILED to load with:", previous.error, "Fix it."] : []
+		const entryPath = plannedTarget(ctx)
+		const previous = ctx.getStepResult<{ ok: boolean; entryPath?: string; error?: string }>("check")
+		const retry = previous?.error
+			? [
+					"",
+					"The files currently on disk FAILED validation with:",
+					previous.error,
+					"Inspect the entry file and its imports, then repair them in place. Keep the deterministic",
+					"structure unless the diagnostic requires a change.",
+				]
+			: []
 		return [
-			"Write a complete PI workflow TypeScript module implementing this approved plan.",
+			"Complete the PI workflow by editing files directly in the project.",
+			"A deterministic scaffold has already been written to the final entry file:",
+			`  ${entryPath}`,
+			"Use your filesystem tools to read and edit that file in place. You may create helper .ts files",
+			"when useful and import them with relative paths from the entry module. Do not edit unrelated files.",
 			"",
-			`Name: ${input.name}`,
-			`Description: ${input.description}`,
-			`Plan: ${input.summary}`,
-			"Steps:",
-			...input.steps.map((step) => `  - ${step.name} (${step.kind}): ${step.purpose}`),
+			"APPROVED BLUEPRINT:",
+			JSON.stringify(input, null, 2),
 			"",
-			"The API is EXACTLY as shown below. Every helper takes ONE options object — there are no",
-			"positional arguments, no `.addStep()`, and `.then()` takes a step value, never a callback.",
-			"Follow this shape precisely:",
-			"",
-			API_EXAMPLE,
+			"RELEVANT AUTHORING API:",
+			renderAuthoringGuide(input),
 			"",
 			"Requirements:",
-			"  - use only the imports shown above; the package is `typebox`, not `@sinclair/typebox`",
-			"  - every step needs a unique `name`; declare TypeBox `input`/`output` so steps hand off",
-			"  - a function step's `run` receives ONE argument: `{ input, ctx, abortSignal, logger }`",
-			"  - an agent step needs `output` and `prompt`; `prompt` is a function returning a string",
-			"  - a questionnaire step needs only `name` and `output` — the questions come from the schema",
+			"  - save all implementation changes to disk; do not return source code through submit_result",
+			"  - replace every TODO_WORKFLOW placeholder with working semantic code",
+			"  - preserve the scaffold's imports, schemas, node names/kinds, control-flow shape, and export",
+			"  - an acting (`mode: act`) agent intentionally has no output schema; report/ask agents do",
+			"  - use only real API signatures from the generated authoring reference above",
 			"  - no side effects at import time — the module must only define and export the workflow",
-			"  - EVERY step's input must come from somewhere: the previous step's output, or — for the FIRST",
-			"    step — either a `createQuestionnaireStep` ahead of it or `input:` declared on `createWorkflow({...})`.",
-			"    A first step with an `input` schema and no source can never run.",
+			`  - submit entryPath as exactly ${JSON.stringify(entryPath)} after the files have been saved`,
 			"",
-			"CHECK YOUR OWN WORK. If the project has TypeScript or Biome available, run them over what you",
-			"wrote (`tsc --noEmit`, `biome check`) and fix anything they report before replying. If neither",
-			"tool is available, do not pretend otherwise — say so plainly in `verification`.",
+			"The framework will typecheck the on-disk entry module and its imports, load it, and compare its structure to the",
+			"approved blueprint. Formatting is not part of candidate validation.",
+			"In `verification`, state any extra check you actually ran; say `framework validation only` otherwise.",
 			"",
 			...retry,
 		].join("\n")
@@ -317,13 +314,82 @@ function resolveTarget(ctx: RunContext): string {
 	return target
 }
 
+/** Read the destination settled by `target` without re-running its "must not exist" preflight. */
+function plannedTarget(ctx: RunContext): string {
+	const target = ctx.getStepResult<{ path: string }>("target")?.path
+	if (!target) throw new Error("the target step did not settle a workflow entry path")
+	return path.resolve(target)
+}
+
+/** Resolve a submitted absolute or project-relative entry path for an exact comparison with the plan. */
+function resolveSubmittedEntryPath(entryPath: string, projectRoot: string): string {
+	return path.isAbsolute(entryPath) ? path.resolve(entryPath) : path.resolve(projectRoot, entryPath)
+}
+
+/**
+ * Read the entry module and every local TypeScript module it statically imports or re-exports.
+ *
+ * Runtime conformance can prove the exported workflow's shape, but it does not call step bodies. A
+ * `TODO_WORKFLOW` throw moved into a helper would therefore survive both typechecking and loading if
+ * conformance inspected only the entry source. TypeScript remains the authority for full resolution;
+ * this small traversal exists solely to keep deterministic scaffold placeholders out of any authored
+ * module that belongs to the entry graph.
+ */
+async function readAuthoredModuleGraph(entryPath: string): Promise<string> {
+	const visited = new Set<string>()
+	const sources: string[] = []
+
+	async function visit(file: string): Promise<void> {
+		const resolved = path.resolve(file)
+		if (visited.has(resolved)) return
+		visited.add(resolved)
+		const source = await readFile(resolved, "utf8")
+		sources.push(source)
+		for (const specifier of relativeModuleSpecifiers(source)) {
+			const imported = await resolveRelativeTypeScriptModule(path.dirname(resolved), specifier)
+			if (imported) await visit(imported)
+		}
+	}
+
+	await visit(entryPath)
+	return sources.join("\n")
+}
+
+function relativeModuleSpecifiers(source: string): string[] {
+	const matches = source.matchAll(/\b(?:import|export)\s+(?:[^"'`]*?\s+from\s+)?["'](\.[^"']+)["']/g)
+	return [...matches].flatMap((match) => (match[1] ? [match[1]] : []))
+}
+
+async function resolveRelativeTypeScriptModule(directory: string, specifier: string): Promise<string | undefined> {
+	const base = path.resolve(directory, specifier)
+	const extension = path.extname(base)
+	const candidates = extension
+		? [base, ...(extension === ".js" ? [`${base.slice(0, -3)}.ts`] : [])]
+		: [
+				`${base}.ts`,
+				`${base}.tsx`,
+				`${base}.mts`,
+				`${base}.cts`,
+				path.join(base, "index.ts"),
+				path.join(base, "index.tsx"),
+			]
+	for (const candidate of candidates) {
+		try {
+			if ((await stat(candidate)).isFile()) return candidate
+		} catch {
+			// TypeScript reports a missing import later; this traversal only follows files that exist.
+		}
+	}
+	return undefined
+}
+
 /**
  * Refuse to write over an existing file. Generating a workflow must never destroy one, and quietly
  * choosing a different name would be worse than failing: the run would report success while the file
  * the user asked for still holds something else.
  *
- * Enforced from {@link resolveTarget}, so the clash surfaces at validation — before anything is
- * written — rather than at the final write.
+ * Enforced from {@link resolveTarget}, so the ordinary clash surfaces before the review. The
+ * `scaffold` step repeats the guarantee atomically with an exclusive create after approval.
  */
 function assertAvailable(target: string, fileName: string): void {
 	if (existsSync(target)) {
@@ -332,61 +398,66 @@ function assertAvailable(target: string, fileName: string): void {
 }
 
 /**
- * Step 4c — validate by actually loading it, in the directory the file will really live in.
+ * Step 5b — validate the files statically and dynamically at their final locations.
  *
- * The probe MUST sit next to its final destination: module resolution is relative to the importing
- * file, so a generated `import { Type } from "typebox"` resolves only from inside the project. An
- * earlier version validated in `os.tmpdir()` — which has no `node_modules` — and so rejected every
- * generated workflow, however good, with "Cannot find module 'typebox'".
- *
- * The probe is named so discovery ignores it (no `.workflow.ts` suffix) and is always cleaned up.
+ * TypeScript begins at the submitted entry and follows relative imports. The runtime loader then loads
+ * that same entry graph, and conformance compares its exported workflow with the approved blueprint.
  */
 const check = createStep({
 	name: "check",
-	description: "Load the generated source to prove it is a valid workflow",
-	input: sourceSchema,
+	description: "Typecheck, load, and compare the on-disk workflow",
+	input: generatedFilesSchema,
 	output: checkSchema,
-	run: async ({ input, ctx }) => {
-		const dir = path.dirname(resolveTarget(ctx))
-		const probe = path.join(dir, `.pi-create-candidate-${randomUUID()}.ts`)
-		await mkdir(dir, { recursive: true })
-		await writeFile(probe, input.source, "utf8")
+	run: async ({ input, ctx, abortSignal }) => {
+		const init = ctx.getInitData<Static<typeof createInputSchema>>() ?? { projectRoot: process.cwd() }
+		const target = plannedTarget(ctx)
 		try {
-			// Imports must resolve and `commit()` must accept every step — the commit-time shape check
-			// (src/flow/create-workflow.ts) is what rejects a hallucinated builder API here.
-			await loadWorkflowFile(probe)
-			return { ok: true, source: input.source, verification: input.verification }
+			const entryPath = resolveSubmittedEntryPath(input.entryPath, init.projectRoot)
+			if (entryPath !== target) {
+				throw new Error(
+					`submitted entryPath resolves to ${entryPath}, but this run reserved ${target}; edit and submit the reserved entry file`,
+				)
+			}
+			const plan = ctx.getStepResult<{ plan: WorkflowBlueprint }>("review")?.plan
+			if (!plan) throw new Error("check: the review loop produced no approved plan")
+			const source = await readAuthoredModuleGraph(entryPath)
+			const validation = await validateWorkflowFile({
+				entryPath,
+				projectRoot: init.projectRoot,
+				signal: abortSignal,
+				conformance: (workflow) => describeSourceConformance(plan, source, workflow),
+			})
+			return {
+				ok: true,
+				entryPath,
+				verification: `${input.verification}; framework: ${validation.summary}`,
+			}
 		} catch (err) {
+			if (abortSignal.aborted) throw err
 			return {
 				ok: false,
-				source: input.source,
+				entryPath: input.entryPath,
 				error: err instanceof Error ? err.message : String(err),
 				verification: input.verification,
 			}
-		} finally {
-			await rm(probe, { force: true })
 		}
 	},
 })
 
 const generateAndCheck = createWorkflow({ name: "generate-and-check" }).then(generate).then(check).commit()
 
-/** Step 5 — write the validated source to the destination {@link resolveTarget} picked. */
-const write = createStep({
-	name: "write",
-	description: "Write the validated workflow into the project",
+/** Step 6 — report the entry that is already written and validated. */
+const complete = createStep({
+	name: "complete",
+	description: "Report the validated workflow entry path",
 	input: checkSchema,
 	output: Type.Object({ path: Type.String() }),
-	run: async ({ input, ctx, logger }) => {
-		// Re-resolved here (not carried from `check`) so the availability guard is re-applied against the
-		// filesystem as it is now, immediately before the write.
-		const target = resolveTarget(ctx)
+	run: ({ input, ctx, logger }) => {
+		if (!input.ok) throw new Error("complete: validation did not pass")
+		const target = plannedTarget(ctx)
 		// `generate` lives inside the `until-valid` loop; its verification rides the loop's output
 		// (checkSchema) into this step's own input — no reaching into the loop's internals (spec 4.1).
-		if (input.verification) logger.info(`generator's own checks: ${input.verification}`)
-
-		await mkdir(path.dirname(target), { recursive: true })
-		await writeFile(target, input.source, "utf8")
+		if (input.verification) logger.info(`validation: ${input.verification}`)
 		return { path: target }
 	},
 })
@@ -402,11 +473,12 @@ const createWorkflowWorkflow = createWorkflow({
 		name: "review",
 		maxIterations: 10,
 	})
+	.then(scaffold)
 	.dountil(generateAndCheck, (ctx) => ctx.getStepResult<{ ok: boolean }>("check")?.ok === true, {
 		name: "until-valid",
 		maxIterations: 3,
 	})
-	.then(write)
+	.then(complete)
 	.commit()
 
 export default createWorkflowWorkflow

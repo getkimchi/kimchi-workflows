@@ -31,13 +31,18 @@ import { forEachNode } from "../flow/types.ts"
  */
 export type AgentTurnScript =
 	/** A `submit_*` tool call — the only channel a step under a contract reports through. */
-	| { kind: "submit"; tool: string; args: Record<string, unknown>; trailingText?: string; totalTokens?: number }
-	/** Text and no submission — drives the in-session output-steering repair (spec §9.2). */
-	| { kind: "raw"; text: string; totalTokens?: number }
-	/** A transport failure — drives the step's outer retry policy (spec §9.1). */
-	| { kind: "throws"; error: Error }
-	/** A turn the PROVIDER refused: the harness completes the turn, but there is no reply in it. */
-	| { kind: "failed"; error: AgentTurnError }
+	(
+		| { kind: "submit"; tool: string; args: Record<string, unknown>; trailingText?: string; totalTokens?: number }
+		/** Text and no submission — drives the in-session output-steering repair (spec §9.2). */
+		| { kind: "raw"; text: string; totalTokens?: number }
+		/** A transport failure — drives the step's outer retry policy (spec §9.1). */
+		| { kind: "throws"; error: Error }
+		/** A turn the PROVIDER refused: the harness completes the turn, but there is no reply in it. */
+		| { kind: "failed"; error: AgentTurnError }
+	) & {
+		/** Optional test-only simulation of filesystem or other side effects completed during this agent turn. */
+		readonly sideEffect?: () => void | Promise<void>
+	}
 
 /** Script the agent asking: a `submit_questions` call, on which the run blocks (spec §10.1). */
 export function ask(questionnaire: Questionnaire, trailingText?: string): AgentTurnScript {
@@ -52,6 +57,17 @@ export function ask(questionnaire: Questionnaire, trailingText?: string): AgentT
  */
 export function reply(value: unknown, trailingText?: string): AgentTurnScript {
 	return { kind: "submit", tool: SUBMIT_RESULT_TOOL, args: { result: value }, trailingText }
+}
+
+/**
+ * Attach an action to a scripted turn, run immediately before the scripted response is returned.
+ *
+ * This models acting agents whose product includes filesystem changes while retaining their real
+ * `submit_result` contract. It is deliberately test-only; production agents perform the action with
+ * their ordinary tools.
+ */
+export function withSideEffect(turn: AgentTurnScript, sideEffect: () => void | Promise<void>): AgentTurnScript {
+	return { ...turn, sideEffect }
 }
 
 /** Script a turn that says something and submits nothing, to exercise output steering (spec §9.2). */
@@ -162,6 +178,9 @@ export function createAgentDouble(nodes: readonly WorkflowNode[], scripts: Agent
 				if (turn === undefined) {
 					throw new Error(`agent step "${stepName}" was called more times than it has scripted replies`)
 				}
+				// Do not `await undefined`: the test host's synthetic deadline also resolves immediately, and an
+				// unnecessary microtask yield would let it beat an otherwise synchronous scripted reply.
+				if (turn.sideEffect) await turn.sideEffect()
 				if (turn.kind === "throws") throw turn.error
 				// No content, no usage, no conversation entry: a refused request leaves the session as it was.
 				if (turn.kind === "failed") return { text: "", error: turn.error }
