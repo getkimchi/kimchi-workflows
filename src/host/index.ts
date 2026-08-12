@@ -38,7 +38,7 @@ export {
 	stepSessionName,
 	traceSessionFile,
 } from "./naming.ts"
-export type { AgentStarter } from "./pi-agent.ts"
+export type { AgentStarter, PiAgentControl } from "./pi-agent.ts"
 export { createPiAgentBridge } from "./pi-agent.ts"
 export { appName, projectDir, readAppName, runArtifactsDir, workflowsDir } from "./project-dir.ts"
 export type { DialogUI } from "./questionnaire-fallback.ts"

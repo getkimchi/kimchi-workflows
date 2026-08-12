@@ -70,7 +70,7 @@ describe("the in-session bridge registers the tools it promises", () => {
 			on: (event: string, h: (e: AgentEndEvent) => void) => {
 				if (event === "agent_end") endHandler = h
 			},
-			sendUserMessage: () => {
+			sendMessage: () => {
 				if (options.autoEnd === false) return
 				endHandler?.({
 					type: "agent_end",

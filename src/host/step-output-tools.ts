@@ -16,6 +16,7 @@
 import { readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { Container } from "@earendil-works/pi-tui"
 import type { TSchema } from "typebox"
 import {
 	isOutputToolName,
@@ -32,6 +33,17 @@ export const STEP_OUTPUT_TOOLS_ENV = "KIMCHI_WORKFLOW_STEP_OUTPUT_TOOLS"
 export interface StepOutputToolSpec {
 	readonly outputSchema: TSchema
 	readonly asks?: boolean
+}
+
+/**
+ * Workflow output tools are an internal transport, not user-facing agent activity. Standard PI
+ * removes a self-rendered tool row when both slots return empty components. Hosts that replace PI's
+ * tool renderers may choose to show their own activity row, but the package still requests no UI.
+ */
+const HIDDEN_TOOL_RENDERING = {
+	renderShell: "self" as const,
+	renderCall: () => new Container(),
+	renderResult: () => new Container(),
 }
 
 /**
@@ -76,6 +88,7 @@ export function registerStepOutputTools(pi: ExtensionAPI, spec: StepOutputToolSp
 		defineTool({
 			name: SUBMIT_RESULT_TOOL,
 			label: "Submit result",
+			...HIDDEN_TOOL_RENDERING,
 			description:
 				"Submit this step's result. Pass the result as the `result` argument. Call this once you are done; you may explain your reasoning around the call.",
 			parameters: submitResultParameters(spec.outputSchema),
@@ -93,6 +106,7 @@ export function registerStepOutputTools(pi: ExtensionAPI, spec: StepOutputToolSp
 		defineTool({
 			name: SUBMIT_QUESTIONS_TOOL,
 			label: "Submit questions",
+			...HIDDEN_TOOL_RENDERING,
 			description:
 				"Ask the user for information instead of submitting a result. Batch every question you need into one call. The run pauses until the answers come back.",
 			parameters: submitQuestionsParameters(),

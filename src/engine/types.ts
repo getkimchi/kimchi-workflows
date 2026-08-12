@@ -258,8 +258,9 @@ export interface AgentRequest {
 	 * the two mechanisms become lies: `/workflow cancel` would report a stopped run while its subagent
 	 * kept spending tokens and writing files, and a budget would fail the attempt while orphaning the
 	 * process it was meant to bound. Worse, with no budget declared — the default — an unresponsive
-	 * subagent would hang the run with nothing able to interrupt it. The in-session path needs nothing
-	 * here: the engine already stops at turn boundaries, and that session belongs to PI, not to us.
+	 * subagent would hang the run with nothing able to interrupt it. An in-session host should likewise
+	 * abort the live agent operation, but must keep its turn guard until the host reports that operation
+	 * settled; releasing the guard on the signal alone could let the next turn cross-talk with it.
 	 */
 	readonly signal?: AbortSignal
 }
