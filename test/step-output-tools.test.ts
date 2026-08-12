@@ -5,7 +5,7 @@
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 import { describe, expect, it, vi } from "vitest"
 import { SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "../src/engine/output-tools.ts"
@@ -79,6 +79,25 @@ describe("registration inside a spawned step", () => {
 		const plain = fakePi()
 		registerStepOutputTools(plain.pi, { outputSchema })
 		expect(plain.registerTool.mock.calls.map((c) => (c[0] as { name: string }).name)).toEqual([SUBMIT_RESULT_TOOL])
+	})
+
+	it("requests no visible PI rendering for either internal output tool", () => {
+		const { pi, registerTool } = fakePi()
+		registerStepOutputTools(pi, { outputSchema, asks: true })
+
+		for (const call of registerTool.mock.calls) {
+			const tool = call[0] as ToolDefinition
+			expect(tool.renderShell).toBe("self")
+			const callComponent = tool.renderCall?.({}, {} as never, {} as never)
+			const resultComponent = tool.renderResult?.(
+				{ content: [], details: undefined },
+				{ expanded: false, isPartial: false },
+				{} as never,
+				{} as never,
+			)
+			expect(callComponent?.render(80)).toEqual([])
+			expect(resultComponent?.render(80)).toEqual([])
+		}
 	})
 
 	it("terminates PI after either submission without carrying the payload — the transcript does that", async () => {
