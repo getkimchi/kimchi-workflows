@@ -1,16 +1,21 @@
 import type { AgentEndEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { Type } from "typebox"
 import { describe, expect, it } from "vitest"
+import { SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "../src/engine/output-tools.ts"
+import { resumeWithAnswer } from "../src/engine/resume-workflow.ts"
+import { runWorkflow } from "../src/engine/run-workflow.ts"
+import { createAgentStep, createWorkflow } from "../src/flow/index.ts"
 import { createPiAgentBridge } from "../src/host/pi-agent.ts"
 import type { ModelRegistry } from "../src/host/pi-agent-messages.ts"
 import { scriptedSubagent } from "./fake-subagent.ts"
-import { agentRequest, tempSessionsDir } from "./helpers.ts"
+import { agentRequest, createTestHost, tempSessionsDir } from "./helpers.ts"
 
 /** Where the bridge under test writes its step sessions (the real host binds the harness's own session dir). */
 const sessionsDir = tempSessionsDir()
 
 /**
  * The bridge's cross-talk safety (spec §2.2), driven directly against a fake PI — no engine, no
- * workflow, just `createPiAgentBridge` and a scriptable `agent_end`/`sendUserMessage`.
+ * workflow, just `createPiAgentBridge` and a scriptable `agent_end`/`sendMessage`.
  *
  * Before this fix, `createPiAgentBridge` kept ONE shared mutable `pending` resolver: a second
  * `sendAndAwaitEnd` call while a first was still in flight silently OVERWROTE it, so the single
@@ -22,27 +27,46 @@ const sessionsDir = tempSessionsDir()
 
 /** The shape of a fired `context` event's result — same as `ContextEventResult` (`{ messages?: AgentMessage[] }`). */
 type ContextResult = { messages?: unknown[] } | undefined
+type SendMessageArgs = Parameters<ExtensionAPI["sendMessage"]>
+type SentMessage = {
+	message: SendMessageArgs[0]
+	options: SendMessageArgs[1]
+}
+type UserMessage = Parameters<ExtensionAPI["sendUserMessage"]>[0]
 
-function fakePi(): {
+function fakePi(scriptedTurns: readonly unknown[] = []): {
 	pi: ExtensionAPI
 	fireAgentEnd: (text: string) => void
 	fireContext: (messages: unknown[]) => ContextResult
-	sentMessages: string[]
+	sentMessages: SentMessage[]
+	userMessages: UserMessage[]
 	registeredTools: string[]
 	activeTools: () => string[]
 } {
 	let endHandler: ((event: AgentEndEvent) => void) | undefined
 	let contextHandler: ((event: { type: "context"; messages: unknown[] }) => ContextResult) | undefined
-	const sentMessages: string[] = []
+	const sentMessages: SentMessage[] = []
+	const userMessages: UserMessage[] = []
 	const registeredTools: string[] = []
 	let activeTools: string[] = ["bash", "read"]
+	let scriptedTurn = 0
 	const pi = {
 		on: (event: string, h: (event: AgentEndEvent | { type: "context"; messages: unknown[] }) => unknown) => {
 			if (event === "agent_end") endHandler = h as (event: AgentEndEvent) => void
 			if (event === "context") contextHandler = h as (event: { type: "context"; messages: unknown[] }) => ContextResult
 		},
-		sendUserMessage: (message: string) => {
-			sentMessages.push(message)
+		sendMessage: (...[message, options]: SendMessageArgs) => {
+			sentMessages.push({ message, options })
+			const assistant = scriptedTurns[scriptedTurn++]
+			if (assistant !== undefined) {
+				endHandler?.({
+					type: "agent_end",
+					messages: [{ role: "custom", ...message, timestamp: Date.now() }, assistant],
+				} as unknown as AgentEndEvent)
+			}
+		},
+		sendUserMessage: (message: UserMessage) => {
+			userMessages.push(message)
 		},
 		setModel: async () => true,
 		registerTool: (tool: { name: string }) => {
@@ -70,8 +94,55 @@ function fakePi(): {
 			return contextHandler({ type: "context", messages })
 		},
 		sentMessages,
+		userMessages,
 	}
 }
+
+const hiddenMessage = (content: string): SentMessage => ({
+	message: { customType: "kimchi-workflow-agent", content, display: false },
+	options: { triggerTurn: true },
+})
+
+describe("createPiAgentBridge in-session visibility: framework traffic is model-visible but transcript-hidden", () => {
+	it("hides the engine's initial prompt, questionnaire resume, and output repair", async () => {
+		const question = {
+			questions: [{ key: "backend", header: "Backend", question: "Which backend?", kind: "text" }],
+		}
+		const assistant = (content: unknown) => ({
+			role: "assistant",
+			content,
+			usage: { totalTokens: 1 },
+		})
+		const { pi, sentMessages, userMessages } = fakePi([
+			assistant([{ type: "toolCall", id: "ask", name: SUBMIT_QUESTIONS_TOOL, arguments: question }]),
+			assistant([{ type: "text", text: "I forgot to submit the result." }]),
+			assistant([
+				{ type: "toolCall", id: "result", name: SUBMIT_RESULT_TOOL, arguments: { result: { backend: "Redis" } } },
+			]),
+		])
+		const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir)
+		const output = Type.Object({ backend: Type.String() })
+		const workflow = createWorkflow({ name: "hidden-traffic" })
+			.then(createAgentStep({ name: "plan", output, asks: true, prompt: () => "Plan the backend." }))
+			.commit()
+		const { host, store } = createTestHost({ startAgent })
+
+		const blocked = await runWorkflow(workflow, undefined, host)
+		expect(blocked.status).toBe("blocked")
+		const done = await resumeWithAnswer(workflow, await store.loadEvents(blocked.runId), { backend: "Redis" }, host)
+
+		expect(done.status).toBe("completed")
+		expect(done.output).toEqual({ backend: "Redis" })
+		expect(sentMessages).toHaveLength(3)
+		expect(sentMessages[0]).toEqual(hiddenMessage(expect.stringContaining("Plan the backend.")))
+		expect(sentMessages[0]?.message.content).toContain(SUBMIT_QUESTIONS_TOOL)
+		expect(sentMessages[1]).toEqual(hiddenMessage(expect.stringContaining("The user answered your questionnaire:")))
+		expect(sentMessages[2]).toEqual(
+			hiddenMessage(expect.stringContaining("Your previous turn did not submit a valid result.")),
+		)
+		expect(userMessages).toEqual([])
+	})
+})
 
 function fakeModelRegistry(): ModelRegistry {
 	return { find: () => undefined } as unknown as ModelRegistry
@@ -85,7 +156,7 @@ describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent tur
 		const stepA = startAgent(agentRequest({ stepName: "step-a" }))
 		const stepB = startAgent(agentRequest({ stepName: "step-b" }))
 
-		// Step A starts its in-session turn: goes through to `pi.sendUserMessage`, stays pending.
+		// Step A starts its in-session turn through a hidden custom message and stays pending.
 		const turnA = stepA.sendAndAwaitEnd("prompt from A")
 
 		// Step B attempts a SECOND in-session turn while A's is still in flight — the exact interleaving the
@@ -93,8 +164,8 @@ describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent tur
 		await expect(stepB.sendAndAwaitEnd("prompt from B")).rejects.toThrow(/step "step-b".*step "step-a".*in flight/s)
 
 		// B's message was never sent to PI at all — the rejection happens before any side effect, so PI
-		// itself never sees a second concurrent `sendUserMessage`.
-		expect(sentMessages).toEqual(["prompt from A"])
+		// itself never sees a second concurrent hidden message.
+		expect(sentMessages).toEqual([hiddenMessage("prompt from A")])
 
 		// A's turn is completely unaffected: firing the ONE real `agent_end` resolves A with A's OWN reply.
 		fireAgentEnd("reply for A")
@@ -132,7 +203,7 @@ describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent tur
 		fireAgentEnd("reply for B")
 		await expect(turnB).resolves.toEqual({ text: "reply for B", usage: { totalTokens: 1 } })
 
-		expect(sentMessages).toEqual(["prompt from A", "prompt from B"])
+		expect(sentMessages).toEqual([hiddenMessage("prompt from A"), hiddenMessage("prompt from B")])
 	})
 
 	it("dispose() only clears a session's OWN in-flight turn, never a sibling's", async () => {

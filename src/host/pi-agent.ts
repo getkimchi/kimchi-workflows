@@ -1,8 +1,8 @@
 /**
  * Real PI-harness implementation of the engine's agent seam (`HostPort.startAgent`, spec §2.2).
  *
- * A session: resolve + `setModel(model)`, `sendUserMessage(prompt)`, await the `agent_end` event,
- * and return the last assistant message's text. Compiles against the real
+ * A session: resolve + `setModel(model)`, inject a hidden custom message that triggers a turn, await
+ * the `agent_end` event, and return the last assistant message's text. Compiles against the real
  * `@earendil-works/pi-coding-agent` types (`AgentEndEvent = { messages }`).
  *
  * A single `agent_end` listener is registered per bridge (the extension holds one bridge for its
@@ -108,6 +108,9 @@ import {
 import { runSubagent, type SubagentSpawner, subagentSpawner } from "./subagent-process.ts"
 
 export type AgentStarter = (request: AgentRequest) => AgentSession
+
+/** Framework-owned model input: participates in context, but is never rendered as user-authored chat. */
+const WORKFLOW_AGENT_MESSAGE = "kimchi-workflow-agent"
 
 /** What to spawn (the spawner's first two arguments) for a background subagent, given the CLI args after the binary name. */
 export type PiInvocationResolver = (args: readonly string[]) => { command: string; args: readonly string[] }
@@ -335,7 +338,7 @@ export function createPiAgentBridge(
 				// the static analysis missed — this must fail LOUDLY and SPECIFICALLY rather than silently
 				// overwrite `inFlight` and let the eventual `agent_end` resolve the WRONG caller with the OTHER
 				// step's reply (the live cross-talk this bridge exists to rule out). Failing here also means the
-				// second `sendUserMessage` is never even issued — PI itself never sees two turns racing.
+				// second hidden message is never even issued — PI itself never sees two turns racing.
 				if (inFlight) {
 					throw new Error(
 						`pi-agent bridge: step "${request.stepName}" tried to start an in-session agent turn while step ` +
@@ -374,7 +377,13 @@ export function createPiAgentBridge(
 
 				return new Promise<AgentTurn>((resolve) => {
 					inFlight = { token, stepName: request.stepName, resolve }
-					pi.sendUserMessage(message)
+					// This is framework-to-agent traffic, not something the user typed. A custom message still
+					// becomes a user-role message in the model context, while `display: false` keeps prompts,
+					// questionnaire resumes, and output-repair schemas out of the parent transcript.
+					pi.sendMessage(
+						{ customType: WORKFLOW_AGENT_MESSAGE, content: message, display: false },
+						{ triggerTurn: true },
+					)
 				})
 			},
 			getConversation(): readonly ConversationMessage[] {
