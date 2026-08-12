@@ -296,6 +296,139 @@ export const workflowBlueprintSchema = Type.Object({
 
 export type WorkflowBlueprintOutput = Static<typeof workflowBlueprintSchema>
 
+/** Render the structured blueprint as the exact Markdown shown during approval. */
+export function renderWorkflowPlan(blueprint: WorkflowBlueprint): string {
+	const runtime = [`- Initial input: ${blueprint.input ? inlineCode(blueprint.input) : "none"}`]
+	if (blueprint.defaultModel) runtime.push(`- Default model: ${inlineCode(blueprint.defaultModel)}`)
+	if (blueprint.maxConcurrency !== undefined) runtime.push(`- Maximum concurrency: ${blueprint.maxConcurrency}`)
+	const schemas =
+		blueprint.schemas.length === 0
+			? ["No named data contracts."]
+			: blueprint.schemas.flatMap((schema) => [
+					`- **${schema.name}** — ${inlineCode(renderSchemaSummary(schema.schema))}${schema.description ? `: ${schema.description}` : ""}`,
+				])
+
+	return [
+		`# Proposed workflow: ${inlineCode(blueprint.name)}`,
+		"",
+		blueprint.description,
+		"",
+		blueprint.summary,
+		"",
+		"## Runtime",
+		"",
+		...runtime,
+		"",
+		"## Flow",
+		"",
+		...renderPlanNodes(blueprint.nodes, 0),
+		"",
+		"## Data contracts",
+		"",
+		...schemas,
+	].join("\n")
+}
+
+function renderPlanNodes(nodes: readonly BlueprintNode[], depth: number): string[] {
+	const indent = "  ".repeat(depth)
+	const detailIndent = "  ".repeat(depth + 1)
+	const lines: string[] = []
+	for (const node of nodes) {
+		lines.push(`${indent}1. **${node.name}** — ${planNodeLabel(node)}: ${node.purpose}`)
+		if ("input" in node && node.input) lines.push(`${detailIndent}- Input: ${inlineCode(node.input)}`)
+		if ("output" in node && node.output) lines.push(`${detailIndent}- Output: ${inlineCode(node.output)}`)
+		if (node.kind === "function" || node.kind === "agent" || node.kind === "questionnaire") {
+			lines.push(...renderStepPolicies(node, detailIndent))
+		}
+		if (node.kind === "agent") {
+			lines.push(`${detailIndent}- Agent mode: ${inlineCode(node.mode)}`)
+			if (node.model) lines.push(`${detailIndent}- Model: ${inlineCode(node.model)}`)
+			if (node.maxOutputRepairs !== undefined) {
+				lines.push(`${detailIndent}- Output repair limit: ${node.maxOutputRepairs}`)
+			}
+			if (node.maxTokens !== undefined) lines.push(`${detailIndent}- Token budget: ${node.maxTokens}`)
+			if (node.background !== undefined) {
+				lines.push(`${detailIndent}- Background: ${node.background ? "yes" : "no"}`)
+			}
+			if (node.resumable !== undefined) {
+				lines.push(
+					`${detailIndent}- Resumable conversation: ${typeof node.resumable === "string" ? inlineCode(node.resumable) : node.resumable ? "yes" : "no"}`,
+				)
+			}
+		}
+		if (node.kind === "loop") {
+			lines.push(`${detailIndent}- Guard: ${inlineCode(node.mode)}, at most ${node.maxIterations} iterations`)
+			lines.push(`${detailIndent}- Body:`)
+			lines.push(...renderPlanNodes(node.body.nodes, depth + 2))
+		} else if (node.kind === "foreach") {
+			if (node.concurrency !== undefined) lines.push(`${detailIndent}- Concurrency: ${node.concurrency}`)
+			if (node.feedback !== undefined) {
+				lines.push(`${detailIndent}- Sequential feedback: ${node.feedback ? "enabled" : "disabled"}`)
+			}
+			lines.push(`${detailIndent}- Body:`)
+			lines.push(...renderPlanNodes(node.body.nodes, depth + 2))
+		} else if (node.kind === "parallel") {
+			lines.push(`${detailIndent}- Arms:`)
+			lines.push(...renderPlanNodes(node.arms, depth + 2))
+		} else if (node.kind === "branch") {
+			for (const [index, arm] of node.arms.entries()) {
+				lines.push(`${detailIndent}- Branch ${index + 1}: ${arm.purpose}`)
+				lines.push(...renderPlanNodes(arm.body.nodes, depth + 2))
+			}
+		} else if (node.kind === "workflow") {
+			lines.push(`${detailIndent}- Nested flow:`)
+			lines.push(...renderPlanNodes(node.body.nodes, depth + 2))
+		} else if (node.kind === "map") {
+			lines.push(`${detailIndent}- Reads: ${node.sources.map(inlineCode).join(", ")}`)
+		}
+	}
+	return lines
+}
+
+function renderStepPolicies(node: LeafStepBlueprint, indent: string): string[] {
+	const lines: string[] = []
+	if (node.inputSource) lines.push(`${indent}- Input source: ${inlineCode(node.inputSource)}`)
+	if (node.retry) {
+		lines.push(
+			`${indent}- Retry policy: ${node.retry.maxRetry} retries${node.retry.backoffMs !== undefined ? `, ${node.retry.backoffMs} ms backoff` : ""}`,
+		)
+	}
+	if (node.maxDurationMs !== undefined) lines.push(`${indent}- Wall-time budget: ${node.maxDurationMs} ms`)
+	if (node.optional !== undefined) lines.push(`${indent}- Optional: ${node.optional ? "yes" : "no"}`)
+	return lines
+}
+
+function planNodeLabel(node: BlueprintNode): string {
+	if (node.kind === "agent") return `agent (${node.mode})`
+	if (node.kind === "loop") return `${node.mode} loop`
+	return node.kind
+}
+
+function renderSchemaSummary(schema: SchemaBlueprint): string {
+	switch (schema.kind) {
+		case "string":
+		case "number":
+		case "integer":
+		case "boolean":
+		case "unknown":
+			return schema.kind
+		case "literal":
+			return JSON.stringify(schema.value)
+		case "array":
+			return `${renderSchemaSummary(schema.items)}[]`
+		case "union":
+			return schema.variants.map(renderSchemaSummary).join(" | ")
+		case "object":
+			return `{ ${schema.fields
+				.map((field) => `${field.name}${field.optional ? "?" : ""}: ${renderSchemaSummary(field.schema)}`)
+				.join("; ")} }`
+	}
+}
+
+function inlineCode(value: string): string {
+	return `\`${value.replaceAll("`", "\\`")}\``
+}
+
 /** Select only the generated TSDoc/signature entries needed by this blueprint. */
 export function renderAuthoringGuide(blueprint: WorkflowBlueprint): string {
 	const selected = new Set<AuthoringCapability>(["steps", "data-flow"])

@@ -12,7 +12,13 @@
  */
 
 import { parsePath, staticKeyOf } from "../engine/node-path.ts"
-import { pendingQuestionnaires, resumeWithAnswer, resumeWorkflow } from "../engine/resume-workflow.ts"
+import {
+	pendingInteractions,
+	pendingQuestionnaires,
+	resumeWithAnswer,
+	resumeWithInteraction,
+	resumeWorkflow,
+} from "../engine/resume-workflow.ts"
 import { runWorkflow } from "../engine/run-workflow.ts"
 import { deriveStepStates, type StepState, stepState as stepStateAt } from "../engine/step-state.ts"
 import type { HostPort, RunEvent, RunResult } from "../engine/types.ts"
@@ -68,6 +74,13 @@ export interface PendingQuestion {
 	readonly violation: string | undefined
 }
 
+/** One workflow-defined interaction currently waiting for an offline or attended response. */
+export interface PendingInteraction {
+	readonly path: string
+	readonly request: unknown
+	readonly violation: string | undefined
+}
+
 /**
  * One observed state of a run, plus the transitions out of it. Wraps the engine's `RunResult` and
  * holds the host/store, so a resume needs no event-log plumbing from the test.
@@ -79,6 +92,8 @@ export interface TestRun {
 	readonly error: string | undefined
 	/** The pending questionnaire when `blocked`. */
 	readonly questionnaire: Questionnaire | undefined
+	/** The exact persisted request when an interactive step is `blocked`. */
+	readonly interaction: unknown | undefined
 	/** The full node path (spec §8.5) of the step that blocked, or that a crash/cancel occurred at. */
 	readonly path: string | undefined
 	/** Why a questionnaire step RE-blocked: the schema violation in the delivered answers (spec §2.4). */
@@ -93,6 +108,8 @@ export interface TestRun {
 	 * step is ever blocked at a time and `questionnaire`/`path`/`violation` above already cover it.
 	 */
 	readonly pendingQuestions: readonly PendingQuestion[]
+	/** Every interactive step currently blocked, FIFO by request order. */
+	readonly pendingInteractions: readonly PendingInteraction[]
 
 	/** The keys of the pending questionnaire — the questions currently being asked. */
 	questionKeys(): string[]
@@ -120,6 +137,8 @@ export interface TestRun {
 	 * different pending block instead.
 	 */
 	answer(answers: Record<string, unknown>, path?: string): Promise<TestRun>
+	/** Submit an interactive step response without invoking its PI renderer. */
+	respond(response: unknown, path?: string): Promise<TestRun>
 	/**
 	 * Node-atomic resume of a `crashed`/`cancelled` run (spec §8.2/§8.3): completed nodes are skipped
 	 * and the first incomplete node re-runs wholesale. Not the answer path — see {@link answer}.
@@ -225,6 +244,11 @@ async function toTestRun(context: RunContextForTest, result: RunResult): Promise
 		questionnaire: event.questionnaire,
 		violation: event.violation,
 	}))
+	const pendingInteractionList: PendingInteraction[] = pendingInteractions(events).map((event) => ({
+		path: event.path,
+		request: event.request,
+		violation: event.violation,
+	}))
 
 	return {
 		runId: result.runId,
@@ -232,11 +256,13 @@ async function toTestRun(context: RunContextForTest, result: RunResult): Promise
 		output: result.output,
 		error: result.error,
 		questionnaire: result.questionnaire,
+		interaction: result.interaction,
 		path: result.path,
 		violation: result.violation,
 		events,
 		sleepCalls: context.sleepCalls,
 		pendingQuestions,
+		pendingInteractions: pendingInteractionList,
 
 		questionKeys() {
 			return (result.questionnaire?.questions ?? []).map((question) => question.key)
@@ -274,6 +300,17 @@ async function toTestRun(context: RunContextForTest, result: RunResult): Promise
 				throw new Error(`answer(): the run is ${result.status}, not blocked — nothing is asking a question`)
 			}
 			const next = await resumeWithAnswer(context.workflow, events, answers, context.host, {
+				signal: context.canceller?.arm(),
+				path: path ?? result.path,
+			})
+			return toTestRun(context, next)
+		},
+
+		async respond(response: unknown, path?: string): Promise<TestRun> {
+			if (result.status !== "blocked") {
+				throw new Error(`respond(): the run is ${result.status}, not blocked — no interaction is waiting`)
+			}
+			const next = await resumeWithInteraction(context.workflow, events, response, context.host, {
 				signal: context.canceller?.arm(),
 				path: path ?? result.path,
 			})

@@ -54,7 +54,7 @@ import type { HostPort, RunResult } from "./types.ts"
 
 // Re-exported for the engine's public surface (src/engine/index.ts) and for tests — the types
 // themselves live in context.ts (see the header comment above for why).
-export type { AnswerResume, Reentry } from "./context.ts"
+export type { AnswerResume, InteractionResume, Reentry } from "./context.ts"
 
 /**
  * Where execution begins plus the state recovered before it. A fresh run starts at the top with empty
@@ -134,16 +134,22 @@ export async function execute(
 		return { runId: state.runId, status: "crashed", error: outcome.error }
 	}
 	if (outcome.kind === "blocked") {
-		// `questionnaire-asked` was already emitted at the point this step (or, for a concurrent
-		// construct, whichever arm is being surfaced here) actually blocked — see `finishStep` — so this
-		// is just reporting, not recording.
-		return {
-			runId: state.runId,
-			status: "blocked",
-			path: outcome.path,
-			questionnaire: outcome.questionnaire,
-			violation: outcome.violation,
-		}
+		// The suspension event was already emitted at the step. This only reports the next pending block.
+		return outcome.blockKind === "questionnaire"
+			? {
+					runId: state.runId,
+					status: "blocked",
+					path: outcome.path,
+					questionnaire: outcome.questionnaire,
+					violation: outcome.violation,
+				}
+			: {
+					runId: state.runId,
+					status: "blocked",
+					path: outcome.path,
+					interaction: outcome.request,
+					violation: outcome.violation,
+				}
 	}
 	await host.emit({ type: "run-cancelled", runId: state.runId, path: outcome.path, at: iso(host) })
 	return { runId: state.runId, status: "cancelled" }
@@ -333,6 +339,53 @@ async function runStepNodeBody(
 		}
 	}
 
+	// Interactive response continuation: use the exact request captured by the event log. The request
+	// builder and renderer are deliberately not invoked here; this is engine-only schema validation.
+	if (reentry?.interaction) {
+		if (step.kind !== "interactive") {
+			return {
+				kind: "crashed",
+				error: `cannot resume interaction at "${formattedPath}": the current step is ${step.kind} (definition drift)`,
+				path: formattedPath,
+			}
+		}
+		const requestViolation = describeSchemaViolations(step.requestSchema, reentry.interaction.request)
+		if (requestViolation) {
+			return {
+				kind: "crashed",
+				error: `cannot resume interaction at "${formattedPath}": persisted request no longer satisfies its current schema (definition drift): ${requestViolation}`,
+				path: formattedPath,
+			}
+		}
+		const responseViolation = describeSchemaViolations(step.outputSchema, reentry.interaction.response)
+		if (responseViolation) {
+			const violation = `step "${step.name}" interaction response: ${responseViolation}`
+			await host.emit({
+				type: "interaction-requested",
+				runId: state.runId,
+				path: formattedPath,
+				request: reentry.interaction.request,
+				violation,
+				at: iso(host),
+			})
+			return {
+				kind: "blocked",
+				blockKind: "interaction",
+				path: formattedPath,
+				request: reentry.interaction.request,
+				violation,
+			}
+		}
+		await host.emit({
+			type: "step-completed",
+			runId: state.runId,
+			path: formattedPath,
+			output: reentry.interaction.response,
+			at: iso(host),
+		})
+		return { kind: "ok", output: reentry.interaction.response }
+	}
+
 	// Questionnaire step, form mode (spec §2.4): does no other work — block immediately with its batch.
 	// `questionnaire-asked` is emitted HERE, at the point of blocking, not deferred to execute()'s top
 	// level (spec §8.6): under concurrency several steps can block in the SAME round, and each needs its
@@ -349,7 +402,7 @@ async function runStepNodeBody(
 			conversation: [],
 			at: iso(host),
 		})
-		return { kind: "blocked", path: formattedPath, questionnaire, conversation: [] }
+		return { kind: "blocked", blockKind: "questionnaire", path: formattedPath, questionnaire, conversation: [] }
 	}
 
 	// Linear hand-off (spec §3.6): a step with an input schema receives the previous node's output;
@@ -365,6 +418,46 @@ async function runStepNodeBody(
 	}
 
 	await host.emit({ type: "step-started", runId: state.runId, path: formattedPath, input: stepInput, at: iso(host) })
+
+	if (step.kind === "interactive") {
+		let request: unknown
+		try {
+			request = step.buildRequest({
+				input: stepInput,
+				ctx: createRunContext(state, parentPath, frames, formattedPath),
+			})
+		} catch (error) {
+			return {
+				kind: "crashed",
+				error: `step "${step.name}" interaction request threw: ${errorMessage(error)}`,
+				path: formattedPath,
+			}
+		}
+		const requestViolation = describeSchemaViolations(step.requestSchema, request)
+		if (requestViolation) {
+			return {
+				kind: "crashed",
+				error: `step "${step.name}" interaction request: ${requestViolation}`,
+				path: formattedPath,
+			}
+		}
+		const jsonViolation = jsonValueViolation(request)
+		if (jsonViolation) {
+			return {
+				kind: "crashed",
+				error: `step "${step.name}" interaction request is not JSON-serializable: ${jsonViolation}`,
+				path: formattedPath,
+			}
+		}
+		await host.emit({
+			type: "interaction-requested",
+			runId: state.runId,
+			path: formattedPath,
+			request,
+			at: iso(host),
+		})
+		return { kind: "blocked", blockKind: "interaction", path: formattedPath, request }
+	}
 
 	const outcome =
 		step.kind === "agent"
@@ -423,6 +516,7 @@ async function finishStep(
 			})
 			return {
 				kind: "blocked",
+				blockKind: "questionnaire",
 				path,
 				questionnaire: outcome.questionnaire,
 				conversation: outcome.conversation,
@@ -440,6 +534,38 @@ async function finishStep(
 		case "cancelled":
 			return { kind: "cancelled", path }
 	}
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error)
+}
+
+/** Reject values whose in-memory event representation would change or disappear when written as JSONL. */
+function jsonValueViolation(value: unknown): string | undefined {
+	const seen = new Set<object>()
+	const visit = (current: unknown, path: string): string | undefined => {
+		if (current === null || typeof current === "string" || typeof current === "boolean") return undefined
+		if (typeof current === "number") return Number.isFinite(current) ? undefined : `${path} is not a finite number`
+		if (typeof current !== "object") return `${path} has unsupported type ${typeof current}`
+		if (seen.has(current)) return `${path} contains a cycle`
+		seen.add(current)
+		if (Array.isArray(current)) {
+			for (let index = 0; index < current.length; index++) {
+				const violation = visit(current[index], `${path}[${index}]`)
+				if (violation) return violation
+			}
+		} else {
+			const prototype = Object.getPrototypeOf(current)
+			if (prototype !== Object.prototype && prototype !== null) return `${path} is not a plain object`
+			for (const [key, child] of Object.entries(current)) {
+				const violation = visit(child, `${path}.${key}`)
+				if (violation) return violation
+			}
+		}
+		seen.delete(current)
+		return undefined
+	}
+	return visit(value, "request")
 }
 
 /**
@@ -502,7 +628,13 @@ async function runBranchNode(
 
 		if (signal.aborted) return { kind: "cancelled" }
 		const armReentry: Reentry | undefined =
-			isTarget && activeReentry ? { path: activeReentry.path.slice(1), answer: activeReentry.answer } : undefined
+			isTarget && activeReentry
+				? {
+						path: activeReentry.path.slice(1),
+						answer: activeReentry.answer,
+						interaction: activeReentry.interaction,
+					}
+				: undefined
 		// The frame is the taken ARM, not the branch: arms are the peer scopes (spec §8.5), and the arm is
 		// what a body step is actually inside of. Carries the branch's upstream input (spec 1.6).
 		const armFrames: readonly ScopeFrame[] = [...frames, { kind: "branch-arm", name: arm.name, input }]
@@ -574,7 +706,9 @@ async function runLoopNode(
 	}
 
 	let lastOutput: unknown
-	let innerReentry: Reentry | undefined = reentry ? { path: reentry.path.slice(1), answer: reentry.answer } : undefined
+	let innerReentry: Reentry | undefined = reentry
+		? { path: reentry.path.slice(1), answer: reentry.answer, interaction: reentry.interaction }
+		: undefined
 
 	for (; iteration <= node.maxIterations; iteration++) {
 		if (signal.aborted) return { kind: "cancelled" }
@@ -662,7 +796,7 @@ async function runNestedWorkflowNode(
 	}
 
 	const innerReentry: Reentry | undefined = reentry
-		? { path: reentry.path.slice(1), answer: reentry.answer }
+		? { path: reentry.path.slice(1), answer: reentry.answer, interaction: reentry.interaction }
 		: undefined
 	const nestedFrames: readonly ScopeFrame[] = [...frames, { kind: "workflow", name: node.name, input }]
 	const outcome = await runNodeSequence(

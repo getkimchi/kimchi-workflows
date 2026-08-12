@@ -28,7 +28,7 @@ Three layers, one seam. The core is pure and fully testable **without any LLM or
 ```
 ┌─ Flow layer (src/flow) ────────────────────────────────────────────┐
 │  Authoring API: createWorkflow / createStep / createAgentStep /    │
-│  createQuestionnaireStep. TypeBox I/O schemas. Builder: .then      │
+│  createQuestionnaireStep / createInteractiveStep. TypeBox schemas. │
 │  .parallel .branch .dowhile .dountil .foreach .map → .commit()     │
 │  Pure. No host, no network.                                        │
 └────────────────────────────────────────────────────────────────────┘
@@ -44,7 +44,7 @@ Three layers, one seam. The core is pure and fully testable **without any LLM or
 ┌─ Host adapter (src/host) ──────────────────────────────────────────┐
 │  Implements HostPort against @earendil-works/pi-coding-agent:      │
 │  registers /workflow, runs the agent loop, resolves models,        │
-│  renders questions, and appends events to a per-project run store. │
+│  renders human-input steps, and appends events to the run store.    │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -56,7 +56,7 @@ Because the engine owns every transition — and every branch/loop condition is 
 
 - **Define arbitrary workflows in TypeScript.** A workflow is an ordinary, git-tracked `.ts` file that default-exports a committed `WorkflowDefinition`. Edit it like any code; no separate build step (loaded at run time via `jiti`).
 - **Goal-driven loops.** `.dountil` / `.dowhile` repeat a step (or a whole sub-workflow) until a condition holds — the pattern behind a code-review loop, a "fix until green" loop, or a propose-and-check loop. A `maxIterations` guard (default 100) means every loop **provably terminates**.
-- **Four step types.** *Function* (a TypeScript function), *Agent* (runs the PI agent tool loop until it stops, returning schema-validated structured output), *Questionnaire* (gathers structured input from the user), and *Nested workflow* (compose a whole workflow as a step).
+- **Five composable node/step types.** *Function* (a TypeScript function), *Agent* (runs the PI agent tool loop), *Questionnaire* (schema-derived forms), *Interactive* (a workflow-defined, resumable PI UI), and *Nested workflow* (compose a committed workflow).
 - **Deterministic, harness-driven execution.** The engine — not the model — decides transitions. No steering messages or tool calls influence control flow, so runs are reproducible and always reach a terminal state.
 - **Fan-out with a ceiling.** `.parallel([a, b])` runs independent steps at once; `.foreach(body, { concurrency })` iterates a list, sequential by default. A workflow-wide `maxConcurrency` (default 4) caps the whole run, so a wide fan-out can't open twenty model sessions at once.
 - **Stop and resume.** Runs are recorded as an append-only JSONL event log alongside the harness's own sessions. `blocked`, `crashed`, and `cancelled` runs all resume from the last checkpoint; `foreach` resumes at the next unprocessed item; a step blocked deep inside a loop resumes back into that iteration with its conversation intact.
@@ -183,7 +183,7 @@ expect(run.status).toBe("completed");
 
 1. **`brief`** — a questionnaire step: what should this do, and what should the file be called?
 2. **`target`** — settle the destination straight away, so a bad or taken name fails in milliseconds rather than after the interview.
-3. **`design`** — a Q&A agent asks clarifying questions in batches, then presents a structured blueprint for **Approve / Revise** in a `.dountil` loop. The blueprint records schemas, data sources, agent modes, and recursive control flow rather than reducing the design to a flat prose step list.
+3. **`review`** — a Q&A agent asks clarifying questions and emits a structured blueprint. A deterministic step renders it as Markdown; an interactive step keeps that Markdown visible while PI asks **Approve / Revise**, opening the multiline editor only for revision feedback. The exact review request is persisted, and the project lock is released while the user decides.
 4. **`scaffold`** — reserve the final entry path with an exclusive write and place the deterministic imports, TypeBox schemas, step constructors, control-flow builders, and committed export there.
 5. **`until-valid`** — the generator edits that entry file directly and may add relative helper modules for a multi-file workflow. It submits only the main `entryPath`, not source code. The framework typechecks the entry and its imported graph, loads it through the real workflow loader, and compares the result with the approved structure; on failure the agent repairs the files in place. Formatting is deliberately not a creation gate.
 6. **`complete`** — report the already-written, validated entry path. There is no final source-writing handoff.
@@ -249,7 +249,7 @@ Loops **feed forward**: each iteration's body receives the previous iteration's 
 
 ## Examples
 
-Nine runnable examples live in [`examples/`](examples/), each covering one capability — see [`examples/README.md`](examples/README.md) for the full table and per-example notes.
+Ten runnable examples live in [`examples/`](examples/), each covering one capability — see [`examples/README.md`](examples/README.md) for the full table and per-example notes.
 
 | Example | Kind | Shows |
 | --- | --- | --- |
@@ -259,11 +259,12 @@ Nine runnable examples live in [`examples/`](examples/), each covering one capab
 | `fan-out` | function | `.parallel()` over two independent steps sharing the same input; output keyed by arm name. |
 | `foreach-concurrent` | function | `.foreach({ concurrency: 3 })`: several items genuinely in flight at once, output still ordered by item. |
 | `survey` | questionnaire | A form gathers params up front, then a step consumes them. |
+| `approval` | interactive | Persist Markdown, render it through PI, and collect approve/revise. |
 | `summarize` | agent | A single agent step returning schema-valid structured output. |
 | `review-loop` | agent + loop | Propose → check, `.dountil` it passes (with a max-iteration guard). |
 | `planning` | Q&A agent | A planning agent that may ask a clarifying question (blocks), then plans. |
 
-Function-only and questionnaire examples run with no network; agent examples use a model (the examples default to `kimchi-dev/kimi-k2.7`).
+Function-only, questionnaire, and interactive examples run with no network; agent examples use a model (the examples default to `kimchi-dev/kimi-k2.7`).
 
 ---
 
@@ -319,17 +320,20 @@ const run = await createTestRun(releaseWorkflow, {
 
 Overrides are **schema-checked**: an unknown step name fails immediately, and a stub's return value is validated against the real step's declared output schema — so a stub that has drifted from the contract it stands in for fails the test instead of hiding the drift.
 
-**Questionnaire steps need no double.** They're deterministic, so the test *is* the answers you supply. Answers that are incomplete or invalid re-block the step — a questionnaire step is never cancelled by a bad answer, exactly as leaving a mandatory question blank leaves it pending — and `violation` says why:
+**Questionnaire and interactive steps need no double.** Questionnaire tests supply answers. Interactive tests inspect the exact persisted request and call `respond()` directly, without loading PI UI:
 
 ```ts
 const partial = await blocked.answer({ name: "Ada" });
 partial.status;     // "blocked"
 partial.violation;  // "<root>: must have required properties environment"
+
+const reviewed = await blockedPlan.respond({ decision: "approve" });
+reviewed.status;    // "completed"
 ```
 
 A first ask has no `violation` (nothing was rejected yet), so `violation !== undefined` is precisely "asked again, and here's what was wrong".
 
-Each transition returns a **new** run handle, so earlier states stay inspectable: `status`, `output`, `error`, `questionnaire`, `violation`, `events`, `eventsOf(type)`, `stepOutput(name)`, `stepState(path)`, `agent(step)`, `sleepCalls`. Pass `cancelAt: "step"` to cancel the run just before a step executes, then `resume()` to check it picks up from the last checkpoint.
+Each transition returns a **new** run handle, so earlier states stay inspectable: `status`, `output`, `error`, `questionnaire`, `interaction`, `pendingQuestions`, `pendingInteractions`, `violation`, `events`, `eventsOf(type)`, `stepOutput(name)`, `stepState(path)`, `agent(step)`, `sleepCalls`. Pass `cancelAt: "step"` to cancel the run just before a step executes, then `resume()` to check it picks up from the last checkpoint.
 
 Recording and replaying real model responses as fixtures is deliberately out of scope — hand-scripted replies plus the live integration suite cover that ground.
 

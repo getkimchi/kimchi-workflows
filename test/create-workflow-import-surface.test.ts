@@ -5,10 +5,9 @@ import { describe, expect, it } from "vitest"
 /**
  * The built-in create workflow is reloaded through `loadWorkflowFile`'s restricted loader — on
  * `/workflow resume`, and by the attended loop after its questionnaire is answered. That loader
- * resolves ONLY the specifiers below; anything else falls back to filesystem resolution, which in the
- * installed harness has no `@earendil-works/pi-coding-agent` on disk (it is a peer, virtual in PI's
- * own extension loader). This suite pins the static import closure so a harness-only import cannot
- * sneak back in — a load test cannot: in THIS repo the bare import resolves via the devDependency.
+ * resolves ONLY the specifiers below. PI's coding-agent and TUI module objects are explicitly included
+ * so workflow-defined interactive renderers use the running Kimchi harness's pinned copies. This suite
+ * pins that static import closure; a load test alone cannot, because devDependencies resolve locally.
  */
 
 /** What `loadWorkflowFile` resolves: `workflowModules` keys, node built-ins, and its own `jiti` dependency. */
@@ -19,6 +18,8 @@ const LOADER_RESOLVABLE = new Set([
 	"@kimchi-dev/kimchi-workflows",
 	"@kimchi-dev/kimchi-workflows/flow",
 	"@kimchi-dev/kimchi-workflows/engine",
+	"@earendil-works/pi-coding-agent",
+	"@earendil-works/pi-tui",
 	"jiti",
 ])
 

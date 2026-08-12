@@ -12,7 +12,7 @@ export interface RunSummary {
 	/** The step the run is currently at, if any (spec §6.3): its `in_progress`/`blocked` step while
 	 * live, or the step it stopped at when `crashed`/`cancelled`. */
 	readonly currentStep?: string
-	/** How many steps are currently `blocked` (spec §6.3) — not implied by `status` alone (§5.3). */
+	/** How many steps await human input — retained under its original field name for compatibility. */
 	readonly pendingQuestions: number
 }
 

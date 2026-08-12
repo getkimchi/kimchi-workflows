@@ -68,8 +68,8 @@ export function currentStepName(status: RunStatus, states: ReadonlyMap<StepState
 }
 
 /**
- * How many steps are currently `blocked` (spec §6.3): not decoration — a run with one blocked step and
- * one executing step reads `in_progress` (§5.3), so without this a waiting question is invisible.
+ * How many steps are currently waiting for human input (questionnaire or workflow-defined interaction).
+ * The historical name is retained for API compatibility.
  */
 export function pendingQuestionCount(states: ReadonlyMap<StepStateKey, StepState>): number {
 	let count = 0

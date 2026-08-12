@@ -18,7 +18,7 @@ import { workflowsDir } from "../project-dir.ts"
 import type { RunLock } from "../run-lock.ts"
 import type { RunStore } from "../types.ts"
 import { resolveWorkflow } from "../workflow-catalog.ts"
-import { askOf, handleAttendedQuestionnaire } from "./attended.ts"
+import { handleAttendedInput, humanInputOf } from "./attended.ts"
 import {
 	type CommandCtx,
 	describe,
@@ -220,7 +220,7 @@ async function startRun(
 
 		// Attended flow: if the run blocked, render the questionnaire inline and loop until it settles.
 		if (result.status === "blocked") {
-			await handleAttendedQuestionnaire(
+			await handleAttendedInput(
 				ctx,
 				store,
 				guard,
@@ -228,7 +228,7 @@ async function startRun(
 				workflowFilePath,
 				startAgent,
 				runId,
-				askOf(result),
+				humanInputOf(result),
 				progress,
 			)
 		} else {

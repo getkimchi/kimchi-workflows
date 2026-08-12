@@ -21,6 +21,7 @@ const capabilityNames = [
 	"branch",
 	"workflow",
 	"advanced-agent",
+	"interactive",
 ]
 const capabilities = new Set(capabilityNames)
 const entries = Object.fromEntries(capabilityNames.map((name) => [name, []]))

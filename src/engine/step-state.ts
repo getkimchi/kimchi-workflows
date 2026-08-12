@@ -65,6 +65,7 @@ export function deriveStepStates(events: readonly RunEvent[]): Map<StepStateKey,
 			case "step-retry":
 			case "agent-steer":
 			case "answers-provided":
+			case "interaction-provided":
 				set(event.path, "in_progress")
 				break
 			case "step-completed":
@@ -76,6 +77,7 @@ export function deriveStepStates(events: readonly RunEvent[]): Map<StepStateKey,
 				set(event.path, "crashed")
 				break
 			case "questionnaire-asked":
+			case "interaction-requested":
 				set(event.path, "blocked")
 				break
 			case "branch-arm":

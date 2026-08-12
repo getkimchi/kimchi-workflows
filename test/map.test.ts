@@ -105,7 +105,7 @@ describe("commit() step validation (spec §2)", () => {
 				.then(notAStep as never)
 				.commit(),
 		).toThrow(
-			/expects a step from createStep\/createAgentStep\/createQuestionnaireStep, but received a function \(addStep\)/,
+			/expects a step from createStep\/createAgentStep\/createQuestionnaireStep\/createInteractiveStep, but received a function \(addStep\)/,
 		)
 	})
 

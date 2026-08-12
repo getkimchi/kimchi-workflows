@@ -9,7 +9,7 @@ import { ask, createTestRun, reply, withSideEffect } from "../src/testing/index.
 
 /**
  * The `/workflow create` meta-workflow, driven end-to-end offline: its `design` agent and `approve`
- * questionnaire are scripted, so the whole interview → approve/revise → generate → validate → write
+ * interaction is scripted, so the whole interview → approve/revise → generate → validate → write
  * path runs with no model.
  */
 
@@ -87,13 +87,14 @@ describe("/workflow create meta-workflow", () => {
 		// scratch) — the framework's established resume-continuation shape (see questionnaire-step.test.ts).
 		const proposed = await clarifying.answer({ detail: "the world" })
 		expect(proposed.status).toBe("blocked")
-		expect(proposed.path).toBe("review#1/approve") // a plain questionnaire, one per loop iteration
+		expect(proposed.path).toBe("review#1/approve")
+		expect((proposed.interaction as { markdown: string }).markdown).toContain("# Proposed workflow: `greeter`")
 		expect(proposed.agent("design").sessions).toBe(2) // fresh ask + history-seeded continuation
 		expect(proposed.agent("design").messages).toHaveLength(2) // original prompt + the clarify answer
 
-		// 3. Revise: `approve` re-blocks the SAME loop with the SAME questionnaire shape at iteration 2 —
+		// 3. Revise: `approve` blocks the SAME loop with a newly rendered plan at iteration 2 —
 		//    the proof this is a real `.dountil` loop, not a single step crammed with the whole interview.
-		const revising = await proposed.answer({ decision: "revise", feedback: "make it personal" })
+		const revising = await proposed.respond({ decision: "revise", feedback: "make it personal" })
 		expect(revising.status).toBe("blocked")
 		expect(revising.path).toBe("review#2/approve") // iteration 2 — the loop actually re-entered, not restarted
 		expect(revising.eventsOf("loop-iteration").filter((event) => event.path.startsWith("review#"))).toHaveLength(2)
@@ -102,7 +103,7 @@ describe("/workflow create meta-workflow", () => {
 		expect(revising.agent("design").sessions).toBe(3)
 
 		// 4. Approval reserves the final path; generate edits it, then check → complete follows.
-		const done = await revising.answer({ decision: "approve" })
+		const done = await revising.respond({ decision: "approve" })
 		expect(done.status, `${done.error}; check=${JSON.stringify(done.stepOutput("until-valid/check"))}`).toBe(
 			"completed",
 		)
@@ -133,7 +134,7 @@ describe("/workflow create meta-workflow", () => {
 
 		const proposed = await run.answer({ goal: "greet the user", fileName: "greeter.workflow.ts" })
 		expect(proposed.status).toBe("blocked")
-		const done = await proposed.answer({ decision: "approve" })
+		const done = await proposed.respond({ decision: "approve" })
 
 		expect(done.status, `${done.error}; check=${JSON.stringify(done.stepOutput("until-valid/check"))}`).toBe(
 			"completed",
@@ -158,7 +159,7 @@ describe("/workflow create meta-workflow", () => {
 		})
 
 		const proposed = await run.answer({ goal: "greet", fileName: "greeter.workflow.ts" })
-		const done = await proposed.answer({ decision: "approve" })
+		const done = await proposed.respond({ decision: "approve" })
 
 		expect(done.status).toBe("completed")
 		expect(done.agent("generate").messages[1]).toContain("TypeScript validation failed")
@@ -178,7 +179,7 @@ describe("/workflow create meta-workflow", () => {
 		})
 
 		const proposed = await run.answer({ goal: "greet", fileName: "greeter.workflow.ts" })
-		const crashed = await proposed.answer({ decision: "approve" })
+		const crashed = await proposed.respond({ decision: "approve" })
 
 		expect(crashed.status).toBe("crashed")
 		expect(crashed.error).toMatch(/exceeded its max of 3 iterations/)
@@ -199,7 +200,7 @@ describe("/workflow create meta-workflow", () => {
 		})
 
 		const proposed = await run.answer({ goal: "greet", fileName: "greeter" })
-		const done = await proposed.answer({ decision: "approve" })
+		const done = await proposed.respond({ decision: "approve" })
 
 		expect(done.status).toBe("completed")
 		expect(done.output).toEqual({ path: written })
@@ -218,7 +219,7 @@ describe("/workflow create meta-workflow", () => {
 		})
 
 		const proposed = await run.answer({ goal: "greet", fileName: "flows/greeter.workflow.ts" })
-		const done = await proposed.answer({ decision: "approve" })
+		const done = await proposed.respond({ decision: "approve" })
 
 		expect(done.status).toBe("completed")
 		expect(done.output).toEqual({ path: written })
@@ -257,7 +258,7 @@ describe("/workflow create meta-workflow", () => {
 		})
 
 		const proposed = await run.answer({ goal: "greet", fileName: "greeter.workflow.ts" })
-		const done = await proposed.answer({ decision: "approve" })
+		const done = await proposed.respond({ decision: "approve" })
 
 		expect(done.status).toBe("completed")
 		expect(done.output).toEqual({ path: entryPath })
@@ -280,7 +281,7 @@ describe("/workflow create meta-workflow", () => {
 		})
 
 		const proposed = await run.answer({ goal: "greet", fileName: "greeter.workflow.ts" })
-		const done = await proposed.answer({ decision: "approve" })
+		const done = await proposed.respond({ decision: "approve" })
 
 		expect(done.status).toBe("completed")
 		expect(done.agent("generate").messages[1]).toMatch(/submitted entryPath resolves to/)
@@ -354,7 +355,7 @@ describe("/workflow create never destroys existing work (adversarial regression)
 		await mkdir(path.dirname(target), { recursive: true })
 		await writeFile(target, "// created while reviewing\n", "utf8")
 
-		const raced = await proposed.answer({ decision: "approve" })
+		const raced = await proposed.respond({ decision: "approve" })
 
 		expect(raced.status).toBe("crashed")
 		expect(raced.error).toMatch(/appeared before it could be reserved/)

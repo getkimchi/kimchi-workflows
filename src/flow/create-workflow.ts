@@ -379,7 +379,7 @@ function deepJsonEqual(a: unknown, b: unknown): boolean {
 }
 
 /** The three things `.then()` (and a `.parallel()` arm) accepts — anything else is not a step (spec §2). */
-const STEP_KINDS = new Set(["function", "agent", "questionnaire"])
+const STEP_KINDS = new Set(["function", "agent", "questionnaire", "interactive"])
 
 /**
  * Reject nodes that are not real steps, so `commit()` fails at authoring time rather than at run
@@ -395,7 +395,7 @@ function assertWellFormed(workflowName: string, nodes: readonly WorkflowNode[]):
 		const kind = (step as { kind?: unknown } | null)?.kind
 		if (typeof step !== "object" || step === null || typeof kind !== "string" || !STEP_KINDS.has(kind)) {
 			throw new Error(
-				`workflow "${workflowName}": .then() expects a step from createStep/createAgentStep/createQuestionnaireStep, but received ${describeValue(step)}`,
+				`workflow "${workflowName}": .then() expects a step from createStep/createAgentStep/createQuestionnaireStep/createInteractiveStep, but received ${describeValue(step)}`,
 			)
 		}
 		if (typeof (step as { name?: unknown }).name !== "string" || (step as { name: string }).name.length === 0) {

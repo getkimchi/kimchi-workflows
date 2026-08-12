@@ -15,7 +15,7 @@ import { resumeAction } from "../resume-router.ts"
 import type { RunLock } from "../run-lock.ts"
 import { summarizeRun } from "../summarize-run.ts"
 import type { RunStore } from "../types.ts"
-import { askOf, handleAttendedQuestionnaire, pendingAsk } from "./attended.ts"
+import { handleAttendedInput, humanInputOf, pendingHumanInput } from "./attended.ts"
 import {
 	type CommandCtx,
 	describe,
@@ -73,7 +73,7 @@ export async function handleResume(
 	progress.seed(events)
 	try {
 		if (action.kind === "answer") {
-			await handleAttendedQuestionnaire(
+			await handleAttendedInput(
 				ctx,
 				store,
 				guard,
@@ -81,7 +81,7 @@ export async function handleResume(
 				workflowFilePath,
 				startAgent,
 				runId,
-				pendingAsk(events),
+				pendingHumanInput(events),
 				progress,
 			)
 			return
@@ -95,7 +95,7 @@ export async function handleResume(
 		if (!result) return // guard was busy (race) — already notified
 
 		if (result.status === "blocked") {
-			await handleAttendedQuestionnaire(
+			await handleAttendedInput(
 				ctx,
 				store,
 				guard,
@@ -103,7 +103,7 @@ export async function handleResume(
 				workflowFilePath,
 				startAgent,
 				runId,
-				askOf(result),
+				humanInputOf(result),
 				progress,
 			)
 		} else {

@@ -16,5 +16,5 @@ export type { AgentDouble, AgentRecord, AgentScripts, AgentTurnScript } from "./
 export { ask, createAgentDouble, fails, raw, reply, submitRaw, throws, usage, withSideEffect } from "./agent-double.ts"
 export type { StepOverride, StepOverrides } from "./step-override.ts"
 export { applyStepOverrides } from "./step-override.ts"
-export type { PendingQuestion, TestRun, TestRunOptions } from "./test-run.ts"
+export type { PendingInteraction, PendingQuestion, TestRun, TestRunOptions } from "./test-run.ts"
 export { createTestRun } from "./test-run.ts"

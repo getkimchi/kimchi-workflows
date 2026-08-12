@@ -2,6 +2,8 @@
 // `workflowModules`): it wants whole module objects, which is precisely what a namespace import is.
 // biome-ignore-all lint/performance/noNamespaceImport: virtualModules takes module objects, not bindings
 
+import * as piCodingAgent from "@earendil-works/pi-coding-agent"
+import * as piTui from "@earendil-works/pi-tui"
 import { createJiti } from "jiti"
 import * as typebox from "typebox"
 import * as typeboxCompile from "typebox/compile"
@@ -49,6 +51,10 @@ const workflowModules = {
 	"@kimchi-dev/kimchi-workflows": flow,
 	"@kimchi-dev/kimchi-workflows/flow": flow,
 	"@kimchi-dev/kimchi-workflows/engine": engine,
+	// Interactive-step renderers are workflow-defined and may use the same PI UI/TUI surface the
+	// running Kimchi harness pins. Supplying these module objects keeps reload/resume on that one copy.
+	"@earendil-works/pi-coding-agent": piCodingAgent,
+	"@earendil-works/pi-tui": piTui,
 }
 
 /**

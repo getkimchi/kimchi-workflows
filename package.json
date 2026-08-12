@@ -82,12 +82,14 @@
 	"//peerDependencies": "The packages PI bundles and hands to extensions itself (docs/packages.md: \"list them in peerDependencies with a \\\"*\\\" range and do not bundle them\"). PI's extension loader aliases these specifiers to its own copies and that alias WINS over the consuming project's node_modules — so a range narrower than `*` would describe a resolution we do not control.",
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
 		"typebox": "*"
 	},
-	"//devDependencies": "`typebox` is pinned EXACTLY to the version `@earendil-works/pi-coding-agent` pins, because that is the copy the harness actually runs us on — a caret range let tests pass on 1.3.6 while every real run used PI's 1.1.38. `test/typebox-pin.test.ts` fails when a PI upgrade moves this.",
+	"//devDependencies": "The PI packages match Kimchi's pinned runtime in ../kimchi, and `typebox` is pinned EXACTLY to the version that runtime pins. Testing against newer copies can pass locally while the real harness lacks the same behavior.",
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.6",
-		"@earendil-works/pi-coding-agent": "^0.80.10",
+		"@earendil-works/pi-coding-agent": "0.79.10",
+		"@earendil-works/pi-tui": "0.79.10",
 		"typebox": "1.1.38",
 		"vitest": "^4.1.10"
 	}
