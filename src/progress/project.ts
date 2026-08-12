@@ -229,9 +229,22 @@ function foldEvents(events: readonly RunEvent[]): Fold {
 				stats.questions = event.questionnaire.questions.length
 				break
 			}
+			case "interaction-requested": {
+				const stats = statsFor(fold, event.path)
+				stats.endedAt = at(event.at)
+				stats.questions = undefined
+				break
+			}
 			case "answers-provided": {
 				// The same agent loop continues (spec §8.4), so the visible clock restarts here rather than
 				// counting the wait that has just ended.
+				const stats = statsFor(fold, event.path)
+				stats.startedAt = at(event.at)
+				stats.endedAt = undefined
+				stats.questions = undefined
+				break
+			}
+			case "interaction-provided": {
 				const stats = statsFor(fold, event.path)
 				stats.startedAt = at(event.at)
 				stats.endedAt = undefined

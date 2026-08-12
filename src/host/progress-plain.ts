@@ -103,6 +103,13 @@ export function createPlainProgress(outline: Outline, write: LineWriter): PlainP
 					startedAt.set(event.path, ms(event.at))
 					write(step("run", event.path, ["answered"]))
 					break
+				case "interaction-requested":
+					write(step("wait", event.path, ["interaction"]))
+					break
+				case "interaction-provided":
+					startedAt.set(event.path, ms(event.at))
+					write(step("run", event.path, ["response provided"]))
+					break
 				case "loop-iteration": {
 					const guard = guards.get(loopKeyOf(event.path))
 					write(

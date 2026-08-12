@@ -92,7 +92,7 @@ async function settleConcurrent(
 }
 
 function toBlockedOutcome(block: PendingBlock): Extract<ExecOutcome, { kind: "blocked" }> {
-	return { kind: "blocked", path: block.path, questionnaire: block.questionnaire, conversation: block.conversation }
+	return { kind: "blocked", ...block }
 }
 
 /**
@@ -238,7 +238,9 @@ async function runForeachSequential(
 		if (results[index] !== undefined) fed = results[index]
 	}
 
-	let innerReentry: Reentry | undefined = reentry ? { path: reentry.path.slice(1), answer: reentry.answer } : undefined
+	let innerReentry: Reentry | undefined = reentry
+		? { path: reentry.path.slice(1), answer: reentry.answer, interaction: reentry.interaction }
+		: undefined
 
 	for (let index = startIndex; index < items.length; index++) {
 		if (signal.aborted) return { kind: "cancelled" }
@@ -400,7 +402,11 @@ async function runForeachConcurrentReentry(
 	}
 
 	const targetPath = appendForeachItem(parentPath, node.name, targetIndex)
-	const itemReentry: Reentry = { path: reentry.path.slice(1), answer: reentry.answer }
+	const itemReentry: Reentry = {
+		path: reentry.path.slice(1),
+		answer: reentry.answer,
+		interaction: reentry.interaction,
+	}
 	const targetOutcome = await walker.runNodeSequence(
 		node.body.nodes,
 		host,
@@ -511,7 +517,11 @@ export async function runParallelNode(
 		// own name (`parallelName/armName`) — so the re-entry path's leading segment here is still the
 		// PARALLEL's own name (already consumed by `runNodeSequence`/`matchesReentryTarget` to dispatch
 		// here in the first place); pop it to reach the ARM's own segment before matching against arms.
-		const innerReentry: Reentry = { path: reentry.path.slice(1), answer: reentry.answer }
+		const innerReentry: Reentry = {
+			path: reentry.path.slice(1),
+			answer: reentry.answer,
+			interaction: reentry.interaction,
+		}
 		return runParallelReentry(walker, node, input, host, state, signal, parallelPath, armFrames, innerReentry)
 	}
 
@@ -566,7 +576,11 @@ async function runParallelReentry(
 
 	for (const armStep of node.arms) {
 		if (armStep.name === targetName) {
-			const armReentry: Reentry = { path: reentry.path.slice(1), answer: reentry.answer }
+			const armReentry: Reentry = {
+				path: reentry.path.slice(1),
+				answer: reentry.answer,
+				interaction: reentry.interaction,
+			}
 			targetOutcome = await walker.runStepNode(armStep, input, host, state, signal, parallelPath, armFrames, armReentry)
 			continue
 		}

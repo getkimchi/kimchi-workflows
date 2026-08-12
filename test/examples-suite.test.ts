@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import approvalWorkflow from "../examples/approval.workflow.ts"
 import batchWorkflow from "../examples/batch.workflow.ts"
 import fanOutWorkflow from "../examples/fan-out.workflow.ts"
 import foreachConcurrentWorkflow from "../examples/foreach-concurrent.workflow.ts"
@@ -14,6 +15,18 @@ import { ask, createTestRun, reply } from "../src/testing/index.ts"
  * agent examples (summarize, review-loop) run live in the gated `*.integration.test.ts` suite.
  */
 describe("example suite (offline)", () => {
+	it("approval: an interactive renderer can be tested without PI UI", async () => {
+		const blocked = await createTestRun(approvalWorkflow)
+		expect(blocked.status).toBe("blocked")
+		expect(blocked.interaction).toEqual({
+			markdown: "# Proposed change\n\nAdd a deterministic, resumable approval boundary.",
+		})
+
+		const done = await blocked.respond({ decision: "approve" })
+		expect(done.status).toBe("completed")
+		expect(done.output).toEqual({ decision: "approve" })
+	})
+
 	it("hello: a single function step", async () => {
 		const run = await createTestRun(helloWorkflow)
 		expect(run.status).toBe("completed")

@@ -165,6 +165,12 @@ export type RunEvent =
 	  }
 	// The user's structured answers (question `key` → value); resume delivers them back (spec §8.4).
 	| { type: "answers-provided"; runId: string; path: string; answers: Record<string, unknown>; at: string }
+	// A workflow-defined interaction suspension. `request` is the exact validated, JSON-serializable
+	// value the attended host must render; it is persisted so a later process never has to recompute it.
+	| { type: "interaction-requested"; runId: string; path: string; request: unknown; violation?: string; at: string }
+	// A candidate response submitted by an attended or offline host. The engine validates it against the
+	// interactive step's current output schema before completing the step.
+	| { type: "interaction-provided"; runId: string; path: string; response: unknown; at: string }
 	// Drain-then-crash (spec §9.5): a SIBLING step crashed elsewhere in the same concurrent construct
 	// (`.parallel`/`.foreach`, spec §3.4/§3.5), and this step — `blocked`, waiting on a human — is not
 	// drained: its pending question drops and it is recorded `cancelled` directly, rather than waiting
@@ -364,6 +370,8 @@ export interface RunResult {
 	readonly error?: string
 	/** Present when `blocked`: the questionnaire batch the step asked, and the step that asked it. */
 	readonly questionnaire?: Questionnaire
+	/** Present when an interactive step is `blocked`: its exact persisted request. */
+	readonly interaction?: unknown
 	/** The step's full node path (spec §8.5) — present when `blocked`, and when `crashed`/`cancelled` named a step. */
 	readonly path?: string
 	/** Present when a questionnaire step RE-blocked: why the delivered answers were rejected (spec §2.4). */

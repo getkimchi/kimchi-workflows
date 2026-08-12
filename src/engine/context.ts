@@ -14,11 +14,19 @@ import type { HostPort } from "./types.ts"
  * as it was — not restarted, not silently dropped — and report whichever remains next once the target
  * settles. `path` is the step's full DYNAMIC path (needed to navigate back into it later).
  */
-export interface PendingBlock {
-	readonly path: string
-	readonly questionnaire: Questionnaire
-	readonly conversation: readonly unknown[]
-}
+export type PendingBlock =
+	| {
+			readonly blockKind: "questionnaire"
+			readonly path: string
+			readonly questionnaire: Questionnaire
+			readonly conversation: readonly unknown[]
+	  }
+	| {
+			readonly blockKind: "interaction"
+			readonly path: string
+			readonly request: unknown
+			readonly violation?: string
+	  }
 
 /** Immutable run identity + the mutable shared run context (`stepOutputs`) threaded through the node tree. */
 export interface RunState {
@@ -140,9 +148,17 @@ export type ExecOutcome =
 	| { kind: "cancelled"; path?: string }
 	| {
 			kind: "blocked"
+			blockKind: "questionnaire"
 			path: string
 			questionnaire: Questionnaire
 			conversation: readonly unknown[]
+			violation?: string
+	  }
+	| {
+			kind: "blocked"
+			blockKind: "interaction"
+			path: string
+			request: unknown
 			violation?: string
 	  }
 
@@ -165,6 +181,12 @@ export interface AnswerResume {
 	readonly tokensUsed?: number
 }
 
+/** Exact request + candidate response used to resume one interactive step. */
+export interface InteractionResume {
+	readonly request: unknown
+	readonly response: unknown
+}
+
 /**
  * Deep re-entry (spec §8.5): `path` is the REMAINING node-path segments from "here" down to the
  * blocked step, each construct popping its own leading segment before recursing into its
@@ -178,6 +200,7 @@ export interface AnswerResume {
 export interface Reentry {
 	readonly path: NodePath
 	readonly answer?: AnswerResume
+	readonly interaction?: InteractionResume
 }
 
 /**

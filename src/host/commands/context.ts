@@ -148,7 +148,7 @@ export function notifyResult(ctx: NotifyCtx, workflowName: string, result: RunRe
 	} else if (result.status === "cancelled") {
 		ctx.ui.notify(`workflow "${workflowName}" cancelled (run ${result.runId}); resume to continue.`, "warning")
 	} else if (result.status === "blocked") {
-		ctx.ui.notify(`workflow "${workflowName}" blocked (run ${result.runId}) awaiting answers.`, "info")
+		ctx.ui.notify(`workflow "${workflowName}" blocked (run ${result.runId}) awaiting user input.`, "info")
 	} else {
 		ctx.ui.notify(`workflow "${workflowName}" crashed (run ${result.runId}): ${result.error}`, "error")
 	}

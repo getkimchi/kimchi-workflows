@@ -1,5 +1,7 @@
 export type { CreateAgentStepOptions } from "./create-agent-step.ts"
 export { createAgentStep } from "./create-agent-step.ts"
+export type { CreateInteractiveStepOptions } from "./create-interactive-step.ts"
+export { createInteractiveStep } from "./create-interactive-step.ts"
 export type { CreateQuestionnaireStepOptions } from "./create-questionnaire-step.ts"
 export { createQuestionnaireStep } from "./create-questionnaire-step.ts"
 export type { CreateStepOptions } from "./create-step.ts"
@@ -43,6 +45,9 @@ export type {
 	ForeachNode,
 	ForeachSelector,
 	FunctionStep,
+	InteractionRenderArgs,
+	InteractionRequestArgs,
+	InteractiveStep,
 	LoopCondition,
 	LoopNode,
 	MapFn,

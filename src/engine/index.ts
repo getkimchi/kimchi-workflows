@@ -1,7 +1,7 @@
 export { describeSchemaViolations } from "../flow/validation.ts"
 export { buildCorrectionMessage } from "./agent-output.ts"
 export type { ExecOutcome, PendingBlock, RunState } from "./context.ts"
-export type { AnswerResume, ExecutionCursor, Reentry } from "./execute.ts"
+export type { AnswerResume, ExecutionCursor, InteractionResume, Reentry } from "./execute.ts"
 export { execute } from "./execute.ts"
 export type { IndexKind, NodePath, PathSegment } from "./node-path.ts"
 export {
@@ -24,7 +24,15 @@ export {
 	submitQuestionsParameters,
 	submitResultParameters,
 } from "./output-tools.ts"
-export { pendingQuestionnaires, resumeWithAnswer, resumeWorkflow } from "./resume-workflow.ts"
+export {
+	pendingHumanInputs,
+	pendingInteractions,
+	pendingQuestionnaires,
+	resolveStepAtStaticPath,
+	resumeWithAnswer,
+	resumeWithInteraction,
+	resumeWorkflow,
+} from "./resume-workflow.ts"
 export type { RunStatus } from "./run-status.ts"
 export { currentStepName, deriveRunStatus, pendingQuestionCount } from "./run-status.ts"
 export { runWorkflow } from "./run-workflow.ts"

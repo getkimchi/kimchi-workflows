@@ -1,9 +1,10 @@
 /**
- * Flow layer (workflow-definition API) — pure data shapes for workflows and steps.
+ * Flow layer (workflow-definition API) — data shapes and author callbacks for workflows and steps.
  *
- * No host, filesystem, or network dependencies. Everything here is plain
- * data + function signatures that the engine (src/engine) interprets.
+ * PI appears only as a type for interactive render callbacks. The deterministic engine neither imports
+ * PI at runtime nor invokes those callbacks; an attended host does so after execution returns blocked.
  */
+import type { ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent"
 import type { TSchema } from "typebox"
 import type { Questionnaire } from "./questionnaire.ts"
 
@@ -89,6 +90,33 @@ export interface StepRunArgs<TInput> {
 }
 
 export type StepRunFn<TInput, TOutput> = (args: StepRunArgs<TInput>) => TOutput | Promise<TOutput>
+
+/** Pure arguments used to build the serializable request for an interactive step. */
+export interface InteractionRequestArgs<TInput> {
+	readonly input: TInput
+	readonly ctx: RunContext
+}
+
+/**
+ * Host capabilities exposed to an interactive step's renderer.
+ *
+ * @remarks
+ * The engine never constructs this object and never calls the renderer. An attended PI host resolves
+ * the blocked step from the reloaded workflow definition and invokes it after the engine has returned
+ * `blocked`, so no workflow lock or concurrency slot is held while a person is deciding.
+ */
+export interface InteractionRenderArgs<TRequest> {
+	/** The exact JSON-serializable request persisted in the run log when the step blocked. */
+	readonly request: TRequest
+	/** PI's UI surface from the currently-attended command context. */
+	readonly ui: ExtensionUIContext
+	/** PI execution mode, useful when a renderer needs a text fallback outside the TUI. */
+	readonly mode: ExtensionContext["mode"]
+	/** Whether the current host has an interactive UI capable of answering dialogs. */
+	readonly hasUI: boolean
+	/** Plain-text output for headless modes. */
+	readonly write: (message: string) => void
+}
 
 /**
  * A `.map()` transform (spec §3.7): derives the next step's input purely from the run context —
@@ -284,8 +312,24 @@ export interface QuestionnaireStep extends StepBase {
 	readonly questionnaire?: Questionnaire
 }
 
+/**
+ * A deterministic, resumable boundary between workflow execution and a workflow-defined PI UI.
+ *
+ * The engine calls only `buildRequest`, validates and persists its result, then returns `blocked`.
+ * The attended host later calls `render` with that exact request. A returned value is schema-validated
+ * by the engine and becomes the step output; `undefined` means the user dismissed the interaction and
+ * leaves the step blocked.
+ */
+export interface InteractiveStep extends StepBase {
+	readonly kind: "interactive"
+	readonly requestSchema: TSchema
+	readonly outputSchema: TSchema
+	readonly buildRequest: (args: InteractionRequestArgs<unknown>) => unknown
+	readonly render: (args: InteractionRenderArgs<unknown>) => unknown | undefined | Promise<unknown | undefined>
+}
+
 /** A step at rest is one of the step kinds; the engine branches on `kind`. */
-export type StepDefinition = FunctionStep | AgentStep | QuestionnaireStep
+export type StepDefinition = FunctionStep | AgentStep | QuestionnaireStep | InteractiveStep
 
 /**
  * A pure branch predicate over the run context; it must be side-effect-free to keep transitions deterministic.

@@ -24,6 +24,8 @@ import type { HostPort, RunEvent, RunOptions, RunResult } from "./types.ts"
 
 type RunStartedEvent = Extract<RunEvent, { type: "run-started" }>
 type QuestionnaireAskedEvent = Extract<RunEvent, { type: "questionnaire-asked" }>
+type InteractionRequestedEvent = Extract<RunEvent, { type: "interaction-requested" }>
+type HumanInputRequestedEvent = QuestionnaireAskedEvent | InteractionRequestedEvent
 
 export async function resumeWorkflow(
 	workflow: WorkflowDefinition,
@@ -102,7 +104,10 @@ export async function resumeWithAnswer(
 	const started = requireRunStarted(priorEvents)
 	const { runId, input: initialInput } = started
 
-	const allPending = pendingQuestionnaires(priorEvents)
+	const allPendingHuman = pendingHumanInputs(priorEvents)
+	const allPending = allPendingHuman.filter(
+		(event): event is QuestionnaireAskedEvent => event.type === "questionnaire-asked",
+	)
 	const pending =
 		options.path === undefined
 			? (allPending[0] ?? lastQuestionnaireAsked(priorEvents))
@@ -135,13 +140,9 @@ export async function resumeWithAnswer(
 	// untouched rather than restarting or dropping them, and reports the next one if still pending once
 	// the target settles. Keyed by static key, matching how execute.ts looks them up.
 	const pendingBlocks = new Map<string, PendingBlock>()
-	for (const entry of allPending) {
+	for (const entry of allPendingHuman) {
 		if (entry.path === pending.path) continue
-		pendingBlocks.set(staticKeyOf(parsePath(entry.path)), {
-			path: entry.path,
-			questionnaire: entry.questionnaire,
-			conversation: entry.conversation,
-		})
+		pendingBlocks.set(staticKeyOf(parsePath(entry.path)), pendingBlockFromEvent(entry))
 	}
 
 	await host.emit({ type: "answers-provided", runId, path: pending.path, answers, at: iso(host) })
@@ -168,6 +169,73 @@ export async function resumeWithAnswer(
 			previousOutput: initialInput,
 			startIndex: 0,
 			foreachItemHistory,
+			reentry,
+			pendingBlocks,
+		},
+		options.signal,
+	)
+}
+
+/**
+ * Resume one workflow-defined interaction with a candidate response. The exact persisted request is
+ * carried into re-entry; neither request construction nor PI rendering happens inside the engine.
+ */
+export async function resumeWithInteraction(
+	workflow: WorkflowDefinition,
+	priorEvents: readonly RunEvent[],
+	response: unknown,
+	host: HostPort,
+	options: RunOptions & { path?: string } = {},
+): Promise<RunResult> {
+	const started = requireRunStarted(priorEvents)
+	const { runId, input: initialInput } = started
+	const allPendingHuman = pendingHumanInputs(priorEvents)
+	const allPending = allPendingHuman.filter(
+		(event): event is InteractionRequestedEvent => event.type === "interaction-requested",
+	)
+	const pending =
+		options.path === undefined
+			? (allPending[0] ?? lastInteractionRequested(priorEvents))
+			: findInteractionAt(priorEvents, options.path)
+	if (!pending) {
+		throw new Error(
+			options.path === undefined
+				? "cannot respond: the run is not blocked (no pending interaction in the log)"
+				: `cannot respond: "${options.path}" never requested an interaction in this run's log`,
+		)
+	}
+
+	const settled = settledAfter(priorEvents, pending)
+	if (settled) {
+		throw new Error(`cannot respond to run ${runId}: it was ${settled} after blocking; responding would undo that`)
+	}
+
+	const stepOutputs = rebuildStepOutputs(priorEvents)
+	const drift = await checkDrift(workflow, priorEvents, stepOutputs, runId, host)
+	if (drift) return drift
+
+	const pendingBlocks = new Map<string, PendingBlock>()
+	for (const entry of allPendingHuman) {
+		if (entry.path === pending.path) continue
+		pendingBlocks.set(staticKeyOf(parsePath(entry.path)), pendingBlockFromEvent(entry))
+	}
+
+	await host.emit({ type: "interaction-provided", runId, path: pending.path, response, at: iso(host) })
+	const reentry: Reentry = {
+		path: parsePath(pending.path),
+		interaction: { request: pending.request, response },
+	}
+
+	return execute(
+		workflow,
+		host,
+		{
+			runId,
+			initialInput,
+			stepOutputs,
+			previousOutput: initialInput,
+			startIndex: 0,
+			foreachItemHistory: buildForeachItemHistory(priorEvents),
 			reentry,
 			pendingBlocks,
 		},
@@ -274,7 +342,11 @@ function completedStepKeys(priorEvents: readonly RunEvent[]): string[] {
 			const key = staticKeyOf(parsePath(event.path))
 			if (!completed.has(key)) ordered.push(key)
 			completed.add(key)
-		} else if (event.type === "step-started" || event.type === "questionnaire-asked") {
+		} else if (
+			event.type === "step-started" ||
+			event.type === "questionnaire-asked" ||
+			event.type === "interaction-requested"
+		) {
 			completed.delete(staticKeyOf(parsePath(event.path)))
 		}
 	}
@@ -282,7 +354,7 @@ function completedStepKeys(priorEvents: readonly RunEvent[]): string[] {
 }
 
 /** Resolve the step definition at a STATIC path (bare names only — indices already stripped by the caller) in the current tree, or undefined. */
-function resolveStepAtStaticPath(
+export function resolveStepAtStaticPath(
 	nodes: readonly WorkflowNode[],
 	segments: readonly string[],
 ): StepDefinition | undefined {
@@ -324,16 +396,37 @@ function resolveAtNode(node: WorkflowNode, head: string, rest: readonly string[]
  */
 function settledAfter(
 	priorEvents: readonly RunEvent[],
-	pending: QuestionnaireAskedEvent,
-): "cancelled" | "completed" | "crashed" | undefined {
+	pending: HumanInputRequestedEvent,
+): "cancelled" | "completed" | "crashed" | "resumed" | undefined {
 	const blockedAt = priorEvents.lastIndexOf(pending)
 	for (const event of priorEvents.slice(blockedAt + 1)) {
 		if (event.type === "run-cancelled") return "cancelled"
 		if (event.type === "run-completed") return "completed"
 		if (event.type === "run-crashed") return "crashed"
 		if (event.type === "step-cancelled" && event.path === pending.path) return "cancelled"
+		if (event.type === "step-completed" && event.path === pending.path) return "completed"
+		if (event.type === "step-failed" && event.path === pending.path) return "crashed"
+		if ((event.type === "answers-provided" || event.type === "interaction-provided") && event.path === pending.path) {
+			return "resumed"
+		}
 	}
 	return undefined
+}
+
+function lastInteractionRequested(priorEvents: readonly RunEvent[]): InteractionRequestedEvent | undefined {
+	let pending: InteractionRequestedEvent | undefined
+	for (const event of priorEvents) {
+		if (event.type === "interaction-requested") pending = event
+	}
+	return pending
+}
+
+function findInteractionAt(priorEvents: readonly RunEvent[], path: string): InteractionRequestedEvent | undefined {
+	let found: InteractionRequestedEvent | undefined
+	for (const event of priorEvents) {
+		if (event.type === "interaction-requested" && event.path === path) found = event
+	}
+	return found
 }
 
 /** The single latest `questionnaire-asked` event in the WHOLE log, regardless of path or current state. */
@@ -367,15 +460,29 @@ function findAskedAt(priorEvents: readonly RunEvent[], path: string): Questionna
  * `resumeWithAnswer`'s own default (`path` omitted) targets.
  */
 export function pendingQuestionnaires(priorEvents: readonly RunEvent[]): QuestionnaireAskedEvent[] {
+	return pendingHumanInputs(priorEvents).filter(
+		(event): event is QuestionnaireAskedEvent => event.type === "questionnaire-asked",
+	)
+}
+
+/** Every workflow-defined interaction currently blocked, in FIFO request order. */
+export function pendingInteractions(priorEvents: readonly RunEvent[]): InteractionRequestedEvent[] {
+	return pendingHumanInputs(priorEvents).filter(
+		(event): event is InteractionRequestedEvent => event.type === "interaction-requested",
+	)
+}
+
+/** All current human-input blocks, regardless of kind, in their event-log FIFO order. */
+export function pendingHumanInputs(priorEvents: readonly RunEvent[]): HumanInputRequestedEvent[] {
 	const states = deriveStepStates(priorEvents)
-	const latestByKey = new Map<string, { event: QuestionnaireAskedEvent; index: number }>()
+	const latestByKey = new Map<string, { event: HumanInputRequestedEvent; index: number }>()
 	priorEvents.forEach((event, index) => {
-		if (event.type === "questionnaire-asked") {
+		if (event.type === "questionnaire-asked" || event.type === "interaction-requested") {
 			latestByKey.set(staticKeyOf(parsePath(event.path)), { event, index })
 		}
 	})
 
-	const pending: { event: QuestionnaireAskedEvent; index: number }[] = []
+	const pending: { event: HumanInputRequestedEvent; index: number }[] = []
 	for (const [key, state] of states) {
 		if (state !== "blocked") continue
 		const entry = latestByKey.get(key)
@@ -383,6 +490,22 @@ export function pendingQuestionnaires(priorEvents: readonly RunEvent[]): Questio
 	}
 	pending.sort((a, b) => a.index - b.index)
 	return pending.map((entry) => entry.event)
+}
+
+function pendingBlockFromEvent(event: HumanInputRequestedEvent): PendingBlock {
+	return event.type === "questionnaire-asked"
+		? {
+				blockKind: "questionnaire",
+				path: event.path,
+				questionnaire: event.questionnaire,
+				conversation: event.conversation,
+			}
+		: {
+				blockKind: "interaction",
+				path: event.path,
+				request: event.request,
+				violation: event.violation,
+			}
 }
 
 /** The name of a static key's ROOT segment — the top-level node it belongs to (`each@0/inner` → `each`). */

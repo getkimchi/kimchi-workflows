@@ -11,8 +11,14 @@
  * `extension.ts` holds only argument dispatch; each handler takes the narrowest context it needs, so
  * all of them are testable without a PI session.
  */
-export type { PendingAsk } from "./attended.ts"
-export { askOf, handleAttendedQuestionnaire, pendingAsk } from "./attended.ts"
+export type { PendingAsk, PendingHumanInput, PendingInteraction } from "./attended.ts"
+export {
+	askOf,
+	handleAttendedInput,
+	humanInputOf,
+	pendingAsk,
+	pendingHumanInput,
+} from "./attended.ts"
 export type { CommandCtx, Notify, NotifyCtx, StartAgent } from "./context.ts"
 export { describe, notifier, notifyResult, rejectIfBusy, reportResult, runGuarded } from "./context.ts"
 export { handleCancel, handleDelete } from "./lifecycle.ts"

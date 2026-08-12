@@ -3,7 +3,7 @@ import path from "node:path"
 import { Value } from "typebox/value"
 import { describe, expect, it } from "vitest"
 import { parsePath, staticKeyOf } from "../src/engine/node-path.ts"
-import { resumeWithAnswer } from "../src/engine/resume-workflow.ts"
+import { resumeWithAnswer, resumeWithInteraction } from "../src/engine/resume-workflow.ts"
 import { runWorkflow } from "../src/engine/run-workflow.ts"
 import type { RunResult } from "../src/engine/types.ts"
 import type { Question, Questionnaire } from "../src/flow/questionnaire.ts"
@@ -95,14 +95,30 @@ async function createWorkflowE2E(
 	while (result.status === "blocked" && rounds < MAX_ROUNDS) {
 		rounds += 1
 		const questionnaire = result.questionnaire
-		if (!questionnaire) throw new Error("blocked with no questionnaire")
+		if (!questionnaire && result.interaction === undefined) throw new Error("blocked with no human input")
+
+		if (result.interaction !== undefined) {
+			console.log(`[create-e2e ${model}] round ${rounds} @ ${result.path}: approve proposed plan`)
+			const started = Date.now()
+			result = await resumeWithInteraction(
+				underTest,
+				await store.loadEvents(result.runId),
+				{ decision: "approve" },
+				host,
+				{ path: result.path },
+			)
+			console.log(
+				`[create-e2e ${model}]   round ${rounds} took ${Math.round((Date.now() - started) / 1000)}s → ${result.status}`,
+			)
+			continue
+		}
 
 		// The opening form is the only step whose answers must be exact; the rest are auto-answered.
-		const answers = result.path === "brief" ? { goal: GOAL, fileName } : autoAnswer(questionnaire)
+		const answers = result.path === "brief" ? { goal: GOAL, fileName } : autoAnswer(questionnaire as Questionnaire)
 
 		console.log(
 			`[create-e2e ${model}] round ${rounds} @ ${result.path}:`,
-			questionnaire.questions.map((q) => q.key).join(", "),
+			(questionnaire as Questionnaire).questions.map((q) => q.key).join(", "),
 		)
 		const started = Date.now()
 		result = await resumeWithAnswer(underTest, await store.loadEvents(result.runId), answers, host)

@@ -9,28 +9,36 @@
  *   brief          questionnaire step — what to build, and what to call the file
  *   target         function            — settle the destination, failing fast on a bad or taken name
  *   review         loop (.dountil)     — design proposes/revises a plan; approve asks approve/revise
- *     design         Q&A agent           — interview → propose (or revise) a plan
- *     approve        questionnaire       — approve this plan, or ask for changes
+ *     design         Q&A agent           — interview → propose (or revise) a blueprint
+ *     plan-document  function            — deterministically render blueprint Markdown
+ *     approve        interactive         — show Markdown and collect approve/revise feedback
  *   scaffold       function            — reserve the final entry path with a deterministic starter module
  *   until-valid    loop                — edit files in place, validate the entry graph, retry on failure
  *   complete       function            — report the already-written, validated entry path
  *
- * A block is now legal anywhere in the tree (spec §8.5), so the Approve/Revise cycle is an ordinary
- * `.dountil` loop around a real questionnaire step, rather than a whole interview crammed into one
- * agent step re-batching internally — this is the phase's proof that re-entry into a blocked loop
- * iteration works.
+ * The approval step persists its exact plan document and lets the attended host render it through PI
+ * after the engine releases the project lock. Revision is still an ordinary `.dountil` iteration.
  */
 import { existsSync } from "node:fs"
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
+import { getMarkdownTheme } from "@earendil-works/pi-coding-agent"
+import { Markdown } from "@earendil-works/pi-tui"
 import { type Static, Type } from "typebox"
-import { createAgentStep, createQuestionnaireStep, createStep, createWorkflow } from "../../flow/index.ts"
-import type { RunContext } from "../../flow/types.ts"
+import {
+	createAgentStep,
+	createInteractiveStep,
+	createQuestionnaireStep,
+	createStep,
+	createWorkflow,
+} from "../../flow/index.ts"
+import type { InteractionRenderArgs, RunContext } from "../../flow/types.ts"
 import { WORKFLOW_SUFFIX } from "../load-workflow.ts"
 import { validateWorkflowFile } from "../workflow-candidate-validator.ts"
 import {
 	describeSourceConformance,
 	renderAuthoringGuide,
+	renderWorkflowPlan,
 	renderWorkflowScaffold,
 	type WorkflowBlueprint,
 	workflowBlueprintSchema,
@@ -59,13 +67,19 @@ const briefSchema = Type.Object({
 	}),
 })
 
-/** The Approve/Revise decision (spec §6.6) — a plain questionnaire, since it only ever collects a choice + optional feedback. */
+/** The Approve/Revise response returned by the workflow-defined PI renderer. */
 const approveSchema = Type.Object({
 	decision: Type.Union([Type.Literal("approve"), Type.Literal("revise")], {
 		title: "Decision",
 		description: "Approve the plan above, or ask for changes?",
 	}),
 	feedback: Type.Optional(Type.String({ title: "Feedback", description: "If revising, what should change?" })),
+})
+
+/** Exact review payload persisted in the interaction event and rendered again after process restart. */
+const planDocumentSchema = Type.Object({
+	blueprint: specSchema,
+	markdown: Type.String(),
 })
 
 const generatedFilesSchema = Type.Object({
@@ -162,16 +176,70 @@ const design = createAgentStep({
 	},
 })
 
+/** Step 3b — deterministically turn the structured blueprint into the exact Markdown to review. */
+const planDocument = createStep({
+	name: "plan-document",
+	description: "Render the proposed workflow as Markdown without another model turn",
+	input: specSchema,
+	output: planDocumentSchema,
+	run: ({ input }) => ({ blueprint: input, markdown: renderWorkflowPlan(input) }),
+})
+
+const PLAN_WIDGET_KEY = "workflow-create-plan-review"
+
 /**
- * Step 3b — present the plan for approval (spec §6.6). A plain questionnaire: `design`'s own agent
- * turn already surfaced the plan in the session, so this only needs to collect the decision. Blocking
- * here is legal precisely because a Q&A step may now sit inside a loop (spec §8.5) — resume re-enters
- * this exact iteration and continues, rather than restarting the whole interview.
+ * PI 0.79.10 plan review: Markdown remains visible in a transient widget while native selection and
+ * multiline editor dialogs collect the decision. `select` is used instead of `confirm`, whose false
+ * result cannot distinguish rejection from dismissal.
  */
-const approve = createQuestionnaireStep({
+export async function renderPlanReview({
+	request,
+	ui,
+	mode,
+	hasUI,
+	write,
+}: InteractionRenderArgs<Static<typeof planDocumentSchema>>) {
+	const plan = request
+	if (!hasUI) {
+		write(plan.markdown)
+		write("This workflow is waiting for approval. Resume it in TUI or RPC mode to respond.")
+		return undefined
+	}
+
+	try {
+		if (mode === "tui") {
+			ui.setWidget(PLAN_WIDGET_KEY, () => new Markdown(plan.markdown, 1, 0, getMarkdownTheme()), {
+				placement: "aboveEditor",
+			})
+		} else {
+			// RPC/ACP transports serialize widget lines; component factories exist only inside the TUI.
+			ui.setWidget(PLAN_WIDGET_KEY, plan.markdown.split("\n"), { placement: "aboveEditor" })
+		}
+		const decision = await ui.select("Review proposed workflow", ["Approve", "Revise"])
+		if (decision === undefined) return undefined
+		if (decision === "Approve") return { decision: "approve" as const }
+		if (decision !== "Revise") return undefined
+		for (;;) {
+			const feedback = await ui.editor("What should change?", "")
+			if (feedback === undefined) return undefined
+			const trimmed = feedback.trim()
+			if (trimmed) return { decision: "revise" as const, feedback: trimmed }
+			ui.notify("Revision feedback cannot be empty.", "warning")
+		}
+	} finally {
+		ui.setWidget(PLAN_WIDGET_KEY, undefined)
+	}
+}
+
+/** Step 3c — block on the exact plan document and let the attended host invoke the renderer above. */
+const approve = createInteractiveStep({
 	name: "approve",
 	description: "Approve the plan design just proposed, or ask for changes",
+	input: planDocumentSchema,
+	request: planDocumentSchema,
 	output: approveSchema,
+	buildRequest: ({ input }) => input,
+	render: renderPlanReview,
 })
 
 /**
@@ -192,13 +260,18 @@ const reviewOutcome = createStep({
 	input: approveSchema,
 	output: reviewOutcomeSchema,
 	run: ({ input, ctx }) => {
-		const plan = ctx.getStepResult<WorkflowBlueprint>("design")
-		if (!plan) throw new Error("review-outcome: the design step produced no plan")
-		return { decision: input.decision, feedback: input.feedback, plan }
+		const document = ctx.getStepResult<Static<typeof planDocumentSchema>>("plan-document")
+		if (!document) throw new Error("review-outcome: the plan-document step produced no plan")
+		return { decision: input.decision, feedback: input.feedback, plan: document.blueprint }
 	},
 })
 
-const reviewBody = createWorkflow({ name: "review-body" }).then(design).then(approve).then(reviewOutcome).commit()
+const reviewBody = createWorkflow({ name: "review-body" })
+	.then(design)
+	.then(planDocument)
+	.then(approve)
+	.then(reviewOutcome)
+	.commit()
 
 /**
  * Step 4 — claim the final entry path and put the deterministic scaffold there.

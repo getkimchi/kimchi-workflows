@@ -108,7 +108,7 @@ describe("handleListRuns", () => {
 		await handleListRuns({ ui: { notify: spy.notify } }, { list: () => Promise.resolve(runs) })
 		expect(spy.notes).toEqual([
 			[
-				"a1  survey  completed  step=-  started=T0  completed=T1\nb2  plan  blocked  step=ask  started=T2  completed=-  questions=1",
+				"a1  survey  completed  step=-  started=T0  completed=T1\nb2  plan  blocked  step=ask  started=T2  completed=-  waiting=1",
 				"info",
 			],
 		])

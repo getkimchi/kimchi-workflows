@@ -292,6 +292,8 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 			//  - node/branch/loop/foreach structure is a run-log analysis, not a telemetry query (spec R4).
 			case "questionnaire-asked":
 			case "answers-provided":
+			case "interaction-requested":
+			case "interaction-provided":
 			case "agent-steer":
 			case "run-meta":
 			case "step-log":

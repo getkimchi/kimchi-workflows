@@ -110,6 +110,20 @@ const SAMPLES: { [K in RunEvent["type"]]: Extract<RunEvent, { type: K }> } = {
 		answers: { env: SENTINEL, tags: SENTINEL },
 		at: AT,
 	},
+	"interaction-requested": {
+		type: "interaction-requested",
+		runId: RUN_ID,
+		path: "review-plan",
+		request: { markdown: SENTINEL },
+		at: AT,
+	},
+	"interaction-provided": {
+		type: "interaction-provided",
+		runId: RUN_ID,
+		path: "review-plan",
+		response: { decision: SENTINEL },
+		at: AT,
+	},
 	"run-completed": { type: "run-completed", runId: RUN_ID, output: { secret: SENTINEL }, at: AT },
 	"run-crashed": {
 		type: "run-crashed",
@@ -137,6 +151,8 @@ const EXPECTED_EVENTS: { [K in RunEvent["type"]]: WorkflowEventType | undefined 
 	// observed (its kind resolves the retry reason that follows) but never published itself.
 	"questionnaire-asked": undefined,
 	"answers-provided": undefined,
+	"interaction-requested": undefined,
+	"interaction-provided": undefined,
 	"agent-error": undefined,
 	"agent-steer": undefined,
 	"run-meta": undefined,

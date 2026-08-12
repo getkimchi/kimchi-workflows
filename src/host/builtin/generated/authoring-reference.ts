@@ -12,6 +12,7 @@ export type AuthoringCapability =
 	| "branch"
 	| "workflow"
 	| "advanced-agent"
+	| "interactive"
 
 export interface GeneratedAuthoringEntry {
 	readonly symbol: string
@@ -254,6 +255,21 @@ export const GENERATED_AUTHORING_REFERENCE: Readonly<Record<AuthoringCapability,
 					"interface CreateStepOptions<TInputSchema extends TSchema | undefined = undefined, TOutputSchema extends TSchema | undefined = undefined> { name: string description?: string input?: TInputSchema output?: TOutputSchema retry?: RetryPolicy maxDurationMs?: number | ((args: { ctx: RunContext }) => number) optional?: boolean run: StepRunFn<InferInput<TInputSchema>, InferOutput<TOutputSchema>> }",
 				documentation:
 					"Configuration shared by a function step, including retry, duration, and optional-failure controls.\n\nRemarks: `retry.maxRetry` counts attempts after the first. `optional` should only be used when downstream\nnodes do not require this step's output, because a final failure produces `undefined`.",
+			},
+		],
+		interactive: [
+			{
+				symbol: "CreateInteractiveStepOptions",
+				signature:
+					"interface CreateInteractiveStepOptions<TInputSchema extends TSchema | undefined, TRequestSchema extends TSchema, TOutputSchema extends TSchema> { name: string description?: string input?: TInputSchema request: TRequestSchema output: TOutputSchema buildRequest: (args: InteractionRequestArgs<InferInput<TInputSchema>>) => Static<TRequestSchema> render: ( args: InteractionRenderArgs<Static<TRequestSchema>>, ) => Static<TOutputSchema> | undefined | Promise<Static<TOutputSchema> | undefined> }",
+				documentation: "Configuration for a workflow-defined interaction rendered by the attended PI host.",
+			},
+			{
+				symbol: "createInteractiveStep",
+				signature:
+					"createInteractiveStep<TInputSchema extends TSchema | undefined = undefined, TRequestSchema extends TSchema = TSchema, TOutputSchema extends TSchema = TSchema>(options: CreateInteractiveStepOptions<TInputSchema, TRequestSchema, TOutputSchema>): InteractiveStep",
+				documentation:
+					"Create a resumable interactive step whose request and response types are inferred from TypeBox.\n\nThe engine remains UI-free: it persists the request and returns `blocked`. Only an attended host\ninvokes `render`, after the engine call has ended. Offline callers can inspect the pending request\nand submit a response directly without loading PI UI.",
 			},
 		],
 	}

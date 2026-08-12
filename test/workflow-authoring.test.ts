@@ -7,6 +7,7 @@ import {
 	authoringSchemas,
 	describeSourceConformance,
 	renderAuthoringGuide,
+	renderWorkflowPlan,
 	renderWorkflowScaffold,
 	type WorkflowBlueprint,
 } from "../src/host/builtin/workflow-authoring.ts"
@@ -49,7 +50,10 @@ const blueprint: WorkflowBlueprint = {
 			mode: "report",
 			background: true,
 			maxTokens: 2_000,
-			retry: { maxRetry: 1 },
+			maxOutputRepairs: 3,
+			maxDurationMs: 30_000,
+			resumable: "research-session",
+			retry: { maxRetry: 1, backoffMs: 250 },
 		},
 		{ kind: "map", name: "to-item", purpose: "convert research into one work item", sources: ["research"] },
 		{
@@ -68,6 +72,7 @@ const blueprint: WorkflowBlueprint = {
 			name: "each-item",
 			purpose: "process every selected item",
 			concurrency: 2,
+			feedback: false,
 			body: {
 				name: "item-body",
 				nodes: [
@@ -142,6 +147,26 @@ describe("workflow creation authoring contract", () => {
 		expect(guide).toContain("WorkflowBuilder.workflow(subWorkflow: WorkflowDefinition")
 		expect(guide).toContain("An acting agent omits `output`")
 		expect(guide).toContain("```ts\ncreateAgentStep<")
+	})
+
+	it("renders readable recursive Markdown with configured data flow and execution policies", () => {
+		const markdown = renderWorkflowPlan(blueprint)
+
+		expect(markdown).toContain("# Proposed workflow: `full-authoring-surface`")
+		expect(markdown).toContain("## Flow")
+		expect(markdown).toContain("**until-reviewed** — dountil loop")
+		expect(markdown).toContain("**review** — agent (act)")
+		expect(markdown).toContain("**publish** — function")
+		expect(markdown).toContain("Input source: `previous`")
+		expect(markdown).toContain("Retry policy: 1 retries, 250 ms backoff")
+		expect(markdown).toContain("Wall-time budget: 30000 ms")
+		expect(markdown).toContain("Output repair limit: 3")
+		expect(markdown).toContain("Token budget: 2000")
+		expect(markdown).toContain("Background: yes")
+		expect(markdown).toContain("Resumable conversation: `research-session`")
+		expect(markdown).toContain("Sequential feedback: disabled")
+		expect(markdown).toContain("Optional: yes")
+		expect(markdown).not.toContain('"nodes"')
 	})
 
 	it("renders a loadable scaffold for every construct and detects unfinished placeholders", async () => {
