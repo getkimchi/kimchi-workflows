@@ -1,11 +1,11 @@
 import type { AgentEndEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "../src/engine/output-tools.ts"
 import { resumeWithAnswer } from "../src/engine/resume-workflow.ts"
 import { runWorkflow } from "../src/engine/run-workflow.ts"
 import { createAgentStep, createWorkflow } from "../src/flow/index.ts"
-import { createPiAgentBridge } from "../src/host/pi-agent.ts"
+import { createPiAgentBridge, type PiAgentControl } from "../src/host/pi-agent.ts"
 import type { ModelRegistry } from "../src/host/pi-agent-messages.ts"
 import { scriptedSubagent } from "./fake-subagent.ts"
 import { agentRequest, createTestHost, tempSessionsDir } from "./helpers.ts"
@@ -102,6 +102,41 @@ const hiddenMessage = (content: string): SentMessage => ({
 	message: { customType: "kimchi-workflow-agent", content, display: false },
 	options: { triggerTurn: true },
 })
+
+function fakeAgentControl(initialIdle = false) {
+	let idle = initialIdle
+	let pendingMessages = false
+	let abortCalls = 0
+	const idleWaiters: Array<() => void> = []
+	const control = {
+		abort: () => {
+			abortCalls++
+		},
+		hasPendingMessages: () => pendingMessages,
+		isIdle: () => idle,
+		waitForIdle: () =>
+			new Promise<void>((resolve) => {
+				idleWaiters.push(resolve)
+			}),
+	} satisfies PiAgentControl
+
+	return {
+		control,
+		abortCalls: () => abortCalls,
+		setIdle: (value: boolean) => {
+			idle = value
+		},
+		setPendingMessages: (value: boolean) => {
+			pendingMessages = value
+		},
+		resolveWait: (index: number) => {
+			const resolve = idleWaiters[index]
+			if (!resolve) throw new Error(`test bug: no waitForIdle call at index ${index}`)
+			resolve()
+		},
+		waitCount: () => idleWaiters.length,
+	}
+}
 
 describe("createPiAgentBridge in-session visibility: framework traffic is model-visible but transcript-hidden", () => {
 	it("hides the engine's initial prompt, questionnaire resume, and output repair", async () => {
@@ -234,6 +269,99 @@ describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent tur
 
 		expect(calls).toHaveLength(2) // both routed to the subprocess path
 		expect(sentMessages).toEqual([]) // neither ever called `pi.sendUserMessage`
+	})
+})
+
+describe("createPiAgentBridge in-session lifecycle fallback", () => {
+	it("rejects and releases a turn when PI becomes idle without emitting agent_end", async () => {
+		vi.useFakeTimers()
+		try {
+			const { pi, fireAgentEnd } = fakePi()
+			const lifecycle = fakeAgentControl()
+			const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir, lifecycle.control)
+			const first = startAgent(agentRequest({ stepName: "missing-event" }))
+			const turn = first.sendAndAwaitEnd("go")
+			const rejected = expect(turn).rejects.toThrow(
+				/step "missing-event" became idle without emitting agent_end.*send_message.*extension-error/s,
+			)
+
+			expect(lifecycle.waitCount()).toBe(1)
+			lifecycle.setIdle(true)
+			lifecycle.resolveWait(0)
+			await vi.runAllTimersAsync()
+			await rejected
+
+			// The missing event cannot leave the bridge wedged: a later turn enters normally.
+			lifecycle.setIdle(false)
+			const next = startAgent(agentRequest({ stepName: "next" })).sendAndAwaitEnd("continue")
+			fireAgentEnd("recovered")
+			await expect(next).resolves.toEqual({ text: "recovered", usage: { totalTokens: 1 } })
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it("does not mistake the previous run's idle boundary for a queued repair turn completing", async () => {
+		vi.useFakeTimers()
+		try {
+			const { pi, fireAgentEnd } = fakePi()
+			const lifecycle = fakeAgentControl()
+			const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir, lifecycle.control)
+			const session = startAgent(agentRequest({ stepName: "repair" }))
+
+			const initial = session.sendAndAwaitEnd("initial")
+			fireAgentEnd("invalid output")
+			await initial
+
+			// PI is still finishing the initial run when an `agent_end` handler queues the repair. The
+			// repair's first wait therefore observes that old run becoming idle, then PI starts the queued
+			// continuation before the next task. It must keep waiting for the repair's own lifecycle.
+			const repair = session.sendAndAwaitEnd("repair")
+			expect(lifecycle.waitCount()).toBe(2)
+			lifecycle.resolveWait(0) // the initial turn's stale watcher cannot settle this new turn
+			await Promise.resolve()
+			lifecycle.setIdle(true)
+			lifecycle.resolveWait(1)
+			lifecycle.setIdle(false)
+			await vi.runOnlyPendingTimersAsync()
+
+			expect(lifecycle.waitCount()).toBe(3)
+			const stillPending = vi.fn()
+			void repair.then(stillPending, stillPending)
+			await Promise.resolve()
+			expect(stillPending).not.toHaveBeenCalled()
+
+			fireAgentEnd("valid output")
+			await expect(repair).resolves.toEqual({ text: "valid output", usage: { totalTokens: 1 } })
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it("aborts PI on cancellation but holds the guard until the live operation is actually idle", async () => {
+		vi.useFakeTimers()
+		try {
+			const { pi } = fakePi()
+			const lifecycle = fakeAgentControl()
+			const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir, lifecycle.control)
+			const abortController = new AbortController()
+			const active = startAgent(agentRequest({ stepName: "cancelled", signal: abortController.signal }))
+			const turn = active.sendAndAwaitEnd("go")
+			const rejected = expect(turn).rejects.toThrow(/became idle without emitting agent_end/)
+
+			abortController.abort()
+			expect(lifecycle.abortCalls()).toBe(1)
+			await expect(startAgent(agentRequest({ stepName: "too-early" })).sendAndAwaitEnd("overlap")).rejects.toThrow(
+				/step "cancelled"'s turn is still in flight/,
+			)
+
+			lifecycle.setIdle(true)
+			lifecycle.resolveWait(0)
+			await vi.runAllTimersAsync()
+			await rejected
+		} finally {
+			vi.useRealTimers()
+		}
 	})
 })
 

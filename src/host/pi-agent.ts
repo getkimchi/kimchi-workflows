@@ -85,7 +85,7 @@
  */
 import { existsSync, mkdirSync } from "node:fs"
 import path from "node:path"
-import type { ContextEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import type { ContextEvent, ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
 import type { AgentRequest, AgentSession, AgentTurn, ConversationMessage } from "../engine/types.ts"
 import { resumeSessionFile, stepSessionName, traceSessionFile } from "./naming.ts"
 import {
@@ -108,6 +108,9 @@ import {
 import { runSubagent, type SubagentSpawner, subagentSpawner } from "./subagent-process.ts"
 
 export type AgentStarter = (request: AgentRequest) => AgentSession
+
+/** Public PI lifecycle controls needed to supervise an in-session turn. */
+export type PiAgentControl = Pick<ExtensionCommandContext, "abort" | "hasPendingMessages" | "isIdle" | "waitForIdle">
 
 /** Framework-owned model input: participates in context, but is never rendered as user-authored chat. */
 const WORKFLOW_AGENT_MESSAGE = "kimchi-workflow-agent"
@@ -276,13 +279,20 @@ export function createPiAgentBridge(
 	pi: ExtensionAPI,
 	invocationResolver: PiInvocationResolver = resolvePiInvocation,
 	spawnSubagent: SubagentSpawner = subagentSpawner,
-): (modelRegistry: ModelRegistry, sessionsDir: string) => AgentStarter {
+): (modelRegistry: ModelRegistry, sessionsDir: string, control?: PiAgentControl) => AgentStarter {
 	// The ONE in-session turn currently awaiting the shared `agent_end` listener, if any (see the header
-	// comment). `token` is an identity private to the session that started the turn — not the step name,
-	// since the SAME step name can legitimately open several sessions across retries/repairs, and dispose()
-	// must only ever clear a turn it itself started, never a sibling's.
+	// comment). `sessionToken` is an identity private to the session that started the turn — not the step
+	// name, since the SAME step name can legitimately open several sessions across retries/repairs.
+	// `turnToken` is finer-grained: a repair prompt can start from the previous `agent_end` handler before
+	// PI's just-finished run has become idle, so that OLD turn's idle watcher must never settle the NEW one.
 	let inFlight:
-		| { readonly token: object; readonly stepName: string; readonly resolve: (turn: AgentTurn) => void }
+		| {
+				readonly sessionToken: object
+				readonly turnToken: object
+				readonly stepName: string
+				readonly resolve: (turn: AgentTurn) => void
+				readonly cleanup: () => void
+		  }
 		| undefined
 	let lastConversation: AgentMessages = []
 	// The one answer-resumed session (spec §8.4) currently entitled to have its stored `history` seeded
@@ -295,6 +305,7 @@ export function createPiAgentBridge(
 		const turn = inFlight
 		if (!turn) return // no in-session turn was awaiting this event (only background/isolated steps ran)
 		inFlight = undefined
+		turn.cleanup()
 		turn.resolve({
 			text: lastAssistantText(event.messages),
 			usage: lastAssistantUsage(event.messages),
@@ -309,7 +320,7 @@ export function createPiAgentBridge(
 		return seeded ? { messages: seeded } : undefined
 	})
 
-	return (modelRegistry, sessionsDir) => (request) => {
+	return (modelRegistry, sessionsDir, control) => (request) => {
 		// Isolation (spec §2.2/§12.2): a `background` step, and now also any step the ENGINE decided is
 		// statically isolated (can overlap with a sibling — `.parallel`/`.foreach(concurrency>1)`, see
 		// `AgentRequest.isolated`'s doc), both run through the same one-shot subprocess path. Neither ever
@@ -318,7 +329,7 @@ export function createPiAgentBridge(
 			return backgroundSession(modelRegistry, request, invocationResolver, spawnSubagent, sessionsDir)
 		}
 
-		const token = {} // this session's own identity — see `inFlight`'s doc above
+		const sessionToken = {} // this session's own identity — see `inFlight`'s doc above
 		// Captured per SESSION, not per bridge. extension.ts builds ONE bridge at extension load, so a
 		// baseline held there freezes whatever the user's tools were during the FIRST run and silently
 		// reverts anything they enable afterwards. Set only once this session actually narrows the set,
@@ -329,7 +340,7 @@ export function createPiAgentBridge(
 		// lifetime (cleared in `dispose()`). A fresh run's `request.history` is always undefined, so the
 		// overwhelmingly common case never touches `activeHistory` at all.
 		if (request.history) {
-			activeHistory = { token, history: request.history as AgentMessages }
+			activeHistory = { token: sessionToken, history: request.history as AgentMessages }
 		}
 		return {
 			async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
@@ -374,16 +385,88 @@ export function createPiAgentBridge(
 				}
 				// A contract-free step narrows nothing: the previous step's session restored the set on
 				// dispose (the engine disposes in a `finally`), so there is nothing of ours left active.
+				if (request.signal?.aborted) {
+					throw new Error(`pi-agent bridge: step "${request.stepName}" was aborted before its turn started`)
+				}
 
-				return new Promise<AgentTurn>((resolve) => {
-					inFlight = { token, stepName: request.stepName, resolve }
+				return new Promise<AgentTurn>((resolve, reject) => {
+					const turnToken = {}
+					let removeAbortListener = () => {}
+					const cleanup = () => removeAbortListener()
+					const fail = (error: Error): void => {
+						if (inFlight?.turnToken !== turnToken) return
+						inFlight = undefined
+						cleanup()
+						reject(error)
+					}
+
+					inFlight = { sessionToken, turnToken, stepName: request.stepName, resolve, cleanup }
+
+					if (request.signal) {
+						const abortTurn = () => {
+							// Releasing `inFlight` here would let a later workflow turn enter the same PI session
+							// while this one may still be streaming. Ask PI to stop, then let `agent_end` or the
+							// idle watcher below settle and release the turn safely.
+							try {
+								control?.abort()
+							} catch {
+								// `waitForIdle` remains the authoritative fallback if a host abort hook itself fails.
+							}
+						}
+						request.signal.addEventListener("abort", abortTurn, { once: true })
+						removeAbortListener = () => request.signal?.removeEventListener("abort", abortTurn)
+					}
+
 					// This is framework-to-agent traffic, not something the user typed. A custom message still
 					// becomes a user-role message in the model context, while `display: false` keeps prompts,
 					// questionnaire resumes, and output-repair schemas out of the parent transcript.
-					pi.sendMessage(
-						{ customType: WORKFLOW_AGENT_MESSAGE, content: message, display: false },
-						{ triggerTurn: true },
-					)
+					// `sendMessage` is fire-and-forget: this catch only covers a synchronous binding failure;
+					// the idle watcher below detects the asynchronous rejection PI reports via extension errors.
+					try {
+						pi.sendMessage(
+							{ customType: WORKFLOW_AGENT_MESSAGE, content: message, display: false },
+							{ triggerTurn: true },
+						)
+					} catch (error) {
+						fail(error instanceof Error ? error : new Error(String(error)))
+						return
+					}
+
+					if (control) {
+						void (async () => {
+							try {
+								for (;;) {
+									if (inFlight?.turnToken !== turnToken) return
+									await control.waitForIdle()
+									if (inFlight?.turnToken !== turnToken) return
+
+									// A repair/answer sent from the preceding `agent_end` handler is queued while PI is
+									// technically still finishing that run. Let PI's post-run continuation start before
+									// deciding that this turn became idle without its own `agent_end`.
+									await new Promise<void>((settle) => setTimeout(settle, 0))
+									if (inFlight?.turnToken !== turnToken) return
+									if (!control.isIdle() || control.hasPendingMessages()) continue
+
+									fail(
+										new Error(
+											`pi-agent bridge: step "${request.stepName}" became idle without emitting agent_end; ` +
+												"the PI turn failed before its completion event. PI reports the underlying " +
+												"send_message failure separately through its extension-error output",
+										),
+									)
+									return
+								}
+							} catch (error) {
+								fail(
+									new Error(
+										`pi-agent bridge: could not verify completion of step "${request.stepName}": ${
+											error instanceof Error ? error.message : String(error)
+										}`,
+									),
+								)
+							}
+						})()
+					}
 				})
 			},
 			getConversation(): readonly ConversationMessage[] {
@@ -392,8 +475,11 @@ export function createPiAgentBridge(
 			dispose(): void {
 				// Only clear OUR OWN pending turn — never one a differently-identified session left in flight
 				// (should not arise given the guard above, but dispose() must stay safe regardless, spec §2.2).
-				if (inFlight?.token === token) inFlight = undefined
-				if (activeHistory?.token === token) activeHistory = undefined
+				if (inFlight?.sessionToken === sessionToken) {
+					inFlight.cleanup()
+					inFlight = undefined
+				}
+				if (activeHistory?.token === sessionToken) activeHistory = undefined
 				// Hand the session back as we found it — but only if THIS session narrowed it. A session
 				// rejected by the cross-talk guard never registered anything, and restoring from it would
 				// strip the tools out from under the turn that is genuinely in flight.

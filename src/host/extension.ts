@@ -66,7 +66,7 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 			// publishes on the harness bus; whether anything ships is a subscriber's decision, and with no
 			// subscriber loaded (plain PI) the whole thing is inert.
 			const store = withTelemetry(createFsStore(runDir), (channel, data) => pi.events.emit(channel, data))
-			const startAgent = bindAgentStarter(ctx.modelRegistry, runDir)
+			const startAgent = bindAgentStarter(ctx.modelRegistry, runDir, ctx)
 			// The live surface, chosen per invocation from `ctx.mode` (progress §7.2) — the context is what
 			// knows whether there is a terminal to draw in, and it does not exist until a command runs.
 			const progressFor = bindProgress(ctx)
