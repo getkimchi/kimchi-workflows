@@ -20,14 +20,24 @@
 	"homepage": "https://github.com/getkimchi/kimchi-workflows#readme",
 	"bugs": "https://github.com/getkimchi/kimchi-workflows/issues",
 	"packageManager": "pnpm@10.33.0",
+	"//kimchiWorkflows": "`pnpm pack` strips the standard packageManager field. Keep the project-workflow toolchain pin in package-owned metadata that survives publication.",
+	"kimchiWorkflows": {
+		"packageManager": "pnpm@10.33.0"
+	},
 	"type": "module",
 	"engines": {
 		"node": ">=24"
 	},
-	"//files": "BOTH, and each earns its place. `dist` is what consumers import: shipping only TypeScript makes the package unloadable by plain Node (it refuses to strip types under node_modules) and forces `allowImportingTsExtensions` on anyone type-checking it. `src` is what PI loads — the `pi` manifest below points at the TypeScript, so a git install with no build output still registers /workflow — and it is what the source maps resolve against.",
+	"bin": {
+		"kimchi-workflows": "./bin/kimchi-workflows.mjs"
+	},
+	"//files": "Each shipped directory earns its place. `dist` is what consumers import; `src` is what PI loads from git installs and what source maps resolve against. `docs` and `examples` are the public, version-matched authoring guidance linked by /workflow create.",
 	"files": [
+		"bin",
 		"dist",
-		"src"
+		"src",
+		"docs",
+		"examples"
 	],
 	"publishConfig": {
 		"access": "public"
@@ -64,20 +74,22 @@
 	"//scripts": "`prepack` (not `prepare`) builds for the tarball: `prepare` would also wastefully build git installs, where PI loads the checked-in TypeScript source and omits the development-only typebox pin.",
 	"scripts": {
 		"build": "tsc -p tsconfig.build.json",
-		"docs:authoring": "node scripts/generate-authoring-reference.mjs && biome format --write src/host/builtin/generated/authoring-reference.ts",
-		"prepack": "npm run build",
+		"docs:authoring": "node scripts/generate-authoring-reference.mjs",
+		"docs:check": "node scripts/generate-authoring-reference.mjs --check",
+		"prepack": "pnpm run build",
 		"test": "vitest run",
 		"test:integration": "vitest run --config vitest.integration.config.ts",
 		"typecheck": "tsc --noEmit",
 		"lint": "biome check .",
 		"lint:fix": "biome check --write .",
-		"check": "pnpm run lint && pnpm run typecheck && pnpm run test"
+		"check": "pnpm run docs:check && pnpm run lint && pnpm run typecheck && pnpm run test"
 	},
-	"//dependencies": "PI does not provide jiti or the TypeScript compiler to extensions. jiti loads workflows; TypeScript performs mandatory pre-write candidate validation even in dependency-free target projects.",
+	"//dependencies": "PI does not provide jiti or the verification toolchain. jiti loads workflows and the physical package CLI; TypeScript and Vitest verify project workflow packages outside the compiled harness.",
 	"dependencies": {
 		"@types/node": "^26.2.0",
 		"jiti": "^2.7.0",
-		"typescript": "^7.0.2"
+		"typescript": "^7.0.2",
+		"vitest": "4.1.10"
 	},
 	"//peerDependencies": "The packages PI bundles and hands to extensions itself (docs/packages.md: \"list them in peerDependencies with a \\\"*\\\" range and do not bundle them\"). PI's extension loader aliases these specifiers to its own copies and that alias WINS over the consuming project's node_modules — so a range narrower than `*` would describe a resolution we do not control.",
 	"peerDependencies": {
@@ -88,9 +100,8 @@
 	"//devDependencies": "The PI packages match Kimchi's pinned runtime in ../kimchi, and `typebox` is pinned EXACTLY to the version that runtime pins. Testing against newer copies can pass locally while the real harness lacks the same behavior.",
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.6",
-		"@earendil-works/pi-coding-agent": "0.79.10",
-		"@earendil-works/pi-tui": "0.79.10",
-		"typebox": "1.1.38",
-		"vitest": "^4.1.10"
+		"@earendil-works/pi-coding-agent": "0.84.1",
+		"@earendil-works/pi-tui": "0.84.1",
+		"typebox": "1.3.7"
 	}
 }

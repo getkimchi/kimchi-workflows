@@ -3,6 +3,7 @@ import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { pathToFileURL } from "node:url"
 import { promisify } from "node:util"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
@@ -37,11 +38,16 @@ describe("published package", () => {
 		packedRoot = path.join(workDir, "consumer/node_modules", pkg.name)
 		await mkdir(packedRoot, { recursive: true })
 
-		// `npm pack` runs prepack, so this builds and packs exactly what `npm publish` would upload.
-		const { stdout } = await exec("npm", ["pack", "--json", "--pack-destination", workDir], {
+		// `pnpm pack` runs prepack, so this builds and packs exactly what publication uploads.
+		const { stdout } = await exec("pnpm", ["pack", "--json", "--pack-destination", workDir], {
 			cwd: repoRoot,
 		})
-		const tarball = path.join(workDir, (JSON.parse(stdout) as [{ filename: string }])[0].filename)
+		const jsonStart = stdout.indexOf('{\n  "name"')
+		if (jsonStart < 0) throw new Error(`pnpm pack did not emit package JSON: ${stdout}`)
+		const packed = JSON.parse(stdout.slice(jsonStart)) as { filename?: string } | [{ filename: string }]
+		const filename = Array.isArray(packed) ? packed[0].filename : packed.filename
+		if (!filename) throw new Error(`pnpm pack did not report a filename: ${stdout}`)
+		const tarball = path.isAbsolute(filename) ? filename : path.join(workDir, filename)
 		await exec("tar", ["-xzf", tarball, "-C", packedRoot, "--strip-components=1"])
 
 		// Lets the packed code resolve `jiti` and the peer deps without a network install.
@@ -87,5 +93,89 @@ console.log(JSON.stringify(results))
 
 	it("ships the extension entry the pi manifest declares", () => {
 		expect(existsSync(path.join(packedRoot, "src/host/extension.ts"))).toBe(true)
+	})
+
+	it("ships its package-owned verification command", () => {
+		expect(existsSync(path.join(packedRoot, "bin/kimchi-workflows.mjs"))).toBe(true)
+	})
+
+	it("prepares a project workflow package from the packed install", async () => {
+		const workflowDirectory = path.join(workDir, "prepared-project/.kimchi/workflows")
+		const workflowPackageModule = pathToFileURL(path.join(packedRoot, "dist/host/workflow-package.js")).href
+		const { prepareWorkflowPackage } = await import(workflowPackageModule)
+
+		const prepared = await prepareWorkflowPackage({
+			directory: workflowDirectory,
+			install: async (directory: string) => {
+				await mkdir(path.join(directory, "node_modules/.bin"), { recursive: true })
+				await Promise.all([
+					writeFile(path.join(directory, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8"),
+					writeFile(path.join(directory, "node_modules/.bin/kimchi-workflows"), "", "utf8"),
+				])
+				return { code: 0, stdout: "", stderr: "" }
+			},
+		})
+		const manifest = JSON.parse(await readFile(prepared.manifestPath, "utf8")) as { packageManager?: string }
+
+		expect(manifest.packageManager).toMatch(/^pnpm@/)
+	})
+
+	it("runs focused verification from the packed install", async () => {
+		const projectRoot = path.join(workDir, "verification-project")
+		const workflowDirectory = path.join(projectRoot, ".kimchi/workflows")
+		const modules = path.join(workflowDirectory, "node_modules")
+		await Promise.all([
+			mkdir(path.join(modules, ".bin"), { recursive: true }),
+			mkdir(path.join(modules, "@kimchi-dev"), { recursive: true }),
+		])
+		await Promise.all([
+			writeFile(
+				path.join(workflowDirectory, "package.json"),
+				`${JSON.stringify({
+					name: "packed-workflow-project",
+					private: true,
+					type: "module",
+					scripts: { "verify:workflow": "kimchi-workflows verify" },
+				})}\n`,
+				"utf8",
+			),
+			symlink(packedRoot, path.join(modules, "@kimchi-dev/kimchi-workflows")),
+			symlink(path.join(packedRoot, "bin/kimchi-workflows.mjs"), path.join(modules, ".bin/kimchi-workflows")),
+			...["@types", "typebox", "typescript", "vitest"].map((name) =>
+				symlink(path.join(repoRoot, "node_modules", name), path.join(modules, name)),
+			),
+		])
+		const entryPath = path.join(workflowDirectory, "packed.workflow.ts")
+		await writeFile(
+			entryPath,
+			`import { createStep, createWorkflow } from ${JSON.stringify(pkg.name)}
+const greet = createStep({ name: "greet", run: () => "hello" })
+export default createWorkflow({ name: "packed" }).then(greet).commit()
+`,
+			"utf8",
+		)
+		const testPath = path.join(workflowDirectory, "packed.workflow.test.ts")
+		await writeFile(
+			testPath,
+			`import { expect, it } from "vitest"
+import { createTestRun } from ${JSON.stringify(`${pkg.name}/testing`)}
+import workflow from "./packed.workflow.ts"
+it("runs", async () => expect((await createTestRun(workflow)).output).toBe("hello"))
+`,
+			"utf8",
+		)
+		const verifierProbe = path.join(workDir, "consumer/verify-packed.mjs")
+		const verifierModule = pathToFileURL(path.join(packedRoot, "dist/host/workflow-test-verifier.js")).href
+		await writeFile(
+			verifierProbe,
+			`import { verifyWorkflowTest } from ${JSON.stringify(verifierModule)}
+const result = await verifyWorkflowTest(${JSON.stringify({ entryPath, packageRoot: workflowDirectory, testPath })})
+console.log(JSON.stringify(result))
+`,
+			"utf8",
+		)
+
+		const { stdout } = await exec(process.execPath, [verifierProbe], { cwd: path.dirname(verifierProbe) })
+		expect(JSON.parse(stdout)).toMatchObject({ files: 1, tests: 1, passedTests: 1 })
 	})
 })

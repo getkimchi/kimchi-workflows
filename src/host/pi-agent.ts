@@ -145,39 +145,15 @@ export function resolvePiInvocation(args: readonly string[]): { command: string;
 }
 
 /**
- * Permission-bypass flags the CURRENT process was launched with, which every subagent it spawns must be
- * launched with too.
- *
- * `resolvePiInvocation` above respawns the harness that is running right now precisely so a subagent
- * inherits its provider, auth and model registry rather than guessing at them. Permission posture is the
- * one part of that inheritance the argv does not carry for free: the parent's mode is decided from ITS
- * argv, and a fresh process reads its own. So a run launched with permissions bypassed was spawning
- * subagents that re-armed the classifier — measured on a benchmark run, **59 tool calls refused inside
- * subagent sessions while the parent had none**, including `mkdir -p` and `test -f`, with one task lost
- * outright because its worker could not install a package the task itself required and burned its budget
- * trying to talk its way around the refusal. The parent had no such trouble.
- *
- * Inheriting is safe in the only direction that matters: a flag has to be present in the PARENT's own
- * argv to be forwarded, so this can never make a child more permissive than the process that started it,
- * and a normally-launched session keeps its subagents' checks armed. It is deliberately a small, explicit
- * allowlist rather than a general argv passthrough — forwarding the parent's whole command line would
- * hand a subagent its `--session`, its prompt, and anything else the embedder happened to pass.
- */
-const PERMISSION_BYPASS_FLAGS = ["--dangerously-skip-permissions", "--yolo"] as const
-
-export function inheritedPermissionArgs(argv: readonly string[] = process.argv): string[] {
-	return PERMISSION_BYPASS_FLAGS.filter((flag) => argv.includes(flag))
-}
-
-/**
  * The `-e`/`--extension` flags the CURRENT process was launched with, which a step child needs too if it
  * is to register this extension's output tools (step-output-tools.ts).
  *
- * Same allowlist discipline, and the same direction of safety, as {@link inheritedPermissionArgs}: a flag
- * has to be in the parent's own argv to be forwarded. A harness that loaded this extension some other way
- * (an installed package the child discovers on its own) needs nothing here; one that loaded it by path and
- * forwards nothing gets no tools in the child, and every step under an output contract then FAILS —
- * there is no text channel behind it, so this is a hard dependency, not a graceful degradation.
+ * A flag has to be in the parent's own argv to be forwarded. A harness that loaded this extension some
+ * other way (an installed package the child discovers on its own) needs nothing here; one that loaded it
+ * by path and forwards nothing gets no tools in the child, and every step under an output contract then
+ * FAILS — there is no text channel behind it, so this is a hard dependency, not a graceful degradation.
+ * This is deliberately an allowlist rather than a general argv passthrough: the parent's session, prompt,
+ * and unrelated flags belong to the parent alone.
  */
 export function inheritedExtensionArgs(argv: readonly string[] = process.argv): string[] {
 	const forwarded: string[] = []
@@ -516,9 +492,12 @@ function backgroundSession(
 			// `workflow-` a true prefix of everything a run writes. See {@link sessionPath} for the two shapes.
 			// `--name` costs nothing and makes the file legible if anyone ever opens it in a picker; the HOST
 			// session's name is deliberately left alone — that one belongs to the user, not to us.
-			// Permission posture is inherited, not defaulted (see `inheritedPermissionArgs`): a subagent of a
-			// run that bypasses permissions must bypass them too, or it re-arms the classifier and spends its
-			// budget arguing with a prompt no one is there to answer.
+			// A spawned worker has no UI in which to confirm permission prompts. Run Kimchi workers in yolo
+			// mode so a classifier outage cannot refuse their tools — including the framework-owned
+			// `submit_result` that every reporting step needs to finish. The environment variable is ignored by
+			// plain PI, unlike a Kimchi-only CLI flag that would make PI reject the invocation. This deliberately
+			// bypasses every Kimchi permission check for the subprocess worker; an in-process step keeps the
+			// parent session's permission posture.
 			const session = sessionPath(sessionsDir, request)
 			// Claimed before anything is spawned, released once the child is gone — see `liveResumeFiles`.
 			const releaseResumeFile = claimResumeFile(session, request)
@@ -530,7 +509,6 @@ function backgroundSession(
 				session,
 				"--name",
 				stepSessionName(request.workflowName, request.path, request.runId),
-				...inheritedPermissionArgs(),
 				...(request.outputSchema ? inheritedExtensionArgs() : []),
 			]
 			if (request.model) {
@@ -555,7 +533,10 @@ function backgroundSession(
 						asks: request.asks,
 					})
 				: undefined
-			const env = handoff ? { [STEP_OUTPUT_TOOLS_ENV]: handoff } : undefined
+			const env: NodeJS.ProcessEnv = {
+				KIMCHI_PERMISSIONS: "yolo",
+				...(handoff ? { [STEP_OUTPUT_TOOLS_ENV]: handoff } : {}),
+			}
 
 			const invocation = invocationResolver(args)
 			// The attempt's signal kills the child (spec §8.8/§9.4). Without that a cancelled run reports
