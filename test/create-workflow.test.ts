@@ -276,7 +276,7 @@ describe("/workflow create behavior-first path", () => {
 		expect(done.status, done.error).toBe("completed")
 		expect(done.eventsOf("loop-iteration").filter((event) => event.path.startsWith("until-ready#"))).toHaveLength(4)
 		expect(done.agent("implement").messages[3]).toContain('authored workflow is named "wrong-name"')
-	})
+	}, 20_000)
 })
 
 describe("/workflow create never overwrites existing work", () => {

@@ -275,7 +275,12 @@ const check = createStep({
 			assertInsideProject(testPath, init.projectRoot, "testPath")
 			if (!(await stat(testPath)).isFile()) throw new Error(`submitted testPath is not a file: ${testPath}`)
 
-			const validation = await validateWorkflowFile({ entryPath, projectRoot: init.projectRoot, signal: abortSignal })
+			const validation = await validateWorkflowFile({
+				entryPath,
+				projectRoot: init.projectRoot,
+				packageRoot: packageReady.packageDirectory,
+				signal: abortSignal,
+			})
 			if (validation.workflow.name !== approved.plan.name) {
 				throw new Error(
 					`authored workflow is named "${validation.workflow.name}", but the reviewed name is "${approved.plan.name}"`,
