@@ -1,17 +1,12 @@
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { existsSync } from "node:fs"
-import { mkdir, rm, writeFile } from "node:fs/promises"
+import { existsSync, realpathSync } from "node:fs"
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { createRequire } from "node:module"
 import path from "node:path"
-import { fileURLToPath } from "node:url"
 import type { WorkflowDefinition } from "../flow/types.ts"
 import { loadWorkflowFile } from "./load-workflow.ts"
 
-const require = createRequire(import.meta.url)
-const FLOW_ENTRY = fileURLToPath(new URL("../flow/index.ts", import.meta.url))
-const ENGINE_ENTRY = fileURLToPath(new URL("../engine/index.ts", import.meta.url))
-const NODE_TYPES_ROOT = path.dirname(path.dirname(require.resolve("@types/node/package.json")))
 const COMMAND_STDOUT_LIMIT = 1024 * 1024
 const COMMAND_DIAGNOSTIC_LIMIT = 16 * 1024
 const COMMAND_TIMEOUT_MS = 30_000
@@ -33,6 +28,8 @@ export interface ValidateWorkflowCandidateOptions {
 	/** Intended final path. The temporary candidate is written beside it so relative imports resolve identically. */
 	readonly targetPath: string
 	readonly projectRoot: string
+	/** Prepared workflow package whose installed versions define the authoring type environment. */
+	readonly packageRoot: string
 	readonly signal?: AbortSignal
 	/** Optional caller-owned semantic/structural check over the workflow that successfully loaded. */
 	readonly conformance?: (workflow: WorkflowDefinition) => string | undefined
@@ -44,6 +41,8 @@ export interface ValidateWorkflowFileOptions {
 	/** Absolute path to the workflow entry module already written on disk. Imported files are followed by TypeScript. */
 	readonly entryPath: string
 	readonly projectRoot: string
+	/** Prepared workflow package whose installed versions define the authoring type environment. */
+	readonly packageRoot: string
 	readonly signal?: AbortSignal
 	/** Optional caller-owned semantic/structural check over the workflow that successfully loaded. */
 	readonly conformance?: (workflow: WorkflowDefinition) => string | undefined
@@ -98,6 +97,7 @@ export async function validateWorkflowCandidate(
 			entryPath: probe,
 			diagnosticPath: options.targetPath,
 			projectRoot: options.projectRoot,
+			packageRoot: options.packageRoot,
 			signal: options.signal,
 			conformance: options.conformance,
 			runCommand: options.runCommand,
@@ -127,7 +127,6 @@ async function validateWorkflowModule(options: ValidateWorkflowModuleOptions): P
 	const directory = path.dirname(options.entryPath)
 	const nonce = randomUUID()
 	const config = path.join(directory, `.pi-create-typecheck-${nonce}.json`)
-	const shims = path.join(directory, `.pi-create-typecheck-${nonce}.d.ts`)
 
 	if (!existsSync(options.entryPath)) {
 		throw new WorkflowCandidateValidationError("typescript", `entry file does not exist: ${options.diagnosticPath}`)
@@ -135,12 +134,16 @@ async function validateWorkflowModule(options: ValidateWorkflowModuleOptions): P
 
 	await mkdir(directory, { recursive: true })
 	try {
-		await Promise.all([
-			writeFile(config, `${JSON.stringify(typeScriptConfig(options.entryPath, shims), null, 2)}\n`, "utf8"),
-			writeFile(shims, TYPE_VALIDATION_SHIMS, "utf8"),
-		])
+		let toolchain: ValidationToolchain
+		try {
+			toolchain = await resolveValidationToolchain(options.packageRoot)
+		} catch (error) {
+			throw validationError("typescript", error)
+		}
+		await writeFile(config, `${JSON.stringify(typeScriptConfig(options.entryPath, toolchain), null, 2)}\n`, "utf8")
 		await validateTypeScript(
 			runner,
+			toolchain.compiler,
 			config,
 			options.entryPath,
 			options.diagnosticPath,
@@ -176,11 +179,171 @@ async function validateWorkflowModule(options: ValidateWorkflowModuleOptions): P
 			summary: `TypeScript passed; runtime load passed; conformance ${checks.conformance}`,
 		}
 	} finally {
-		await Promise.all([rm(config, { force: true }), rm(shims, { force: true })])
+		await rm(config, { force: true })
 	}
 }
 
-function typeScriptConfig(probe: string, shims: string): object {
+interface ValidationToolchain {
+	readonly compiler: string
+	readonly nodeTypesRoot: string
+	readonly paths: Readonly<Record<string, readonly string[]>>
+}
+
+interface InstalledPackage {
+	readonly name: string
+	readonly directory: string
+	readonly manifestPath: string
+	readonly manifest: PackageManifest
+}
+
+interface PackageManifest {
+	readonly name?: unknown
+	readonly types?: unknown
+	readonly typings?: unknown
+	readonly exports?: unknown
+	readonly typesVersions?: unknown
+}
+
+/**
+ * Build the static-validation environment exclusively from the package prepared for this project.
+ * This keeps the quick candidate gate on the same public declarations and versions as package
+ * verification, without duplicating either Kimchi, TypeBox, or PI types inside the validator.
+ */
+async function resolveValidationToolchain(packageRoot: string): Promise<ValidationToolchain> {
+	const [framework, typebox, pi, node, typescript] = await Promise.all([
+		readInstalledPackage(packageRoot, "@kimchi-dev/kimchi-workflows"),
+		readInstalledPackage(packageRoot, "typebox"),
+		readInstalledPackage(packageRoot, "@earendil-works/pi-coding-agent"),
+		readInstalledPackage(packageRoot, "@types/node"),
+		readInstalledPackage(packageRoot, "typescript"),
+	])
+	return {
+		compiler: typeScriptCompiler(typescript.manifestPath),
+		nodeTypesRoot: path.dirname(path.dirname(node.manifestPath)),
+		paths: {
+			...frameworkTypePaths(framework),
+			...declarationPaths(typebox),
+			...declarationPaths(pi),
+		},
+	}
+}
+
+function frameworkTypePaths(pkg: InstalledPackage): Record<string, readonly string[]> {
+	try {
+		return declarationPaths(pkg)
+	} catch (declarationError) {
+		// Published packages provide dist declarations. A local `file:` install intentionally skips
+		// lifecycle scripts, so a clean checkout may contain only the equally authoritative TS source.
+		const paths: Record<string, readonly string[]> = {}
+		for (const [exportKey] of packageExportEntries(pkg.manifest.exports)) {
+			const layer = exportKey === "." ? "flow" : exportKey.slice(2)
+			const source = path.join(pkg.directory, "src", layer, "index.ts")
+			if (!existsSync(source)) throw declarationError
+			const specifier = exportKey === "." ? pkg.name : `${pkg.name}${exportKey.slice(1)}`
+			paths[specifier] = [source]
+		}
+		if (!paths[pkg.name]) throw declarationError
+		return paths
+	}
+}
+
+async function readInstalledPackage(packageRoot: string, name: string): Promise<InstalledPackage> {
+	const directory = path.join(path.resolve(packageRoot), "node_modules", ...name.split("/"))
+	const manifestPath = path.join(directory, "package.json")
+	let manifest: PackageManifest
+	try {
+		manifest = JSON.parse(await readFile(manifestPath, "utf8")) as PackageManifest
+	} catch (error) {
+		throw new Error(`prepared workflow package is missing ${name} at ${manifestPath}: ${describe(error)}`)
+	}
+	if (manifest.name !== name) {
+		throw new Error(`prepared workflow package entry ${manifestPath} identifies itself as ${String(manifest.name)}`)
+	}
+	return { name, directory, manifestPath, manifest }
+}
+
+function declarationPaths(pkg: InstalledPackage): Record<string, readonly string[]> {
+	const entries = packageExportEntries(pkg.manifest.exports)
+	const paths: Record<string, readonly string[]> = {}
+	for (const [exportKey, exported] of entries) {
+		const target =
+			findTypesCondition(exported) ??
+			findTypesVersionTarget(pkg.manifest.typesVersions, exportKey) ??
+			(exportKey === "." ? (stringValue(pkg.manifest.types) ?? stringValue(pkg.manifest.typings)) : undefined)
+		if (!target) continue
+		const declaration = path.resolve(pkg.directory, target)
+		if (!existsSync(declaration)) {
+			throw new Error(`${pkg.name} declares types for ${exportKey} at a missing path: ${declaration}`)
+		}
+		const specifier = exportKey === "." ? pkg.name : `${pkg.name}${exportKey.slice(1)}`
+		paths[specifier] = [declaration]
+	}
+	if (!paths[pkg.name]) {
+		const target = stringValue(pkg.manifest.types) ?? stringValue(pkg.manifest.typings)
+		if (target) {
+			const declaration = path.resolve(pkg.directory, target)
+			if (!existsSync(declaration)) throw new Error(`${pkg.name} declares a missing types entry: ${declaration}`)
+			paths[pkg.name] = [declaration]
+		}
+	}
+	if (!paths[pkg.name]) throw new Error(`${pkg.name} does not expose a resolvable root type declaration`)
+	return paths
+}
+
+function packageExportEntries(exportsField: unknown): ReadonlyArray<readonly [string, unknown]> {
+	if (isRecord(exportsField) && Object.keys(exportsField).some((key) => key.startsWith("."))) {
+		return Object.entries(exportsField)
+	}
+	return [[".", exportsField]]
+}
+
+function findTypesCondition(value: unknown): string | undefined {
+	if (typeof value === "string") return isDeclarationPath(value) ? value : undefined
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			const target = findTypesCondition(item)
+			if (target) return target
+		}
+		return undefined
+	}
+	if (!isRecord(value)) return undefined
+	const direct = stringValue(value.types)
+	if (direct) return direct
+	for (const nested of Object.values(value)) {
+		if (!isRecord(nested) && !Array.isArray(nested)) continue
+		const target = findTypesCondition(nested)
+		if (target) return target
+	}
+	return undefined
+}
+
+function findTypesVersionTarget(typesVersions: unknown, exportKey: string): string | undefined {
+	if (!isRecord(typesVersions)) return undefined
+	const key = exportKey === "." ? "." : exportKey.slice(2)
+	for (const versionMap of Object.values(typesVersions)) {
+		if (!isRecord(versionMap)) continue
+		const targets = versionMap[key]
+		if (Array.isArray(targets)) {
+			const first = targets.find((target): target is string => typeof target === "string")
+			if (first) return first
+		}
+	}
+	return undefined
+}
+
+function isDeclarationPath(value: string): boolean {
+	return /\.d\.(?:ts|mts|cts)$/.test(value)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function stringValue(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+function typeScriptConfig(probe: string, toolchain: ValidationToolchain): object {
 	return {
 		compilerOptions: {
 			target: "ES2023",
@@ -196,21 +359,16 @@ function typeScriptConfig(probe: string, shims: string): object {
 			noEmit: true,
 			skipLibCheck: true,
 			types: ["node"],
-			typeRoots: [NODE_TYPES_ROOT],
-			paths: {
-				"@kimchi-dev/kimchi-workflows": [FLOW_ENTRY],
-				"@kimchi-dev/kimchi-workflows/flow": [FLOW_ENTRY],
-				"@kimchi-dev/kimchi-workflows/engine": [ENGINE_ENTRY],
-				typebox: [shims],
-				"typebox/*": [shims],
-			},
+			typeRoots: [toolchain.nodeTypesRoot],
+			paths: toolchain.paths,
 		},
-		files: [probe, shims],
+		files: [probe],
 	}
 }
 
 async function validateTypeScript(
 	runner: CommandRunner,
+	compiler: string,
 	config: string,
 	probe: string,
 	targetPath: string,
@@ -220,7 +378,7 @@ async function validateTypeScript(
 	let result: CommandResult
 	try {
 		result = await runner({
-			command: typeScriptCompiler(),
+			command: compiler,
 			args: ["--project", config, "--pretty", "false"],
 			cwd: projectRoot,
 			signal,
@@ -241,9 +399,10 @@ async function validateTypeScript(
  * `process.execPath`. A packaged Kimchi process is a Bun-compiled executable, so `process.execPath`
  * names the Kimchi CLI itself; passing `--project` to it fails before TypeScript ever sees the candidate.
  */
-function typeScriptCompiler(): string {
-	const packageManifest = require.resolve("typescript/package.json")
-	const packageRequire = createRequire(packageManifest)
+function typeScriptCompiler(packageManifest: string): string {
+	// npm commonly hoists optional platform packages, while pnpm links them beside TypeScript in its
+	// content-addressed store. Resolving from the real package location lets Node support both layouts.
+	const packageRequire = createRequire(realpathSync(packageManifest))
 	const nativePackage = `@typescript/typescript-${process.platform}-${process.arch}`
 	let nativeManifest: string
 	try {
@@ -327,69 +486,6 @@ function abortReason(signal: AbortSignal | undefined): Error {
 	return signal?.reason instanceof Error ? signal.reason : new Error("workflow validation aborted")
 }
 
-/**
- * The target project may be completely dependency-free, while TypeScript still needs enough TypeBox
- * shape information to infer callback input/output and enough Node declarations to parse legitimate
- * workflow imports. Kimchi's own API is never duplicated here: path mappings point at its real source.
- */
-const TYPE_VALIDATION_SHIMS = `declare module "typebox" {
-  export interface TSchema<TStatic = unknown> {
-    readonly __workflowValidationStatic: TStatic
-    readonly [key: string]: unknown
-  }
-  export type Static<T extends TSchema> = T["__workflowValidationStatic"]
-  type OptionalKeys<T extends Record<string, TSchema>> = {
-    [K in keyof T]: T[K] extends Type.TOptional<TSchema> ? K : never
-  }[keyof T]
-  type RequiredKeys<T extends Record<string, TSchema>> = Exclude<keyof T, OptionalKeys<T>>
-  type ObjectStatic<T extends Record<string, TSchema>> = {
-    [K in RequiredKeys<T>]: Static<T[K]>
-  } & {
-    [K in OptionalKeys<T>]?: Static<T[K]>
-  }
-  export namespace Type {
-    interface TString extends TSchema<string> {}
-    interface TNumber extends TSchema<number> {}
-    interface TInteger extends TSchema<number> {}
-    interface TBoolean extends TSchema<boolean> {}
-    interface TUnknown extends TSchema<unknown> {}
-    interface TAny extends TSchema<any> {}
-    interface TUndefined extends TSchema<undefined> {}
-    interface TLiteral<T extends string | number | boolean> extends TSchema<T> {}
-    interface TArray<T extends TSchema> extends TSchema<Array<Static<T>>> {}
-    interface TObject<T extends Record<string, TSchema>> extends TSchema<ObjectStatic<T>> {}
-    interface TUnion<T extends readonly TSchema[]> extends TSchema<Static<T[number]>> {}
-    interface TOptional<T extends TSchema> extends TSchema<Static<T>> {
-      readonly __workflowValidationOptional: true
-    }
-  }
-  type SchemaOptions = Record<string, unknown>
-  export const Type: {
-    String(options?: SchemaOptions): Type.TString
-    Number(options?: SchemaOptions): Type.TNumber
-    Integer(options?: SchemaOptions): Type.TInteger
-    Boolean(options?: SchemaOptions): Type.TBoolean
-    Unknown(options?: SchemaOptions): Type.TUnknown
-    Any(options?: SchemaOptions): Type.TAny
-    Undefined(options?: SchemaOptions): Type.TUndefined
-    Literal<T extends string | number | boolean>(value: T, options?: SchemaOptions): Type.TLiteral<T>
-    Array<T extends TSchema>(items: T, options?: SchemaOptions): Type.TArray<T>
-    Object<T extends Record<string, TSchema>>(properties: T, options?: SchemaOptions): Type.TObject<T>
-    Union<T extends readonly TSchema[]>(variants: T, options?: SchemaOptions): Type.TUnion<T>
-    Optional<T extends TSchema>(schema: T): Type.TOptional<T>
-  }
+function describe(error: unknown): string {
+	return error instanceof Error ? error.message : String(error)
 }
-
-declare module "typebox/value" {
-  import type { TSchema } from "typebox"
-  export const Value: {
-    Check(schema: TSchema, value: unknown): boolean
-    Errors(schema: TSchema, value: unknown): Iterable<{ instancePath: string; message: string }>
-  }
-}
-
-declare module "typebox/compile" {
-  export const Compile: any
-}
-
-`
