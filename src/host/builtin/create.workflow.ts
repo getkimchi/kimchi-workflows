@@ -1,26 +1,12 @@
 /**
- * The `/workflow create` meta-workflow: a workflow that writes workflows.
+ * The `/workflow create` meta-workflow: goal → clarify → review behavior → implement → prove.
  *
- * It is an ordinary `WorkflowDefinition` — same authoring API, same engine, same event log — which
- * means it blocks, resumes, retries, and is testable exactly like any workflow a user writes.
- *
- * Shape (six top-level nodes, spec §6.6):
- *
- *   brief          questionnaire step — what to build, and what to call the file
- *   target         function            — settle the destination, failing fast on a bad or taken name
- *   review         loop (.dountil)     — design proposes/revises a plan; approve asks approve/revise
- *     design         Q&A agent           — interview → propose (or revise) a blueprint
- *     plan-document  function            — deterministically render blueprint Markdown
- *     approve        interactive         — show Markdown and collect approve/revise feedback
- *   scaffold       function            — reserve the final entry path with a deterministic starter module
- *   until-valid    loop                — edit files in place, validate the entry graph, retry on failure
- *   complete       function            — report the already-written, validated entry path
- *
- * The approval step persists its exact plan document and lets the attended host render it through PI
- * after the engine releases the project lock. Revision is still an ordinary `.dountil` iteration.
+ * The approval contract is intentionally smaller than the implementation. It records what the user
+ * wants, how information moves, and where observable results or effects occur. Framework constructs
+ * and source-level policies are selected only after approval, while writing the simplest useful first
+ * version.
  */
-import { existsSync } from "node:fs"
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises"
+import { mkdir, readdir, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent"
 import { Markdown } from "@earendil-works/pi-tui"
@@ -33,165 +19,124 @@ import {
 	createWorkflow,
 } from "../../flow/index.ts"
 import type { InteractionRenderArgs, RunContext } from "../../flow/types.ts"
-import { WORKFLOW_SUFFIX } from "../load-workflow.ts"
+import { loadWorkflowFile, WORKFLOW_SUFFIX } from "../load-workflow.ts"
 import { validateWorkflowFile } from "../workflow-candidate-validator.ts"
-import {
-	describeSourceConformance,
-	renderAuthoringGuide,
-	renderWorkflowPlan,
-	renderWorkflowScaffold,
-	type WorkflowBlueprint,
-	workflowBlueprintSchema,
-} from "./workflow-authoring.ts"
+import { prepareWorkflowPackage } from "../workflow-package.ts"
+import { verifyWorkflowTest, WorkflowTestInfrastructureError } from "../workflow-test-verifier.ts"
+import { renderAuthoringGuidance } from "./authoring-guidance.ts"
+import { renderWorkflowPlan, type WorkflowPlan, workflowPlanSchema } from "./workflow-authoring.ts"
 
-/**
- * Initial input: the extension supplies the project root so steps can resolve paths without a cwd
- * assumption, and the workflows directory as the RUNNING harness names it (`.<app>/workflows/`,
- * project-dir.ts). The directory arrives as DATA because this module may not compute it: it is loaded
- * back through `loadWorkflowFile`'s restricted loader (on resume, and by the attended loop), where
- * project-dir.ts's `@earendil-works/pi-coding-agent` import does not resolve.
- */
+/** Project locations supplied by the host; no user-facing command arguments are required. */
 export const createInputSchema = Type.Object({
 	projectRoot: Type.String(),
 	workflowsDir: Type.Optional(Type.String()),
 })
 
-/** What the interview must establish before any code is generated. */
-export const specSchema = workflowBlueprintSchema
-
-const briefSchema = Type.Object({
-	goal: Type.String({ title: "Goal", description: "What should this workflow do?", chat: true }),
-	fileName: Type.String({
-		title: "File name",
-		description: "File to write, e.g. `deploy.workflow.ts` (saved under the project's workflows directory).",
+const goalSchema = Type.Object({
+	goal: Type.String({
+		title: "Goal",
+		description: "What would you like the workflow to accomplish?",
+		chat: true,
 	}),
 })
 
-/** The Approve/Revise response returned by the workflow-defined PI renderer. */
+const targetSchema = Type.Object({
+	entryPath: Type.String(),
+})
+
+const proposedTargetSchema = Type.Object({
+	plan: workflowPlanSchema,
+	target: targetSchema,
+})
+
 const approveSchema = Type.Object({
 	decision: Type.Union([Type.Literal("approve"), Type.Literal("revise")], {
 		title: "Decision",
-		description: "Approve the plan above, or ask for changes?",
+		description: "Approve the behavior above, or ask for changes?",
 	}),
 	feedback: Type.Optional(Type.String({ title: "Feedback", description: "If revising, what should change?" })),
 })
 
-/** Exact review payload persisted in the interaction event and rendered again after process restart. */
 const planDocumentSchema = Type.Object({
-	blueprint: specSchema,
+	plan: workflowPlanSchema,
+	target: targetSchema,
 	markdown: Type.String(),
 })
 
-const generatedFilesSchema = Type.Object({
-	entryPath: Type.String({
-		description: "Path to the main .workflow.ts entry file written on disk. Do not submit source code here.",
-	}),
-	/**
-	 * Any additional check the agent performed itself. The framework independently runs its mandatory
-	 * TypeScript/runtime/conformance checks.
-	 */
-	verification: Type.String({ description: "Any extra checks you ran, or `framework validation only`." }),
+const reviewOutcomeSchema = Type.Object({
+	decision: approveSchema.properties.decision,
+	feedback: Type.Optional(Type.String()),
+	plan: workflowPlanSchema,
+	entryPath: Type.String(),
 })
+
+const generatedFilesSchema = Type.Object({
+	testPath: Type.String({ description: "The focused happy-path test file written for package verification." }),
+	verification: Type.Optional(Type.String({ description: "Additional project checks actually run, if any." })),
+})
+
+const packageReadySchema = Type.Object({
+	packageDirectory: Type.String(),
+	verifyCommand: Type.String(),
+})
+
 const checkSchema = Type.Object({
 	ok: Type.Boolean(),
 	entryPath: Type.String(),
+	testPath: Type.String(),
 	error: Type.Optional(Type.String()),
-	// Carried through from `generate`'s output (names-only addressing, spec 4.1): the loop's output is
-	// the body's LAST step's output, so anything a downstream reader needs must ride in it — `complete`
-	// reads this from its own input rather than path-reaching into the loop's internals.
 	verification: Type.Optional(Type.String()),
 })
 
-/** Step 1 — the opening form. Deterministic, no LLM: two questions derived from the schema. */
-const brief = createQuestionnaireStep({
-	name: "brief",
-	description: "What to build, and where to put it",
-	output: briefSchema,
+const completionSchema = Type.Object({
+	path: Type.String(),
+	testPath: Type.String(),
+	command: Type.String(),
+	verification: Type.String(),
 })
 
-/**
- * Step 2 — settle the destination before spending anything on it.
- *
- * `resolveTarget` rejects a name that escapes the project or is already taken, and both are knowable
- * the moment the form is answered. Checking here costs milliseconds; checking only after the review
- * would burn the whole interview first. `scaffold` later repeats the availability guarantee with an
- * exclusive create, covering the filesystem race between these two points.
- */
-const settleTarget = createStep({
-	name: "target",
-	description: "Settle where the workflow will be written",
-	output: Type.Object({ path: Type.String() }),
-	run: ({ ctx }) => ({ path: resolveTarget(ctx) }),
+/** Ask only for the goal. Naming and technical configuration are not the user's opening burden. */
+const collectGoal = createQuestionnaireStep({
+	name: "goal",
+	description: "Understand the outcome the user wants",
+	output: goalSchema,
 })
 
-/**
- * Step 3a — the interview (spec §6.6). Runs once per `review` iteration: on the first pass it
- * clarifies and proposes a plan; on a later pass (an `approve` re-block recorded "revise") it
- * incorporates that feedback into a revised plan. The framework injects the asking protocol, so this
- * prompt is task-only.
- */
+/** Interview on the first pass; preserve confirmed decisions when revising a reviewed plan. */
 const design = createAgentStep({
 	name: "design",
-	description: "Interview the user (first pass) or incorporate feedback (a revision pass), and propose a plan",
-	// No input schema (spec §3.6): the preceding node is `target`, so the brief is read from run
-	// context rather than the linear hand-off.
-	output: specSchema,
+	description: "Resolve material ambiguity and propose the workflow's behavior",
+	output: workflowPlanSchema,
 	asks: true,
-	prompt: ({ ctx }) => {
-		const goal = ctx.getStepResult<Static<typeof briefSchema>>("brief")?.goal ?? "(not stated)"
-		const priorApproval = ctx.getStepResult<Static<typeof approveSchema>>("approve")
+	prompt: ({ ctx }) => designPrompt(ctx),
+})
 
-		if (!priorApproval) {
-			return [
-				"You are designing a PI workflow on the user's behalf.",
-				"",
-				`Their goal: ${goal}`,
-				"",
-				"Ask batched questions until you genuinely know what to build: its initial input, schemas, data",
-				"sources, control-flow constructs, which steps need an LLM or user input, and how it finishes.",
-				"Represent that design in the structured blueprint schema you were given. Use a named schema for",
-				"every workflow/step input or output. A schema reference must exactly match an entry in `schemas`.",
-				"Schema `kind` is exactly one of: string, number, integer, boolean, unknown, literal, array, object,",
-				"or union. Object schemas use `fields`; array schemas use `items`. Do not emit TypeBox source here.",
-				"Use mode `act` for an agent whose product is side effects, `report` for structured output, and",
-				"`ask` only when the agent itself must clarify. Do not put asking agents in parallel/foreach fan-out.",
-				"Do not guess at anything that would change generated behavior. Do not ask what you can infer.",
-				"",
-				"Once confident, emit your result: a proposed plan. Do NOT ask for approval yourself — a",
-				"separate step presents your plan and collects the decision.",
-			].join("\n")
+const resolveTargetStep = createStep({
+	name: "resolve-target",
+	description: "Resolve a collision-free workflow name and project-local path",
+	input: workflowPlanSchema,
+	output: proposedTargetSchema,
+	run: async ({ input, ctx }) => {
+		const resolved = await resolveTarget(input, ctx)
+		return {
+			plan: { ...input, name: resolved.name },
+			target: { entryPath: resolved.entryPath },
 		}
-
-		// A revision pass: `approve` re-blocked with "revise" (spec §8.5 — this step is being re-entered
-		// inside the SAME `review` loop iteration's body, not restarted from scratch).
-		return [
-			"The user asked to REVISE the plan you proposed. Their goal, for reference:",
-			`  ${goal}`,
-			"",
-			`Feedback: ${priorApproval.feedback || "(no specific feedback given — use your judgment)"}`,
-			"",
-			"Incorporate it and propose a revised plan. Ask brief clarifying questions only if genuinely",
-			"needed; otherwise emit your revised result directly. Do NOT ask for approval yourself.",
-		].join("\n")
 	},
 })
 
-/** Step 3b — deterministically turn the structured blueprint into the exact Markdown to review. */
 const planDocument = createStep({
 	name: "plan-document",
-	description: "Render the proposed workflow as Markdown without another model turn",
-	input: specSchema,
+	description: "Render the behavior and information flow for review",
+	input: proposedTargetSchema,
 	output: planDocumentSchema,
-	run: ({ input }) => ({ blueprint: input, markdown: renderWorkflowPlan(input) }),
+	run: ({ input }) => ({ ...input, markdown: renderWorkflowPlan(input.plan, input.target) }),
 })
 
 const PLAN_WIDGET_KEY = "workflow-create-plan-review"
+const MAX_AUTHORING_ITERATIONS = 10
 
-/**
- * PI 0.79.10 plan review: Markdown remains visible in a transient widget while native selection and
- * multiline editor dialogs collect the decision. `select` is used instead of `confirm`, whose false
- * result cannot distinguish rejection from dismissal.
- */
+/** Render the exact persisted plan and collect an approve/revise decision. */
 export async function renderPlanReview({
 	request,
 	ui,
@@ -199,21 +144,19 @@ export async function renderPlanReview({
 	hasUI,
 	write,
 }: InteractionRenderArgs<Static<typeof planDocumentSchema>>) {
-	const plan = request
 	if (!hasUI) {
-		write(plan.markdown)
+		write(request.markdown)
 		write("This workflow is waiting for approval. Resume it in TUI or RPC mode to respond.")
 		return undefined
 	}
 
 	try {
 		if (mode === "tui") {
-			ui.setWidget(PLAN_WIDGET_KEY, () => new Markdown(plan.markdown, 1, 0, getMarkdownTheme()), {
+			ui.setWidget(PLAN_WIDGET_KEY, () => new Markdown(request.markdown, 1, 0, getMarkdownTheme()), {
 				placement: "aboveEditor",
 			})
 		} else {
-			// RPC/ACP transports serialize widget lines; component factories exist only inside the TUI.
-			ui.setWidget(PLAN_WIDGET_KEY, plan.markdown.split("\n"), { placement: "aboveEditor" })
+			ui.setWidget(PLAN_WIDGET_KEY, request.markdown.split("\n"), { placement: "aboveEditor" })
 		}
 		const decision = await ui.select("Review proposed workflow", ["Approve", "Revise"])
 		if (decision === undefined) return undefined
@@ -231,10 +174,9 @@ export async function renderPlanReview({
 	}
 }
 
-/** Step 3c — block on the exact plan document and let the attended host invoke the renderer above. */
 const approve = createInteractiveStep({
 	name: "approve",
-	description: "Approve the plan design just proposed, or ask for changes",
+	description: "Approve the proposed behavior or request a revision",
 	input: planDocumentSchema,
 	request: planDocumentSchema,
 	output: approveSchema,
@@ -242,316 +184,353 @@ const approve = createInteractiveStep({
 	render: renderPlanReview,
 })
 
-/**
- * The `review` loop's output must carry everything downstream readers need (names-only addressing,
- * spec 4.1): a loop's output is its body's LAST step's output, and `generate` — a sibling construct,
- * outside this loop's scope — reads the approved plan from it by the loop's bare name. This tail step
- * widens the approval decision with the plan itself, replacing `generate`'s old path-form reach into
- * `review/design`.
- */
-const reviewOutcomeSchema = Type.Object({
-	decision: approveSchema.properties.decision,
-	feedback: Type.Optional(Type.String()),
-	plan: specSchema,
-})
 const reviewOutcome = createStep({
 	name: "review-outcome",
-	description: "Bundle the approval decision with the plan it approved",
+	description: "Carry the exact reviewed behavior and destination into implementation",
 	input: approveSchema,
 	output: reviewOutcomeSchema,
 	run: ({ input, ctx }) => {
 		const document = ctx.getStepResult<Static<typeof planDocumentSchema>>("plan-document")
 		if (!document) throw new Error("review-outcome: the plan-document step produced no plan")
-		return { decision: input.decision, feedback: input.feedback, plan: document.blueprint }
+		return {
+			...input,
+			plan: document.plan,
+			entryPath: document.target.entryPath,
+		}
 	},
 })
 
 const reviewBody = createWorkflow({ name: "review-body" })
 	.then(design)
+	.then(resolveTargetStep)
 	.then(planDocument)
 	.then(approve)
 	.then(reviewOutcome)
 	.commit()
 
-/**
- * Step 4 — claim the final entry path and put the deterministic scaffold there.
- *
- * The exclusive write closes the race between `target`'s early availability check and authoring: if
- * another process creates the requested file while the user is reviewing the plan, creation fails
- * here rather than handing an agent permission to overwrite it. From this point on the entry file is
- * this run's workspace and the agent may edit it in place.
- */
-const scaffold = createStep({
-	name: "scaffold",
-	description: "Reserve the final entry path with the approved workflow scaffold",
+/** Atomically reserve the reviewed workflow path without generating a scaffold. */
+const reserve = createStep({
+	name: "reserve",
+	description: "Reserve the approved workflow path",
 	input: reviewOutcomeSchema,
-	output: Type.Object({ entryPath: Type.String() }),
-	run: async ({ input, ctx }) => {
-		const entryPath = plannedTarget(ctx)
-		await mkdir(path.dirname(entryPath), { recursive: true })
+	output: reviewOutcomeSchema,
+	run: async ({ input }) => {
+		await mkdir(path.dirname(input.entryPath), { recursive: true })
 		try {
-			await writeFile(entryPath, renderWorkflowScaffold(input.plan), { encoding: "utf8", flag: "wx" })
+			await writeFile(input.entryPath, "", { encoding: "utf8", flag: "wx" })
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-				throw new Error(`workflow entry appeared before it could be reserved at ${entryPath}; choose another name`)
+				throw new Error(
+					"the reviewed workflow destination appeared before it could be reserved; revise the plan to choose another name",
+				)
 			}
 			throw error
 		}
-		return { entryPath }
+		return input
 	},
 })
 
-/**
- * Step 5a — author the workflow files directly at their final location. On a retry the previous
- * validation error is in run context, so the same agent can inspect and repair the files in place.
- */
-const generate = createAgentStep({
-	name: "generate",
-	description: "Edit the workflow entry file and any helper modules in place",
-	// Deliberately no input schema (spec §3.6): on a retry the loop hands this step the previous
-	// iteration's `check` output, not the spec — so the spec is read from run context instead.
+/** Establish the package and lockfile before asking the authoring agent to work in it. */
+const preparePackage = createStep({
+	name: "prepare-package",
+	description: "Prepare the workflow package and its reproducible verification command",
+	input: reviewOutcomeSchema,
+	output: packageReadySchema,
+	run: async ({ input, abortSignal, logger }) => {
+		const prepared = await prepareWorkflowPackage({
+			directory: path.dirname(input.entryPath),
+			signal: abortSignal,
+		})
+		logger.info(
+			prepared.installed
+				? `prepared workflow package at ${prepared.directory}`
+				: `workflow package already ready at ${prepared.directory}`,
+		)
+		return { packageDirectory: prepared.directory, verifyCommand: prepared.verifyCommand }
+	},
+})
+
+/** Author clean source and a focused happy-path test directly in the project. */
+const implement = createAgentStep({
+	name: "implement",
+	description: "Implement the approved behavior as a clean, editable workflow",
 	output: generatedFilesSchema,
-	prompt: ({ ctx }) => {
-		// `design` lives inside the `review` loop, a SIBLING of `until-valid` — outside this step's
-		// lexical scope. The approved plan rides the review loop's own OUTPUT (review-outcome), read here
-		// by the loop's bare name (names-only addressing, spec 4.1).
-		const input = ctx.getStepResult<{ plan: WorkflowBlueprint }>("review")?.plan
-		if (!input) throw new Error("generate: the review loop produced no approved plan")
-		const entryPath = plannedTarget(ctx)
-		const previous = ctx.getStepResult<{ ok: boolean; entryPath?: string; error?: string }>("check")
-		const retry = previous?.error
-			? [
-					"",
-					"The files currently on disk FAILED validation with:",
-					previous.error,
-					"Inspect the entry file and its imports, then repair them in place. Keep the deterministic",
-					"structure unless the diagnostic requires a change.",
-				]
-			: []
-		return [
-			"Complete the PI workflow by editing files directly in the project.",
-			"A deterministic scaffold has already been written to the final entry file:",
-			`  ${entryPath}`,
-			"Use your filesystem tools to read and edit that file in place. You may create helper .ts files",
-			"when useful and import them with relative paths from the entry module. Do not edit unrelated files.",
-			"",
-			"APPROVED BLUEPRINT:",
-			JSON.stringify(input, null, 2),
-			"",
-			"RELEVANT AUTHORING API:",
-			renderAuthoringGuide(input),
-			"",
-			"Requirements:",
-			"  - save all implementation changes to disk; do not return source code through submit_result",
-			"  - replace every TODO_WORKFLOW placeholder with working semantic code",
-			"  - preserve the scaffold's imports, schemas, node names/kinds, control-flow shape, and export",
-			"  - an acting (`mode: act`) agent intentionally has no output schema; report/ask agents do",
-			"  - use only real API signatures from the generated authoring reference above",
-			"  - no side effects at import time — the module must only define and export the workflow",
-			`  - submit entryPath as exactly ${JSON.stringify(entryPath)} after the files have been saved`,
-			"",
-			"The framework will typecheck the on-disk entry module and its imports, load it, and compare its structure to the",
-			"approved blueprint. Formatting is not part of candidate validation.",
-			"In `verification`, state any extra check you actually ran; say `framework validation only` otherwise.",
-			"",
-			...retry,
-		].join("\n")
-	},
+	prompt: ({ ctx }) => implementationPrompt(ctx),
 })
 
-/**
- * Where the generated workflow will land. A bare name goes to the project's workflows directory
- * (`.<app>/workflows/`, project-dir.ts) so the new workflow is immediately discoverable by
- * `/workflow list` and runnable by name; anything containing a separator is a path relative to the
- * project root.
- */
-function resolveTarget(ctx: RunContext): string {
-	const init = ctx.getInitData<Static<typeof createInputSchema>>() ?? { projectRoot: process.cwd() }
-	const projectRoot = init.projectRoot
-	// `.pi` is the same "we are not being told a name" fallback project-dir.ts documents; the extension
-	// always passes the real directory.
-	const workflowsDir = init.workflowsDir ?? path.join(projectRoot, ".pi", "workflows")
-	const { fileName } = ctx.getStepResult<{ fileName: string }>("brief") ?? { fileName: "untitled.workflow.ts" }
-	const named = fileName.endsWith(".ts") ? fileName : `${fileName}${WORKFLOW_SUFFIX}`
-	const target =
-		named.includes(path.sep) || named.includes("/") ? path.resolve(projectRoot, named) : path.join(workflowsDir, named)
-
-	// Containment: `/workflow create` writes into the project, never outside it. `fileName` is free
-	// text from the opening form, so `../../elsewhere.ts` would otherwise resolve anywhere on disk.
-	const root = path.resolve(projectRoot)
-	if (target !== root && !target.startsWith(root + path.sep)) {
-		throw new Error(`"${fileName}" resolves outside the project (${target}); choose a name inside ${root}`)
-	}
-
-	assertAvailable(target, fileName)
-	return target
-}
-
-/** Read the destination settled by `target` without re-running its "must not exist" preflight. */
-function plannedTarget(ctx: RunContext): string {
-	const target = ctx.getStepResult<{ path: string }>("target")?.path
-	if (!target) throw new Error("the target step did not settle a workflow entry path")
-	return path.resolve(target)
-}
-
-/** Resolve a submitted absolute or project-relative entry path for an exact comparison with the plan. */
-function resolveSubmittedEntryPath(entryPath: string, projectRoot: string): string {
-	return path.isAbsolute(entryPath) ? path.resolve(entryPath) : path.resolve(projectRoot, entryPath)
-}
-
-/**
- * Read the entry module and every local TypeScript module it statically imports or re-exports.
- *
- * Runtime conformance can prove the exported workflow's shape, but it does not call step bodies. A
- * `TODO_WORKFLOW` throw moved into a helper would therefore survive both typechecking and loading if
- * conformance inspected only the entry source. TypeScript remains the authority for full resolution;
- * this small traversal exists solely to keep deterministic scaffold placeholders out of any authored
- * module that belongs to the entry graph.
- */
-async function readAuthoredModuleGraph(entryPath: string): Promise<string> {
-	const visited = new Set<string>()
-	const sources: string[] = []
-
-	async function visit(file: string): Promise<void> {
-		const resolved = path.resolve(file)
-		if (visited.has(resolved)) return
-		visited.add(resolved)
-		const source = await readFile(resolved, "utf8")
-		sources.push(source)
-		for (const specifier of relativeModuleSpecifiers(source)) {
-			const imported = await resolveRelativeTypeScriptModule(path.dirname(resolved), specifier)
-			if (imported) await visit(imported)
-		}
-	}
-
-	await visit(entryPath)
-	return sources.join("\n")
-}
-
-function relativeModuleSpecifiers(source: string): string[] {
-	const matches = source.matchAll(/\b(?:import|export)\s+(?:[^"'`]*?\s+from\s+)?["'](\.[^"']+)["']/g)
-	return [...matches].flatMap((match) => (match[1] ? [match[1]] : []))
-}
-
-async function resolveRelativeTypeScriptModule(directory: string, specifier: string): Promise<string | undefined> {
-	const base = path.resolve(directory, specifier)
-	const extension = path.extname(base)
-	const candidates = extension
-		? [base, ...(extension === ".js" ? [`${base.slice(0, -3)}.ts`] : [])]
-		: [
-				`${base}.ts`,
-				`${base}.tsx`,
-				`${base}.mts`,
-				`${base}.cts`,
-				path.join(base, "index.ts"),
-				path.join(base, "index.tsx"),
-			]
-	for (const candidate of candidates) {
-		try {
-			if ((await stat(candidate)).isFile()) return candidate
-		} catch {
-			// TypeScript reports a missing import later; this traversal only follows files that exist.
-		}
-	}
-	return undefined
-}
-
-/**
- * Refuse to write over an existing file. Generating a workflow must never destroy one, and quietly
- * choosing a different name would be worse than failing: the run would report success while the file
- * the user asked for still holds something else.
- *
- * Enforced from {@link resolveTarget}, so the ordinary clash surfaces before the review. The
- * `scaffold` step repeats the guarantee atomically with an exclusive create after approval.
- */
-function assertAvailable(target: string, fileName: string): void {
-	if (existsSync(target)) {
-		throw new Error(`"${fileName}" already exists at ${target}; delete or rename it, or re-run with a different name`)
-	}
-}
-
-/**
- * Step 5b — validate the files statically and dynamically at their final locations.
- *
- * TypeScript begins at the submitted entry and follows relative imports. The runtime loader then loads
- * that same entry graph, and conformance compares its exported workflow with the approved blueprint.
- */
+/** Independently validate the workflow and confirm that the implementation supplied its project test. */
 const check = createStep({
 	name: "check",
-	description: "Typecheck, load, and compare the on-disk workflow",
+	description: "Validate the workflow and its happy-path test",
 	input: generatedFilesSchema,
 	output: checkSchema,
 	run: async ({ input, ctx, abortSignal }) => {
-		const init = ctx.getInitData<Static<typeof createInputSchema>>() ?? { projectRoot: process.cwd() }
-		const target = plannedTarget(ctx)
+		const approved = approvedOutcome(ctx)
+		const init = createInput(ctx)
+		const packageReady = ctx.getStepResult<Static<typeof packageReadySchema>>("prepare-package")
+		if (!packageReady) throw new WorkflowTestInfrastructureError("workflow package preparation produced no result")
+		const entryPath = path.resolve(approved.entryPath)
 		try {
-			const entryPath = resolveSubmittedEntryPath(input.entryPath, init.projectRoot)
-			if (entryPath !== target) {
+			const testPath = resolveSubmittedPath(input.testPath, init.projectRoot)
+			assertInsideProject(testPath, init.projectRoot, "testPath")
+			if (!(await stat(testPath)).isFile()) throw new Error(`submitted testPath is not a file: ${testPath}`)
+
+			const validation = await validateWorkflowFile({ entryPath, projectRoot: init.projectRoot, signal: abortSignal })
+			if (validation.workflow.name !== approved.plan.name) {
 				throw new Error(
-					`submitted entryPath resolves to ${entryPath}, but this run reserved ${target}; edit and submit the reserved entry file`,
+					`authored workflow is named "${validation.workflow.name}", but the reviewed name is "${approved.plan.name}"`,
 				)
 			}
-			const plan = ctx.getStepResult<{ plan: WorkflowBlueprint }>("review")?.plan
-			if (!plan) throw new Error("check: the review loop produced no approved plan")
-			const source = await readAuthoredModuleGraph(entryPath)
-			const validation = await validateWorkflowFile({
+			if (!approved.plan.invocation.requiresArguments && validation.workflow.inputSchema) {
+				throw new Error(
+					"the reviewed workflow runs without arguments, but the authored workflow declares top-level input",
+				)
+			}
+
+			const testVerification = await verifyWorkflowTest({
 				entryPath,
-				projectRoot: init.projectRoot,
+				testPath,
+				packageRoot: packageReady.packageDirectory,
 				signal: abortSignal,
-				conformance: (workflow) => describeSourceConformance(plan, source, workflow),
 			})
+			const frameworkVerification = `framework: ${validation.summary}; package: ${testVerification.summary}`
+
 			return {
 				ok: true,
 				entryPath,
-				verification: `${input.verification}; framework: ${validation.summary}`,
+				testPath,
+				verification: input.verification ? `${input.verification}; ${frameworkVerification}` : frameworkVerification,
 			}
-		} catch (err) {
-			if (abortSignal.aborted) throw err
+		} catch (error) {
+			if (abortSignal.aborted) throw error
+			if (error instanceof WorkflowTestInfrastructureError) throw error
 			return {
 				ok: false,
-				entryPath: input.entryPath,
-				error: err instanceof Error ? err.message : String(err),
+				entryPath,
+				testPath: input.testPath,
+				error: describe(error),
 				verification: input.verification,
 			}
 		}
 	},
 })
 
-const generateAndCheck = createWorkflow({ name: "generate-and-check" }).then(generate).then(check).commit()
+const implementAndCheck = createWorkflow({ name: "implement-and-check" }).then(implement).then(check).commit()
 
-/** Step 6 — report the entry that is already written and validated. */
 const complete = createStep({
 	name: "complete",
-	description: "Report the validated workflow entry path",
+	description: "Report the runnable workflow and its happy-path proof",
 	input: checkSchema,
-	output: Type.Object({ path: Type.String() }),
+	output: completionSchema,
 	run: ({ input, ctx, logger }) => {
-		if (!input.ok) throw new Error("complete: validation did not pass")
-		const target = plannedTarget(ctx)
-		// `generate` lives inside the `until-valid` loop; its verification rides the loop's output
-		// (checkSchema) into this step's own input — no reaching into the loop's internals (spec 4.1).
-		if (input.verification) logger.info(`validation: ${input.verification}`)
-		return { path: target }
+		if (!input.ok) throw new Error("complete: workflow validation and happy-path verification did not pass")
+		const approved = approvedOutcome(ctx)
+		const command = approved.plan.invocation.requiresArguments
+			? `/workflow run ${approved.plan.name} --input …`
+			: `/workflow run ${approved.plan.name}`
+		const verification = input.verification ?? "TypeScript, runtime load, and happy path passed"
+		logger.info(`created ${approved.entryPath}`)
+		logger.info(`run with: ${command}`)
+		const packageReady = ctx.getStepResult<Static<typeof packageReadySchema>>("prepare-package")
+		if (packageReady) logger.info(`verify from ${packageReady.packageDirectory}: ${packageReady.verifyCommand}`)
+		logger.info(`verification: ${verification}`)
+		return { path: approved.entryPath, testPath: input.testPath, command, verification }
 	},
 })
 
 const createWorkflowWorkflow = createWorkflow({
 	name: "create-workflow",
-	description: "Interview the user and generate a new workflow file",
+	description: "Turn a goal into a clean, runnable, happy-path-proven workflow",
 	input: createInputSchema,
 })
-	.then(brief)
-	.then(settleTarget)
-	.dountil(reviewBody, (_ctx, lastOutput) => (lastOutput as Static<typeof approveSchema>).decision === "approve", {
-		name: "review",
-		maxIterations: 10,
-	})
-	.then(scaffold)
-	.dountil(generateAndCheck, (ctx) => ctx.getStepResult<{ ok: boolean }>("check")?.ok === true, {
-		name: "until-valid",
-		maxIterations: 3,
+	.then(collectGoal)
+	.dountil(
+		reviewBody,
+		(_ctx, lastOutput) => (lastOutput as Static<typeof reviewOutcomeSchema>).decision === "approve",
+		{
+			name: "review",
+			maxIterations: MAX_AUTHORING_ITERATIONS,
+		},
+	)
+	.then(reserve)
+	.then(preparePackage)
+	.dountil(implementAndCheck, (ctx) => ctx.getStepResult<{ ok: boolean }>("check")?.ok === true, {
+		name: "until-ready",
+		maxIterations: MAX_AUTHORING_ITERATIONS,
 	})
 	.then(complete)
 	.commit()
 
 export default createWorkflowWorkflow
+
+function designPrompt(ctx: RunContext): string {
+	const goal = ctx.getStepResult<Static<typeof goalSchema>>("goal")?.goal ?? "(not stated)"
+	const priorApproval = ctx.getStepResult<Static<typeof approveSchema>>("approve")
+	const priorDocument = ctx.getStepResult<Static<typeof planDocumentSchema>>("plan-document")
+	if (priorApproval?.decision === "revise" && priorDocument) {
+		return `Revise a proposed workflow behavior after user review.
+
+Original goal: ${goal}
+Revision feedback: ${priorApproval.feedback || "Use your judgment."}
+
+PREVIOUS REVIEWED PROPOSAL:
+${JSON.stringify(priorDocument.plan, null, 2)}
+
+Preserve every unaffected acceptance criterion and confirmed decision. Ask only if the requested revision
+creates a material ambiguity; never re-ask a settled question merely to confirm it. Return the revised
+behavior through submit_result. Do not ask for approval yourself.`
+	}
+
+	return `Design the first useful version of a workflow from the user's goal.
+
+GOAL: ${goal}
+
+First inspect the available project context and infer anything obvious. Ask only questions whose answers can
+materially change the workflow's behavior, acceptance criteria, information flow, or delivery of results and
+effects. Do not ask for a file name, framework construct, schema, model, timeout, retry count, token budget,
+concurrency, maximum iteration count, or another implementation choice.
+
+Batch as many useful questions as possible, but every question in one batch must be independent given what is
+currently known. If the answer to one question determines whether or how another should be asked, defer the
+dependent question to a later batch. Do not ask obvious questions or ask the user to repeat information already
+present in the goal or project.
+
+When it is unclear how results or effects should be exposed, ask an open question such as:
+"How should the workflow expose or deliver its results, and at what point should that happen?"
+Do not assume that delivery happens at the final step or that the workflow returns a final value.
+
+Default to a workflow started with /workflow run <name> and no top-level input arguments. Only set
+requiresArguments to true when the user clearly objects to that default, and record why.
+
+When ambiguity is low enough to build a useful first version, submit one concise behavioral plan:
+- convert the goal into observable acceptance criteria;
+- turn every material answer into a confirmed decision, criterion, step, hand-off, or delivery point;
+- break the behavior into logical steps and state what information each receives and makes available;
+- attach user-visible delivery or observable effects to whichever step performs them; and
+- choose a concise kebab-case name derived from the goal.
+
+Keep it high-level. Do not encode implementation details or speculative operational constraints. Do not ask for
+approval yourself; a separate interaction presents the proposal.`
+}
+
+async function resolveTarget(plan: WorkflowPlan, ctx: RunContext) {
+	const init = createInput(ctx)
+	const directory = init.workflowsDir ?? path.join(init.projectRoot, ".pi", "workflows")
+	const files = await readdir(directory).catch(() => [] as string[])
+	const occupiedFiles = new Set(files)
+	const occupiedNames = new Set<string>()
+	for (const file of files.filter((name) => name.endsWith(WORKFLOW_SUFFIX))) {
+		try {
+			occupiedNames.add((await loadWorkflowFile(path.join(directory, file))).name)
+		} catch {
+			// A broken workflow still reserves its filename; it simply contributes no trustworthy declared name.
+		}
+	}
+
+	const fallback = ctx.getStepResult<Static<typeof goalSchema>>("goal")?.goal ?? "workflow"
+	const base = workflowSlug(plan.name || fallback)
+	let workflowName = base
+	let suffix = 2
+	while (occupiedNames.has(workflowName) || occupiedFiles.has(`${workflowName}${WORKFLOW_SUFFIX}`)) {
+		workflowName = `${base}-${suffix}`
+		suffix += 1
+	}
+	return {
+		name: workflowName,
+		entryPath: path.join(directory, `${workflowName}${WORKFLOW_SUFFIX}`),
+	}
+}
+
+function workflowSlug(value: string): string {
+	const slug = value
+		.normalize("NFKD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+	return slug || "workflow"
+}
+
+function implementationPrompt(ctx: RunContext): string {
+	const approved = approvedOutcome(ctx)
+	const previous = ctx.getStepResult<Static<typeof checkSchema>>("check")
+	const repair = previous?.error
+		? `
+
+THE CURRENT FILES FAILED INDEPENDENT VERIFICATION:
+${previous.error}
+Inspect the existing files, make the smallest clear repair, and resubmit the same paths.`
+		: ""
+
+	return `Implement the approved workflow directly in the project. Produce a useful first version that is easy for
+its owner to read and change; future iteration is expected.
+
+Workflow name: ${approved.plan.name}
+Workflow entry: ${approved.entryPath}
+
+APPROVED BEHAVIORAL PLAN:
+${JSON.stringify(approved.plan, null, 2)}
+
+${renderAuthoringGuidance()}
+
+The workflow directory is already a private pnpm package with its own package.json, pnpm-lock.yaml, installed
+verification toolchain, and a focused verifier. Run it from the workflow package as:
+pnpm run verify:workflow -- --entry ${path.basename(approved.entryPath)} --test <colocated-test-file>
+
+Implementation requirements:
+- write complete source directly to the reserved entry path; there is no generated scaffold to preserve;
+- use only public @kimchi-dev/kimchi-workflows APIs for workflow constructs; use the embedded reference above,
+  then the linked public documentation or examples when more context is needed rather than guessing;
+- add ordinary third-party runtime dependencies to the existing workflow package when the approved behavior needs
+  them, using pnpm with that package as its directory; never use npm or yarn and do not replace its package metadata;
+- use the simplest control flow that implements the approved behavior and information hand-offs;
+- prefer meaningful names, small cohesive steps, and local clarity over reusable abstractions;
+- add a schema only where information crosses a boundary that benefits from validation;
+- do not add timeouts, retries, token or output limits, concurrency ceilings, loop limits, model overrides, or
+  other operational policy unless the approved plan explicitly requires it;
+- do not declare top-level workflow input unless invocation.requiresArguments is true; gather required run-specific
+  information inside the workflow or derive it from project context;
+- deliver results or effects at the approved step; do not manufacture a final return value when none is needed;
+- declare the workflow name as exactly ${JSON.stringify(approved.plan.name)};
+- keep modules free of import-time side effects and leave no placeholder implementation; and
+- create helper modules only when they make the result easier to understand.
+
+Create one concise, colocated Vitest happy-path test. Prefer the public
+@kimchi-dev/kimchi-workflows/testing helpers (createTestRun, agent replies, step overrides, answers, and
+interactions). Assert completion and the observable output or step effect that proves the acceptance criteria. Stub
+agent, network, and destructive effects while keeping safe deterministic logic real. Do not overwrite an existing
+test or use the parent repository's typecheck, lint, test configuration, or dependencies as proof. You may run the
+workflow package's focused verifier against the entry and test while authoring; the framework will run that same
+package-owned command after submission.
+
+Save both files before submitting. Return the test path through submit_result. Include verification only for
+additional project checks that project instructions required and that you actually ran; omit it otherwise.
+
+The framework independently loads the workflow through its real Jiti runtime, verifies argument-free invocation
+when approved, and executes the package's TypeScript and focused Vitest verification.${repair}`
+}
+
+function approvedOutcome(ctx: RunContext): Static<typeof reviewOutcomeSchema> {
+	const approved = ctx.getStepResult<Static<typeof reviewOutcomeSchema>>("review")
+	if (!approved) throw new Error("the review loop produced no approved behavior")
+	return approved
+}
+
+function createInput(ctx: RunContext): Static<typeof createInputSchema> {
+	return ctx.getInitData<Static<typeof createInputSchema>>() ?? { projectRoot: process.cwd() }
+}
+
+function resolveSubmittedPath(filePath: string, projectRoot: string): string {
+	return path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(projectRoot, filePath)
+}
+
+function assertInsideProject(filePath: string, projectRoot: string, label: string): void {
+	const root = path.resolve(projectRoot)
+	if (filePath !== root && !filePath.startsWith(`${root}${path.sep}`)) {
+		throw new Error(`${label} resolves outside the project: ${filePath}`)
+	}
+}
+
+function describe(error: unknown): string {
+	return error instanceof Error ? error.message : String(error)
+}

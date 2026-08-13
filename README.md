@@ -77,10 +77,11 @@ Because the engine owns every transition — and every branch/loop condition is 
 
 On Node.js 20 or 22, npm may misleadingly fail with `ETARGET No matching version found for @kimchi-dev/kimchi-workflows@*`. The package exists; npm has rejected it because it requires Node.js 24 or newer. Upgrade Node.js, then retry the installation.
 
-There are two separate installs, and most people only need the first:
+There are two separate concerns, and most people only need to install the first manually:
 
 1. **The extension** — gives you the `/workflow` commands. Install once per machine or per project.
-2. **The package as a dependency** — only for type-checking and testing the workflows you write. Running them needs nothing.
+2. **The project workflow package** — `/workflow create` prepares this automatically for type-checking, testing,
+   and project-specific workflow dependencies.
 
 ### 1. The extension
 
@@ -108,15 +109,20 @@ piWorkflowsExtension(pi);
 
 > **A package with no `pi` key loads nothing.** Kimchi records it in settings and contributes no resources, silently — no error on startup. After installing, confirm `/workflow` actually exists.
 
-### 2. The package (optional)
+### 2. The project workflow package
 
-Only if you want autocomplete, `tsc`, or your own tests over the workflows you author — none of it is needed to *run* them:
+`/workflow create` initializes `.kimchi/workflows/package.json`, `pnpm-lock.yaml`, and the matching development
+toolchain automatically. If you author workflows by hand, initialize that directory with pnpm and add the public
+framework and TypeBox packages yourself:
 
 ```bash
-npm install -D @kimchi-dev/kimchi-workflows typebox     # or pnpm add -D
+pnpm --dir .kimchi/workflows add -D @kimchi-dev/kimchi-workflows typebox
 ```
 
-`typebox` comes along because your editor needs its types on disk; at run time Kimchi's own copy is used regardless of what you install. The published package ships built JavaScript with `.d.ts`, so an ordinary `tsconfig.json` type-checks it with no special flags.
+The workflow directory is one private package shared by all project workflows, not one package per file. Add
+third-party runtime dependencies there as well. Jiti finds them beside the workflow sources, and the package-owned
+verification command uses the same locked environment. At run time Kimchi still supplies its compatible framework,
+TypeBox, and PI modules.
 
 ### Commands
 
@@ -125,7 +131,7 @@ Once the extension is registered, these are available in any Kimchi session:
 | Command | What it does |
 | --- | --- |
 | `/workflow list` | List the project's workflows: name, file, and description. |
-| `/workflow create` | Interview you, propose a plan, and generate a new workflow file. |
+| `/workflow create` | Turn your goal into an approved behavioral plan, a runnable workflow, and a happy-path test. |
 | `/workflow run <name\|file.ts>` | Start a run, by declared name or by path. Rejected if a run is already executing in this project. |
 | `/workflow run list` | List runs: id, workflow name, status, current step, pending questions, started/completed times. |
 | `/workflow resume [run-id]` | Continue a `blocked` / `crashed` / `cancelled` run from its last checkpoint. |
@@ -186,6 +192,13 @@ Run it from inside Kimchi:
 ```
 
 Concurrent steps must not modify the same files, branches, or external state; sequence work with overlapping side effects.
+
+Authoring documentation:
+
+- [Authoring workflows](docs/authoring.md) — step selection, data flow, control flow, and lifecycle choices.
+- [Testing workflows](docs/testing.md) — focused tests and package-owned verification.
+- [Workflow dependencies](docs/dependencies.md) — the shared workflow package and third-party dependencies.
+- [API reference](docs/api-reference.md) — generated, version-matched public signatures and invariants.
 
 ---
 

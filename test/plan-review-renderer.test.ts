@@ -3,13 +3,19 @@ import { describe, expect, it, vi } from "vitest"
 import { renderPlanReview } from "../src/host/builtin/create.workflow.ts"
 
 const plan = {
-	name: "demo",
-	description: "Demo workflow",
+	goal: "Do one useful thing",
+	acceptanceCriteria: ["The useful thing is done"],
+	decisions: [],
 	summary: "Does one useful thing.",
-	schemas: [],
-	nodes: [{ kind: "function" as const, name: "work", purpose: "do the work" }],
+	name: "demo",
+	invocation: { requiresArguments: false },
+	steps: [{ title: "Work", purpose: "Do the work", receives: [], produces: [], delivers: [] }],
 }
-const request = { blueprint: plan, markdown: "# Proposed workflow: `demo`\n\nDoes one useful thing." }
+const request = {
+	plan,
+	target: { entryPath: "/project/demo.workflow.ts" },
+	markdown: "# Proposed workflow\n\nDoes one useful thing.",
+}
 
 function fakeUi(selection: string | undefined, feedback?: string | undefined) {
 	const widgets: unknown[] = []

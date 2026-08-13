@@ -245,10 +245,10 @@ describe("the background bridge hands the contract to the child", () => {
 		expect(first?.env?.[STEP_OUTPUT_TOOLS_ENV]).not.toBe(second?.env?.[STEP_OUTPUT_TOOLS_ENV])
 	})
 
-	it("passes no handoff for a step with no output contract", async () => {
+	it("passes only the worker permission posture for a step with no output contract", async () => {
 		const call = await spawnStep({ stepName: "bg", background: true })
 
-		expect(call?.env).toBeUndefined()
+		expect(call?.env).toEqual({ KIMCHI_PERMISSIONS: "yolo" })
 	})
 
 	it("forwards the parent's own -e flags only when there are tools to register", async () => {

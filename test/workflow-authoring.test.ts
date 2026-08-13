@@ -1,199 +1,87 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import path from "node:path"
 import { Value } from "typebox/value"
 import { describe, expect, it } from "vitest"
-import {
-	authoringSchemas,
-	describeSourceConformance,
-	renderAuthoringGuide,
-	renderWorkflowPlan,
-	renderWorkflowScaffold,
-	type WorkflowBlueprint,
-} from "../src/host/builtin/workflow-authoring.ts"
-import { loadWorkflowFile } from "../src/host/load-workflow.ts"
-import { workflowsDir } from "../src/host/project-dir.ts"
+import { renderWorkflowPlan, type WorkflowPlan, workflowPlanSchema } from "../src/host/builtin/workflow-authoring.ts"
 
-const textSchema = {
-	kind: "object" as const,
-	fields: [{ name: "text", schema: { kind: "string" as const } }],
-}
-const itemSchema = {
-	kind: "object" as const,
-	fields: [{ name: "value", schema: { kind: "integer" as const } }],
-}
-
-const blueprint: WorkflowBlueprint = {
-	name: "full-authoring-surface",
-	description: "Exercise every deterministically rendered authoring construct",
-	summary: "A generation fixture covering steps, mapping, control flow, fan-out, and nesting.",
-	maxConcurrency: 4,
-	schemas: [
-		{ name: "text", schema: textSchema },
-		{ name: "item", schema: itemSchema },
+const plan: WorkflowPlan = {
+	goal: "Review the current git diff and show actionable findings",
+	summary: "Read the current diff, review it, and show findings immediately.",
+	acceptanceCriteria: [
+		"The current diff is reviewed",
+		"Actionable findings are shown before the workflow records completion",
 	],
-	nodes: [
+	decisions: [
+		"Use the current working tree without asking for a path",
+		"Show Markdown in the conversation as soon as review finishes",
+		"Do not modify reviewed files",
+	],
+	name: "review-current-diff",
+	invocation: { requiresArguments: false },
+	steps: [
 		{
-			kind: "questionnaire",
-			name: "ask",
-			purpose: "collect initial text",
-			output: "text",
-			inputSource: "none",
+			title: "Read changes",
+			purpose: "Collect the current working-tree diff",
+			receives: [],
+			produces: ["git diff"],
+			delivers: [],
 		},
 		{
-			kind: "agent",
-			name: "research",
-			purpose: "research the requested topic",
-			input: "text",
-			output: "text",
-			inputSource: "previous",
-			mode: "report",
-			background: true,
-			maxTokens: 2_000,
-			maxOutputRepairs: 3,
-			maxDurationMs: 30_000,
-			resumable: "research-session",
-			retry: { maxRetry: 1, backoffMs: 250 },
-		},
-		{ kind: "map", name: "to-item", purpose: "convert research into one work item", sources: ["research"] },
-		{
-			kind: "loop",
-			name: "until-reviewed",
-			purpose: "repeat work until it passes review",
-			mode: "dountil",
-			maxIterations: 3,
-			body: {
-				name: "review-round",
-				nodes: [{ kind: "agent", name: "review", purpose: "review the current result", mode: "act" }],
-			},
-		},
-		{
-			kind: "foreach",
-			name: "each-item",
-			purpose: "process every selected item",
-			concurrency: 2,
-			feedback: false,
-			body: {
-				name: "item-body",
-				nodes: [
-					{
-						kind: "function",
-						name: "process-item",
-						purpose: "process one item",
-						input: "item",
-						output: "item",
-						inputSource: "scope",
-					},
-				],
-			},
-		},
-		{
-			kind: "parallel",
-			name: "checks",
-			purpose: "run independent checks",
-			arms: [
-				{ kind: "function", name: "lint", purpose: "run lint" },
-				{ kind: "function", name: "types", purpose: "run type checks" },
-			],
-		},
-		{
-			kind: "branch",
-			name: "publish-choice",
-			purpose: "publish when the checks pass",
-			arms: [
-				{
-					purpose: "publish approved work",
-					body: {
-						name: "publish-arm",
-						nodes: [{ kind: "function", name: "publish", purpose: "publish the result" }],
-					},
-				},
-			],
-		},
-		{
-			kind: "workflow",
-			name: "finalize",
-			purpose: "run final cleanup",
-			body: {
-				name: "finalize-body",
-				nodes: [{ kind: "function", name: "cleanup", purpose: "clean temporary state", optional: true }],
-			},
+			title: "Review changes",
+			purpose: "Find actionable correctness issues",
+			receives: ["git diff"],
+			produces: [],
+			delivers: ["Markdown review findings in the conversation"],
 		},
 	],
 }
 
-async function loadSource(source: string) {
-	const root = await mkdtemp(path.join(tmpdir(), "workflow-authoring-"))
-	const directory = workflowsDir(root)
-	await mkdir(directory, { recursive: true })
-	const file = path.join(directory, "fixture.workflow.ts")
-	await writeFile(file, source, "utf8")
-	return loadWorkflowFile(file)
+const target = {
+	entryPath: "/project/.kimchi/workflows/review-current-diff.workflow.ts",
 }
 
-describe("workflow creation authoring contract", () => {
-	it("validates a recursive blueprint covering the public construct families", () => {
-		expect(Value.Check(authoringSchemas.workflowBlueprint, blueprint)).toBe(true)
+describe("workflow creation behavior contract", () => {
+	it("validates a compact behavior-level proposal", () => {
+		expect(Value.Check(workflowPlanSchema, plan)).toBe(true)
 	})
 
-	it("selects exact generated API documentation from the blueprint", () => {
-		const guide = renderAuthoringGuide(blueprint)
+	it("renders decisions, information flow, mid-workflow delivery, and the simple command", () => {
+		const markdown = renderWorkflowPlan(plan, target)
 
-		expect(guide).toContain("WorkflowBuilder.map(transform: MapFn")
-		expect(guide).toContain("WorkflowBuilder.dountil(body: WorkflowDefinition")
-		expect(guide).toContain("WorkflowBuilder.foreach(body: WorkflowDefinition")
-		expect(guide).toContain("WorkflowBuilder.parallel(arms: readonly StepDefinition[]")
-		expect(guide).toContain("WorkflowBuilder.branch(arms: readonly BranchArmSpec[]")
-		expect(guide).toContain("WorkflowBuilder.workflow(subWorkflow: WorkflowDefinition")
-		expect(guide).toContain("An acting agent omits `output`")
-		expect(guide).toContain("```ts\ncreateAgentStep<")
+		expect(markdown).toContain("# Proposed workflow")
+		expect(markdown).toContain("## Acceptance criteria")
+		expect(markdown).toContain("Show Markdown in the conversation as soon as review finishes")
+		expect(markdown).toContain("Receives: git diff")
+		expect(markdown).toContain("Delivers here: Markdown review findings in the conversation")
+		expect(markdown).toContain("`/workflow run review-current-diff`")
+		expect(markdown).toContain(target.entryPath)
 	})
 
-	it("renders readable recursive Markdown with configured data flow and execution policies", () => {
-		const markdown = renderWorkflowPlan(blueprint)
+	it("does not expose implementation blueprint concepts", () => {
+		const markdown = renderWorkflowPlan(plan, target)
 
-		expect(markdown).toContain("# Proposed workflow: `full-authoring-surface`")
-		expect(markdown).toContain("## Flow")
-		expect(markdown).toContain("**until-reviewed** — dountil loop")
-		expect(markdown).toContain("**review** — agent (act)")
-		expect(markdown).toContain("**publish** — function")
-		expect(markdown).toContain("Input source: `previous`")
-		expect(markdown).toContain("Retry policy: 1 retries, 250 ms backoff")
-		expect(markdown).toContain("Wall-time budget: 30000 ms")
-		expect(markdown).toContain("Output repair limit: 3")
-		expect(markdown).toContain("Token budget: 2000")
-		expect(markdown).toContain("Background: yes")
-		expect(markdown).toContain("Resumable conversation: `research-session`")
-		expect(markdown).toContain("Sequential feedback: disabled")
-		expect(markdown).toContain("Optional: yes")
-		expect(markdown).not.toContain('"nodes"')
-	})
-
-	it("renders a loadable scaffold for every construct and detects unfinished placeholders", async () => {
-		const source = renderWorkflowScaffold(blueprint)
-		const workflow = await loadSource(source)
-
-		expect(workflow.name).toBe(blueprint.name)
-		expect(describeSourceConformance(blueprint, source, workflow)).toMatch(/TODO_WORKFLOW/)
-
-		const completedSource = source.replaceAll("TODO_WORKFLOW", "IMPLEMENTED_WORKFLOW")
-		const completedWorkflow = await loadSource(completedSource)
-		expect(describeSourceConformance(blueprint, completedSource, completedWorkflow)).toBeUndefined()
-	})
-
-	it("documents only capabilities used by a linear workflow", () => {
-		const linear: WorkflowBlueprint = {
-			name: "linear",
-			description: "A linear workflow",
-			summary: "One function step",
-			schemas: [],
-			nodes: [{ kind: "function", name: "run", purpose: "do the work" }],
+		for (const implementationDetail of [
+			"TypeBox",
+			"schema",
+			"agent mode",
+			"retry",
+			"token budget",
+			"timeout",
+			"maxIterations",
+			"concurrency",
+		]) {
+			expect(markdown.toLowerCase()).not.toContain(implementationDetail.toLowerCase())
 		}
-		const guide = renderAuthoringGuide(linear)
+	})
 
-		expect(guide).toContain("### createStep")
-		expect(guide).toContain("### createWorkflow")
-		expect(guide).not.toContain("### WorkflowBuilder.foreach")
-		expect(guide).not.toContain("### WorkflowBuilder.workflow")
+	it("shows arguments only when the approved behavior explicitly requires them", () => {
+		const markdown = renderWorkflowPlan(
+			{
+				...plan,
+				invocation: { requiresArguments: true, reason: "The caller explicitly supplies a release id." },
+			},
+			target,
+		)
+
+		expect(markdown).toContain("`/workflow run review-current-diff --input …`")
+		expect(markdown).toContain("The caller explicitly supplies a release id.")
 	})
 })

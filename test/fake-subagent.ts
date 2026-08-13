@@ -111,7 +111,7 @@ export interface SpawnRecord {
 	readonly command: string
 	readonly args: readonly string[]
 	readonly child: FakeSubagent
-	/** Extra environment the bridge asked for — the step's output-tool handoff, when it declared a schema. */
+	/** Extra environment the bridge asked for — worker permissions plus an output-tool handoff when needed. */
 	readonly env?: NodeJS.ProcessEnv
 }
 
