@@ -8,6 +8,17 @@ vi.mock("../src/host/workflow-package.ts", async () => {
 	return { prepareWorkflowPackage: prepareWorkflowPackageFixture }
 })
 
+vi.mock("../src/host/workflow-test-verifier.ts", () => ({
+	WorkflowTestInfrastructureError: class extends Error {},
+	verifyWorkflowTest: async () => ({
+		ok: true,
+		files: 1,
+		tests: 1,
+		passedTests: 1,
+		summary: "TypeScript passed; focused test passed (1 test)",
+	}),
+}))
+
 import createWorkflowWorkflow from "../src/host/builtin/create.workflow.ts"
 import type { WorkflowPlan } from "../src/host/builtin/workflow-authoring.ts"
 import { loadWorkflowFile } from "../src/host/load-workflow.ts"
