@@ -10,6 +10,7 @@ import { loadWorkflowFile } from "./load-workflow.ts"
 const COMMAND_STDOUT_LIMIT = 1024 * 1024
 const COMMAND_DIAGNOSTIC_LIMIT = 16 * 1024
 const COMMAND_TIMEOUT_MS = 30_000
+const FRAMEWORK_ROOT = path.resolve(import.meta.dirname, "../..")
 
 export type ValidationStage = "typescript" | "runtime" | "conformance"
 
@@ -118,21 +119,84 @@ export async function validateWorkflowFile(options: ValidateWorkflowFileOptions)
 	return validateWorkflowModule({ ...options, diagnosticPath: options.entryPath })
 }
 
+/**
+ * Type-check an existing workflow against the package versions running this host without evaluating
+ * its module. Run resolution may already have loaded it; resume/status preflight deliberately calls
+ * this first so invalid source cannot execute top-level side effects.
+ */
+export async function validateWorkflowTypeScript(options: {
+	readonly entryPath: string
+	readonly projectRoot: string
+	readonly signal?: AbortSignal
+}): Promise<void> {
+	await typecheckWorkflowEntry({
+		...options,
+		diagnosticPath: options.entryPath,
+		packageRoot: FRAMEWORK_ROOT,
+		runner: runCommand,
+		artifactPrefix: ".pi-run-typecheck",
+	})
+}
+
 interface ValidateWorkflowModuleOptions extends ValidateWorkflowFileOptions {
 	readonly diagnosticPath: string
 }
 
 async function validateWorkflowModule(options: ValidateWorkflowModuleOptions): Promise<WorkflowCandidateValidation> {
 	const runner = options.runCommand ?? runCommand
-	const directory = path.dirname(options.entryPath)
-	const nonce = randomUUID()
-	const config = path.join(directory, `.pi-create-typecheck-${nonce}.json`)
+	await typecheckWorkflowEntry({
+		entryPath: options.entryPath,
+		diagnosticPath: options.diagnosticPath,
+		projectRoot: options.projectRoot,
+		packageRoot: options.packageRoot,
+		signal: options.signal,
+		runner,
+		artifactPrefix: ".pi-create-typecheck",
+	})
 
+	let workflow: WorkflowDefinition
+	try {
+		workflow = await loadWorkflowFile(options.entryPath)
+	} catch (error) {
+		throw validationError("runtime", error)
+	}
+
+	if (options.conformance) {
+		let issue: string | undefined
+		try {
+			issue = options.conformance(workflow)
+		} catch (error) {
+			throw validationError("conformance", error)
+		}
+		if (issue) throw new WorkflowCandidateValidationError("conformance", issue)
+	}
+
+	const checks = {
+		typescript: "passed" as const,
+		runtime: "passed" as const,
+		conformance: options.conformance ? ("passed" as const) : ("skipped" as const),
+	}
+	return {
+		workflow,
+		checks,
+		summary: `TypeScript passed; runtime load passed; conformance ${checks.conformance}`,
+	}
+}
+
+async function typecheckWorkflowEntry(options: {
+	readonly entryPath: string
+	readonly diagnosticPath: string
+	readonly projectRoot: string
+	readonly packageRoot: string
+	readonly signal?: AbortSignal
+	readonly runner: CommandRunner
+	readonly artifactPrefix: string
+}): Promise<void> {
 	if (!existsSync(options.entryPath)) {
 		throw new WorkflowCandidateValidationError("typescript", `entry file does not exist: ${options.diagnosticPath}`)
 	}
 
-	await mkdir(directory, { recursive: true })
+	const config = path.join(path.dirname(options.entryPath), `${options.artifactPrefix}-${randomUUID()}.json`)
 	try {
 		let toolchain: ValidationToolchain
 		try {
@@ -142,7 +206,7 @@ async function validateWorkflowModule(options: ValidateWorkflowModuleOptions): P
 		}
 		await writeFile(config, `${JSON.stringify(typeScriptConfig(options.entryPath, toolchain), null, 2)}\n`, "utf8")
 		await validateTypeScript(
-			runner,
+			options.runner,
 			toolchain.compiler,
 			config,
 			options.entryPath,
@@ -150,34 +214,6 @@ async function validateWorkflowModule(options: ValidateWorkflowModuleOptions): P
 			options.projectRoot,
 			options.signal,
 		)
-
-		let workflow: WorkflowDefinition
-		try {
-			workflow = await loadWorkflowFile(options.entryPath)
-		} catch (error) {
-			throw validationError("runtime", error)
-		}
-
-		if (options.conformance) {
-			let issue: string | undefined
-			try {
-				issue = options.conformance(workflow)
-			} catch (error) {
-				throw validationError("conformance", error)
-			}
-			if (issue) throw new WorkflowCandidateValidationError("conformance", issue)
-		}
-
-		const checks = {
-			typescript: "passed" as const,
-			runtime: "passed" as const,
-			conformance: options.conformance ? ("passed" as const) : ("skipped" as const),
-		}
-		return {
-			workflow,
-			checks,
-			summary: `TypeScript passed; runtime load passed; conformance ${checks.conformance}`,
-		}
 	} finally {
 		await rm(config, { force: true })
 	}
@@ -248,8 +284,23 @@ function frameworkTypePaths(pkg: InstalledPackage): Record<string, readonly stri
 }
 
 async function readInstalledPackage(packageRoot: string, name: string): Promise<InstalledPackage> {
-	const directory = path.join(path.resolve(packageRoot), "node_modules", ...name.split("/"))
-	const manifestPath = path.join(directory, "package.json")
+	const resolvedRoot = path.resolve(packageRoot)
+	const installedDirectory = path.join(resolvedRoot, "node_modules", ...name.split("/"))
+	const installedManifest = path.join(installedDirectory, "package.json")
+	const rootManifest = path.join(resolvedRoot, "package.json")
+	let directory = installedDirectory
+	let manifestPath = installedManifest
+	if (!existsSync(installedManifest) && existsSync(rootManifest)) {
+		try {
+			const rootPackage = JSON.parse(await readFile(rootManifest, "utf8")) as PackageManifest
+			if (rootPackage.name === name) {
+				directory = resolvedRoot
+				manifestPath = rootManifest
+			}
+		} catch {
+			// The regular diagnostic below describes an unreadable/malformed selected manifest.
+		}
+	}
 	let manifest: PackageManifest
 	try {
 		manifest = JSON.parse(await readFile(manifestPath, "utf8")) as PackageManifest

@@ -25,11 +25,12 @@ import { collapse } from "../../progress/collapse.ts"
 import { buildOutline } from "../../progress/outline.ts"
 import { project } from "../../progress/project.ts"
 import { render } from "../../progress/render.ts"
-import { loadWorkflowFile } from "../load-workflow.ts"
+import { missingWorkflowProvenance, recordedWorkflowLoadFailure, workflowFailureLine } from "../failure-messages.ts"
 import { runIdHash } from "../naming.ts"
 import type { ProgressCtx } from "../progress-sink.ts"
 import type { RunStore } from "../types.ts"
-import { type CommandCtx, describe, resolveRunRef } from "./context.ts"
+import { loadValidatedWorkflow } from "../workflow-preflight.ts"
+import { type CommandCtx, resolveRunRef } from "./context.ts"
 
 /** What `handleStatus` needs beyond the store. Bound in extension.ts, faked in a test. */
 export interface StatusDeps {
@@ -57,20 +58,27 @@ export async function handleStatus(
 
 	const workflowFilePath = workflowFileOf(events)
 	if (!workflowFilePath) {
-		return void ctx.ui.notify(
-			`workflow: run ${runId} does not record which workflow file it was launched from; its tree cannot be rebuilt.`,
-			"error",
-		)
+		return void ctx.ui.notify(missingWorkflowProvenance(runId, "shown"), "error")
 	}
 
 	// The DEFINITION is what supplies the shape — the log alone knows only what happened, not what was
 	// meant to (progress §3.4). A run whose file has since moved cannot be shown as a tree, and saying
 	// so plainly beats rendering a plausible-looking partial one.
-	const workflow = await loadWorkflowFile(workflowFilePath).catch((err: unknown) => {
-		ctx.ui.notify(`workflow: failed to reload "${workflowFilePath}" to show run ${runId}: ${describe(err)}`, "error")
-		return undefined
-	})
-	if (!workflow) return
+	const loaded = await loadValidatedWorkflow({ filePath: workflowFilePath, projectRoot: ctx.cwd })
+	if (!loaded.ok) {
+		ctx.ui.notify(
+			recordedWorkflowLoadFailure({
+				workflowName: workflowNameOf(events) ?? "unknown",
+				runId,
+				workflowFilePath,
+				action: "show status",
+				cause: loaded.cause,
+			}),
+			"error",
+		)
+		return
+	}
+	const workflow = loaded.workflow
 
 	const view = project(buildOutline(workflow), events, (deps.now ?? (() => new Date()))())
 
@@ -80,7 +88,14 @@ export async function handleStatus(
 	// constructs are what makes a 40-step tree readable in a scrollback. `/workflow status` differs from
 	// the panel in being unbounded and re-readable, not in showing different rows.
 	const lines = render(view, collapse(view), { width: deps.width ?? 100, theme: PLAIN, runLabel: runIdHash(runId) })
-	ctx.ui.notify([`${workflowFilePath}`, ...lines].join("\n"), view.status === "crashed" ? "error" : "info")
+	const failure =
+		view.status === "crashed" && view.failureReason
+			? workflowFailureLine({ path: view.failurePath, cause: view.failureReason })
+			: undefined
+	ctx.ui.notify(
+		[`${workflowFilePath}`, failure, ...lines].filter((line): line is string => line !== undefined).join("\n"),
+		view.status === "crashed" ? "error" : "info",
+	)
 }
 
 /** No colour: a notification is plain text on every harness, so the theme is the identity. */
@@ -88,4 +103,9 @@ const PLAIN = { fg: (_colour: string, text: string) => text, bold: (text: string
 
 function workflowFileOf(events: readonly RunEvent[]): string | undefined {
 	return events.find((event) => event.type === "run-meta")?.workflowFilePath
+}
+
+function workflowNameOf(events: readonly RunEvent[]): string | undefined {
+	return events.find((event): event is Extract<RunEvent, { type: "run-started" }> => event.type === "run-started")
+		?.workflowName
 }

@@ -25,6 +25,7 @@
 import type { RunEvent } from "../engine/types.ts"
 import { formatClock, formatDuration, formatTokens } from "../progress/render.ts"
 import type { Outline, OutlineNode } from "../progress/types.ts"
+import { workflowCrashHeading, workflowCrashRecovery } from "./failure-messages.ts"
 
 /** Prefix on every line, so a workflow's output is greppable out of a CI log that carries much else. */
 const PREFIX = "[workflow]"
@@ -137,7 +138,15 @@ export function createPlainProgress(outline: Outline, write: LineWriter): PlainP
 					write(closing("completed", event.at))
 					break
 				case "run-crashed":
-					write(`${closing("crashed", event.at)} — ${event.error}`)
+					write(
+						`${PREFIX} ${workflowCrashHeading({ workflowName: outline.workflowName, runId: event.runId, path: event.path })} · ${[
+							`${settled.size} steps`,
+							runStartedAt === undefined ? undefined : formatClock(ms(event.at) - runStartedAt),
+							runTokens > 0 ? `${formatTokens(runTokens)} tok` : undefined,
+						]
+							.filter(Boolean)
+							.join(" · ")} — ${event.error} · ${workflowCrashRecovery(event.runId).join(" · ")}`,
+					)
 					break
 				case "run-cancelled":
 					write(closing("cancelled", event.at))

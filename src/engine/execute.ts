@@ -14,6 +14,7 @@
  * Used by both a fresh run (`run-workflow.ts`) and a resume (`resume-workflow.ts`) via `execute`.
  * Zero imports from PI, `node:fs`, or any network lib — see src/engine/types.ts.
  */
+import { invokeCallback } from "../flow/callback-result.ts"
 import { answersToOutput, questionnaireFromSchema, validateAnswers } from "../flow/questionnaire.ts"
 import type {
 	BranchNode,
@@ -131,7 +132,7 @@ export async function execute(
 			error: outcome.error,
 			at: iso(host),
 		})
-		return { runId: state.runId, status: "crashed", error: outcome.error }
+		return { runId: state.runId, status: "crashed", error: outcome.error, path: outcome.path }
 	}
 	if (outcome.kind === "blocked") {
 		// The suspension event was already emitted at the step. This only reports the next pending block.
@@ -152,7 +153,7 @@ export async function execute(
 				}
 	}
 	await host.emit({ type: "run-cancelled", runId: state.runId, path: outcome.path, at: iso(host) })
-	return { runId: state.runId, status: "cancelled" }
+	return { runId: state.runId, status: "cancelled", path: outcome.path }
 }
 
 /**
@@ -420,19 +421,14 @@ async function runStepNodeBody(
 	await host.emit({ type: "step-started", runId: state.runId, path: formattedPath, input: stepInput, at: iso(host) })
 
 	if (step.kind === "interactive") {
-		let request: unknown
-		try {
-			request = step.buildRequest({
+		const built = invokeCallback(`step "${step.name}" interaction request`, () =>
+			step.buildRequest({
 				input: stepInput,
 				ctx: createRunContext(state, parentPath, frames, formattedPath),
-			})
-		} catch (error) {
-			return {
-				kind: "crashed",
-				error: `step "${step.name}" interaction request threw: ${errorMessage(error)}`,
-				path: formattedPath,
-			}
-		}
+			}),
+		)
+		if (!built.ok) return { kind: "crashed", error: built.error, path: formattedPath }
+		const request = built.value
 		const requestViolation = describeSchemaViolations(step.requestSchema, request)
 		if (requestViolation) {
 			return {
@@ -536,10 +532,6 @@ async function finishStep(
 	}
 }
 
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error)
-}
-
 /** Reject values whose in-memory event representation would change or disappear when written as JSONL. */
 function jsonValueViolation(value: unknown): string | undefined {
 	const seen = new Set<object>()
@@ -598,7 +590,12 @@ async function runBranchNode(
 	}
 
 	const ctx = createRunContext(state, parentPath, frames, formatPath(branchPath))
-	const decisions = node.arms.map((arm) => ({ arm, taken: arm.condition(ctx) })) // pure, side-effect-free (spec §3.2)
+	const decisions: { arm: BranchNode["arms"][number]; taken: boolean }[] = []
+	for (const arm of node.arms) {
+		const decision = invokeCallback(`branch "${node.name}" condition for arm "${arm.name}"`, () => arm.condition(ctx))
+		if (!decision.ok) return { kind: "crashed", path: formatPath(branchPath), error: decision.error }
+		decisions.push({ arm, taken: decision.value }) // pure, side-effect-free (spec §3.2)
+	}
 	if (!reentry) {
 		for (const { arm, taken } of decisions) {
 			await host.emit({
@@ -751,7 +748,9 @@ async function runLoopNode(
 		const effectiveOutput = outcome.output !== undefined ? outcome.output : iterationInput
 
 		const ctx = createRunContext(state, iterPath, iterFrames, formatPath(iterPath)) // live view; reflects this iteration's updates
-		const conditionMet = node.condition(ctx, lastOutput)
+		const condition = invokeCallback(`loop "${node.name}" condition`, () => node.condition(ctx, lastOutput))
+		if (!condition.ok) return { kind: "crashed", path: formatPath(iterPath), error: condition.error }
+		const conditionMet = condition.value
 		const stop = node.mode === "dowhile" ? !conditionMet : conditionMet
 		if (stop) {
 			await emitNodeCompleted(host, state, loopPath, effectiveOutput)

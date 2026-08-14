@@ -189,6 +189,10 @@ export interface ProgressView {
 	readonly stepsTotal: number
 	/** The `run-crashed` error, when the run crashed. */
 	readonly failureReason?: string
+	/** The dynamic node path attributed by `run-crashed`, when one is available. */
+	readonly failurePath?: string
+	/** Optional step failures still active in the latest execution of their dynamic path. */
+	readonly optionalFailures: readonly { readonly path: string; readonly error: string }[]
 	readonly nodes: readonly ProgressNode[]
 }
 

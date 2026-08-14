@@ -71,6 +71,7 @@ interface Fold {
 	 * else here, so it is a pure function of the prefix and can only grow as the prefix does.
 	 */
 	readonly settledOnce: Set<string>
+	readonly optionalFailures: Map<string, string>
 	runStartedAt?: number
 	runEndedAt?: number
 	/**
@@ -82,6 +83,7 @@ interface Fold {
 	runTokens: number
 	runId?: string
 	failureReason?: string
+	failurePath?: string
 }
 
 /**
@@ -107,6 +109,8 @@ export function project(outline: Outline, events: readonly RunEvent[], now: Date
 		stepsSettled: counted.settled,
 		stepsTotal: counted.total,
 		failureReason: fold.failureReason,
+		failurePath: fold.failurePath,
+		optionalFailures: [...fold.optionalFailures].map(([path, error]) => ({ path, error })),
 		nodes,
 	}
 }
@@ -166,6 +170,7 @@ function foldEvents(events: readonly RunEvent[]): Fold {
 		foreachSeen: new Map(),
 		itemStubs: new Map(),
 		settledOnce: new Set(),
+		optionalFailures: new Map(),
 		runTokens: 0,
 	}
 
@@ -193,6 +198,7 @@ function foldEvents(events: readonly RunEvent[]): Fold {
 				stats.questions = undefined
 				stats.failureReason = undefined
 				recordItemStub(fold, event.path, event.input)
+				fold.optionalFailures.delete(event.path)
 				break
 			}
 			case "step-completed":
@@ -204,6 +210,7 @@ function foldEvents(events: readonly RunEvent[]): Fold {
 				stats.endedAt = at(event.at)
 				stats.failureReason = event.error
 				fold.settledOnce.add(key(event.path))
+				fold.optionalFailures.set(event.path, event.error)
 				break
 			}
 			case "step-cancelled":
@@ -309,6 +316,7 @@ function foldEvents(events: readonly RunEvent[]): Fold {
 				fold.runEndedAt = at(event.at)
 				fold.runTerminal = "crashed"
 				fold.failureReason = event.error
+				fold.failurePath = event.path
 				closeOpen(fold, at(event.at))
 				break
 			case "run-cancelled":

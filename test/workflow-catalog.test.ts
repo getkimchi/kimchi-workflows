@@ -102,6 +102,29 @@ describe("resolveWorkflow", () => {
 		}
 	})
 
+	it("retains and returns a validated catalog match without evaluating it a second time", async () => {
+		const counter = `__kimchi_catalog_loads_${Date.now()}__`
+		const source = [
+			`import { createStep, createWorkflow } from "${flowImport}";`,
+			`const state = globalThis as unknown as Record<string, number>;`,
+			`state[${JSON.stringify(counter)}] = (state[${JSON.stringify(counter)}] ?? 0) + 1;`,
+			`if (state[${JSON.stringify(counter)}] > 1) throw new Error("second catalog load failed");`,
+			`const step = createStep({ name: "ship", run: () => undefined });`,
+			`export default createWorkflow({ name: "release" }).then(step).commit();`,
+		].join("\n")
+		const root = await project({ "aliased.workflow.ts": source })
+
+		try {
+			const resolved = await resolveWorkflow(root, "release")
+
+			expect(resolved.ok).toBe(true)
+			if (resolved.ok) expect(resolved.workflow.name).toBe("release")
+			expect((globalThis as unknown as Record<string, number>)[counter]).toBe(1)
+		} finally {
+			delete (globalThis as Record<string, unknown>)[counter]
+		}
+	})
+
 	it("resolves a path relative to the project root", async () => {
 		const root = await project({ "deploy.workflow.ts": workflowSource("deploy") })
 
@@ -121,7 +144,7 @@ describe("resolveWorkflow", () => {
 
 		expect(resolved.ok).toBe(false)
 		if (!resolved.ok) {
-			expect(resolved.error).toMatch(/no workflow named "nope"/)
+			expect(resolved.error).toMatch(/cannot find "nope"/)
 			expect(resolved.error).toMatch(/Known workflows: deploy/)
 		}
 	})
@@ -132,7 +155,47 @@ describe("resolveWorkflow", () => {
 		const resolved = await resolveWorkflow(root, path.relative(root, path.join(workflowsDir(root), "bad.workflow.ts")))
 
 		expect(resolved.ok).toBe(false)
-		if (!resolved.ok) expect(resolved.error).toMatch(/failed to load/)
+		if (!resolved.ok) expect(resolved.error).toMatch(/could not load/)
+	})
+
+	it("reports an existing broken conventional file instead of calling its workflow missing", async () => {
+		const root = await project({ "broken.workflow.ts": "export default const nope = ;" })
+
+		const resolved = await resolveWorkflow(root, "broken")
+
+		expect(resolved.ok).toBe(false)
+		if (!resolved.ok) {
+			expect(resolved.error).toContain('workflow "broken" could not load')
+			expect(resolved.error).toContain(path.join(workflowsDir(root), "broken.workflow.ts"))
+			expect(resolved.error).toContain("TS1109")
+			expect(resolved.error).not.toContain("no workflow named")
+		}
+	})
+
+	it("distinguishes a missing explicit file from a workflow-name lookup", async () => {
+		const root = await project({ "deploy.workflow.ts": workflowSource("deploy") })
+		const missing = path.join("custom", "missing.workflow.ts")
+
+		const resolved = await resolveWorkflow(root, missing)
+
+		expect(resolved.ok).toBe(false)
+		if (!resolved.ok) {
+			expect(resolved.error).toBe(`workflow: file does not exist\n  ${path.resolve(root, missing)}`)
+			expect(resolved.error).not.toContain("failed to load")
+		}
+	})
+
+	it("gives an unknown name its searched path and known workflows", async () => {
+		const root = await project({ "deploy.workflow.ts": workflowSource("deploy") })
+
+		const resolved = await resolveWorkflow(root, "deply")
+
+		expect(resolved.ok).toBe(false)
+		if (!resolved.ok) {
+			expect(resolved.error).toContain('workflow: cannot find "deply"')
+			expect(resolved.error).toContain(path.join(workflowsDir(root), "deply.workflow.ts"))
+			expect(resolved.error).toContain("Known workflows: deploy")
+		}
 	})
 })
 
@@ -146,7 +209,7 @@ describe("resolveWorkflow does not execute unrelated workflows (adversarial regr
 		const dir = workflowsDir(root)
 		await mkdir(dir, { recursive: true })
 		const log = path.join(root, "imports.log")
-		for (const name of ["alpha", "beta", "gamma"]) {
+		for (const name of ["alpha", "beta"]) {
 			const source = [
 				`import { appendFileSync } from "node:fs";`,
 				`appendFileSync(${JSON.stringify(log)}, "${name}\\n");`,
@@ -171,12 +234,19 @@ describe("resolveWorkflow does not execute unrelated workflows (adversarial regr
 
 	it("falls back to a full scan only when the convention does not hold", async () => {
 		const { root, log } = await projectWithTracing()
-		// A workflow whose declared name does not match its filename can only be found by scanning.
-		await writeFile(path.join(workflowsDir(root), "misnamed.workflow.ts"), workflowSource("delta"), "utf8")
+		// A workflow whose declared name does not match its filename can only be found by scanning. Reuse
+		// beta rather than adding more candidates: two modules are the minimum needed to prove the scan
+		// evaluates an unrelated workflow, and each candidate intentionally runs a real TypeScript preflight.
+		const misnamed = [
+			`import { appendFileSync } from "node:fs";`,
+			`appendFileSync(${JSON.stringify(log)}, "beta\\n");`,
+			workflowSource("delta"),
+		].join("\n")
+		await writeFile(path.join(workflowsDir(root), "beta.workflow.ts"), misnamed, "utf8")
 
 		const resolved = await resolveWorkflow(root, "delta")
 
 		expect(resolved.ok).toBe(true)
-		expect((await imported(log)).length).toBeGreaterThan(1) // the scan did import the others
+		expect(await imported(log)).toEqual(["alpha", "beta"])
 	})
 })

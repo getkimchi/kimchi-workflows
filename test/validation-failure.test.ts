@@ -19,6 +19,7 @@ describe("TypeBox validation failure", () => {
 		const result = await runWorkflow(workflow, undefined, host)
 
 		expect(result.status).toBe("crashed")
+		expect(result.path).toBe("produce-count")
 		expect(result.error).toMatch(/produce-count/)
 		expect(result.error).toMatch(/count/)
 

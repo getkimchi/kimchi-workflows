@@ -7,6 +7,7 @@
  */
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
 import type { AgentRequest, AgentSession, RunResult } from "../../engine/types.ts"
+import { workflowCrashMessage } from "../failure-messages.ts"
 import { matchRunId } from "../naming.ts"
 import type { BeginResult, RunLock } from "../run-lock.ts"
 import type { RunStore } from "../types.ts"
@@ -150,7 +151,15 @@ export function notifyResult(ctx: NotifyCtx, workflowName: string, result: RunRe
 	} else if (result.status === "blocked") {
 		ctx.ui.notify(`workflow "${workflowName}" blocked (run ${result.runId}) awaiting user input.`, "info")
 	} else {
-		ctx.ui.notify(`workflow "${workflowName}" crashed (run ${result.runId}): ${result.error}`, "error")
+		ctx.ui.notify(
+			workflowCrashMessage({
+				workflowName,
+				runId: result.runId,
+				path: result.path,
+				cause: result.error ?? "unknown error",
+			}),
+			"error",
+		)
 	}
 }
 

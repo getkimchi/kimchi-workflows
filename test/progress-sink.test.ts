@@ -211,8 +211,48 @@ describe("progress sink: widget and summary lifecycle (progress §7.1, §7.6)", 
 
 		const [message, level] = h.notes[0] as [string, string]
 		expect(message).toContain("kaboom")
+		expect(message).toContain('crashed at "analyze"')
+		expect(message).toContain("run 3f9a2c1d")
+		expect(message).toContain("Resume: /workflow resume 3f9a2c1d")
+		expect(message).toContain("Details: /workflow status 3f9a2c1d")
 		expect(level).toBe("error")
 	})
+
+	it("a completed run surfaces optional step failures with their path and cause", () => {
+		const h = harness("tui")
+		h.sink.accept(runStarted("demo"))
+		h.sink.accept(runningStep("analyze", 0))
+		h.sink.accept({
+			type: "step-failed",
+			runId: RUN_ID,
+			path: "analyze",
+			error: "lint service unavailable",
+			at: at(500),
+		})
+		h.sink.accept(runningStep("plan", 500))
+		h.sink.accept({ type: "step-completed", runId: RUN_ID, path: "plan", output: undefined, at: at(900) })
+		h.sink.accept({ type: "run-completed", runId: RUN_ID, output: undefined, at: at(1000) })
+
+		const [message, level] = h.notes[0] as [string, string]
+		expect(message).toContain('workflow "demo" completed with 1 optional step failure')
+		expect(message).toContain('"analyze": lint service unavailable')
+		expect(level).toBe("warning")
+	})
+
+	for (const mode of ["json", "print"] as const) {
+		it(`${mode} — a crash line names the workflow, failing path, run id, and cause`, () => {
+			const h = harness(mode)
+			h.sink.accept(runStarted("demo"))
+			h.sink.accept(runningStep("analyze", 0))
+			h.sink.accept({ type: "run-crashed", runId: RUN_ID, path: "analyze", error: "kaboom", at: at(500) })
+
+			expect(h.lines.at(-1)).toContain('workflow "demo" crashed at "analyze"')
+			expect(h.lines.at(-1)).toContain(RUN_ID)
+			expect(h.lines.at(-1)).toContain("kaboom")
+			expect(h.lines.at(-1)).toContain(`Resume: /workflow resume ${RUN_ID}`)
+			expect(h.lines.at(-1)).toContain(`Details: /workflow status ${RUN_ID}`)
+		})
+	}
 
 	it("announces on EVERY harness — no session directory and rpc both still report (§7.7)", () => {
 		for (const h of [harness("tui", ""), harness("rpc")]) {

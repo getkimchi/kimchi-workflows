@@ -141,7 +141,7 @@ export async function handleRun(
 
 	const resolution = await resolveWorkflow(ctx.cwd, target)
 	if (!resolution.ok) {
-		ctx.ui.notify(`workflow: ${resolution.error}`, "error")
+		ctx.ui.notify(resolution.error, "error")
 		return
 	}
 

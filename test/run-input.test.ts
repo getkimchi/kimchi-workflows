@@ -1,10 +1,12 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { existsSync } from "node:fs"
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import type { CommandCtx, StartAgent } from "../src/host/commands/index.ts"
 import { handleRun, parseRunArgs } from "../src/host/commands/index.ts"
 import { createFsStore } from "../src/host/fs-store.ts"
+import { workflowsDir } from "../src/host/project-dir.ts"
 import type { RunStore } from "../src/host/types.ts"
 import { createFakeRunLock } from "./helpers.ts"
 
@@ -54,6 +56,17 @@ function bareWorkflowSource(): string {
 		`import { createStep, createWorkflow } from "${flowImport}";`,
 		`const echo = createStep({ name: "echo", run: ({ ctx }) => ctx.getInitData() ?? null });`,
 		`export default createWorkflow({ name: "bare" }).then(echo).commit();`,
+	].join("\n")
+}
+
+function semanticErrorWorkflowSource(name: string, evaluated: string): string {
+	return [
+		`import { writeFileSync } from "node:fs";`,
+		`import { createStep, createWorkflow } from "${flowImport}";`,
+		`writeFileSync(${JSON.stringify(evaluated)}, "evaluated");`,
+		`const invalid: number = "not a number";`,
+		`const step = createStep({ name: "noop", run: () => invalid });`,
+		`export default createWorkflow({ name: ${JSON.stringify(name)} }).then(step).commit();`,
 	].join("\n")
 }
 
@@ -150,6 +163,58 @@ describe("/workflow run --input", () => {
 		// A round trip through the JSON-lines store drops an `undefined`-valued key entirely rather than
 		// keeping it null, so absence — not a `toMatchObject` on the key — is the honest assertion here.
 		expect(started && "input" in started ? (started as { input: unknown }).input : undefined).toBeUndefined()
+	})
+
+	it("rejects a semantic TypeScript error before creating a run", async () => {
+		const invalidFile = path.join(projectRoot, "semantic-error.workflow.ts")
+		const evaluated = path.join(projectRoot, "explicit-semantic-workflow-evaluated.txt")
+		await writeFile(invalidFile, semanticErrorWorkflowSource("semantic-error", evaluated), "utf8")
+		const spy = notifySpy()
+
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, invalidFile)
+
+		expect(await store.list()).toHaveLength(0)
+		expect(spy.notes).toHaveLength(1)
+		expect(spy.notes[0]?.[1]).toBe("error")
+		expect(spy.notes[0]?.[0]).toContain(`workflow "${invalidFile}" could not load`)
+		expect(spy.notes[0]?.[0]).toContain(`File: ${invalidFile}`)
+		expect(spy.notes[0]?.[0]).toContain("TS2322")
+		expect(existsSync(evaluated)).toBe(false)
+		expect((await readdir(path.dirname(invalidFile))).filter((name) => name.startsWith(".pi-run-typecheck-"))).toEqual(
+			[],
+		)
+	})
+
+	it("does not evaluate a semantically invalid conventional-name workflow", async () => {
+		const invalidFile = path.join(workflowsDir(projectRoot), "semantic-error.workflow.ts")
+		const evaluated = path.join(projectRoot, "conventional-semantic-workflow-evaluated.txt")
+		await mkdir(path.dirname(invalidFile), { recursive: true })
+		await writeFile(invalidFile, semanticErrorWorkflowSource("semantic-error", evaluated), "utf8")
+		const spy = notifySpy()
+
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, "semantic-error")
+
+		expect(await store.list()).toHaveLength(0)
+		expect(spy.notes).toHaveLength(1)
+		expect(spy.notes[0]?.[0]).toContain(`File: ${invalidFile}`)
+		expect(spy.notes[0]?.[0]).toContain("TS2322")
+		expect(existsSync(evaluated)).toBe(false)
+	})
+
+	it("does not evaluate a semantically invalid workflow while scanning a declared-name alias", async () => {
+		const invalidFile = path.join(workflowsDir(projectRoot), "aliased.workflow.ts")
+		const evaluated = path.join(projectRoot, "catalog-semantic-workflow-evaluated.txt")
+		await mkdir(path.dirname(invalidFile), { recursive: true })
+		await writeFile(invalidFile, semanticErrorWorkflowSource("release", evaluated), "utf8")
+		const spy = notifySpy()
+
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, "release")
+
+		expect(await store.list()).toHaveLength(0)
+		expect(spy.notes).toHaveLength(1)
+		expect(spy.notes[0]?.[0]).toContain(`File: ${invalidFile}`)
+		expect(spy.notes[0]?.[0]).toContain("TS2322")
+		expect(existsSync(evaluated)).toBe(false)
 	})
 })
 
