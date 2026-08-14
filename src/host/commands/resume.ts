@@ -10,7 +10,7 @@
 import { resumeWorkflow } from "../../engine/resume-workflow.ts"
 import { createHostPort } from "../host-port.ts"
 import { loadWorkflowFile } from "../load-workflow.ts"
-import { noProgressFor, type ProgressFor } from "../progress-sink.ts"
+import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
 import { resumeAction } from "../resume-router.ts"
 import type { RunLock } from "../run-lock.ts"
 import { summarizeRun } from "../summarize-run.ts"
@@ -89,7 +89,7 @@ export async function handleResume(
 
 		// rerun: node-atomic re-run (3a/5a). A re-run may itself reach a Q&A step and block → attend it.
 		const result = await runGuarded(guard, runId, ctx.cwd, store, notifier(ctx), (signal) => {
-			const host = createHostPort(store, { startAgent, onEvent: progress.accept })
+			const host = createHostPort(store, { startAgent, ...progressCallbacks(progress) })
 			return resumeWorkflow(workflow, events, host, { signal })
 		})
 		if (!result) return // guard was busy (race) — already notified

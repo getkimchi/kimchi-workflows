@@ -19,7 +19,7 @@ import { buildCorrectionMessage } from "./agent-output.ts"
 import { createRunContext, createStepLogger, iso, type RunState, type StepOutcome } from "./context.ts"
 import type { NodePath } from "./node-path.ts"
 import { readSubmittedPayload, SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "./output-tools.ts"
-import type { AgentOutputViolationKind, AgentTurn, AgentTurnError, HostPort, RetryReason } from "./types.ts"
+import type { AgentOutputViolationKind, AgentTurn, AgentTurnError, HostPort, RetryReason, RunUpdate } from "./types.ts"
 
 /** Default in-session output-steering budget (spec §9.2) when an agent step declares none. */
 const DEFAULT_MAX_OUTPUT_REPAIRS = 2
@@ -425,21 +425,38 @@ async function runAgentSession(
 		for (let repair = 0; repair <= maxRepairs; repair++) {
 			if (signal.aborted) return { kind: "cancelled" }
 
+			const clearUsagePreview = (): void =>
+				publishUpdate(host, { type: "agent-usage-preview-cleared", runId: state.runId, path })
 			let turn: AgentTurn
 			try {
-				turn = await session.sendAndAwaitEnd(message)
+				turn = await session.sendAndAwaitEnd(message, {
+					onUsage: (usage) => {
+						if (usage.totalTokens <= 0) return
+						publishUpdate(host, {
+							type: "agent-usage-preview",
+							runId: state.runId,
+							path,
+							totalTokens: usage.totalTokens,
+						})
+					},
+				})
 			} catch (err) {
+				clearUsagePreview()
 				if (signal.aborted) return { kind: "cancelled" }
 				return { kind: "retryable", reason: "thrown-error", error: err instanceof Error ? err.message : String(err) }
 			}
 
-			if (signal.aborted) return { kind: "cancelled" }
+			if (signal.aborted) {
+				clearUsagePreview()
+				return { kind: "cancelled" }
+			}
 
 			// A turn that failed at the provider is not a reply, so nothing below it applies: there is no
 			// usage to bill, no output to validate, and — above all — nothing to steer. Checked BEFORE the
 			// output contract, which cannot tell the two apart (`AgentTurnError`) and would report a
 			// violation the model never committed.
 			if (turn.error) {
+				clearUsagePreview()
 				const terminal = isTerminalAgentError(step, turn.error)
 				await host.emit({
 					type: "agent-error",
@@ -461,6 +478,7 @@ async function runAgentSession(
 			totalTokens += turnTokens
 			if (turn.usage)
 				await host.emit({ type: "agent-usage", runId: state.runId, path, totalTokens: turnTokens, at: iso(host) })
+			else clearUsagePreview()
 			if (step.maxTokens !== undefined && totalTokens > step.maxTokens) {
 				return {
 					kind: "retryable",
@@ -510,6 +528,15 @@ async function runAgentSession(
 		return { kind: "retryable", reason: "invalid-output", error: `step "${step.name}" output: ${lastViolation}` }
 	} finally {
 		session.dispose()
+	}
+}
+
+/** A transient presentation failure must never change the workflow's outcome. */
+function publishUpdate(host: HostPort, update: RunUpdate): void {
+	try {
+		host.update?.(update)
+	} catch {
+		// Durable lifecycle and final usage still travel through `emit`; a live preview is expendable.
 	}
 }
 

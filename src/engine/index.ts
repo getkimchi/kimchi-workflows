@@ -43,9 +43,12 @@ export { deriveStepStates, stepState } from "./step-state.ts"
 export type {
 	AgentRequest,
 	AgentSession,
+	AgentTurnOptions,
 	ConversationMessage,
 	HostPort,
 	RunEvent,
 	RunOptions,
 	RunResult,
+	RunUpdate,
+	TokenUsage,
 } from "./types.ts"

@@ -15,7 +15,7 @@ import type { Questionnaire } from "../../flow/questionnaire.ts"
 import type { InteractiveStep, WorkflowDefinition } from "../../flow/types.ts"
 import { createHostPort } from "../host-port.ts"
 import { loadWorkflowFile } from "../load-workflow.ts"
-import { inertProgress, type ProgressSink } from "../progress-sink.ts"
+import { inertProgress, type ProgressSink, progressCallbacks } from "../progress-sink.ts"
 import { collectAnswers } from "../questionnaire-render.ts"
 import type { RunLock } from "../run-lock.ts"
 import type { RunStore } from "../types.ts"
@@ -107,7 +107,7 @@ export async function handleAttendedInput(
 			result = await runGuarded(guard, runId, ctx.cwd, store, notifier(ctx), async (signal) => {
 				const workflow = await loadWorkflowFile(workflowFilePath)
 				const events = await store.loadEvents(runId)
-				const host = createHostPort(store, { startAgent, onEvent: progress.accept })
+				const host = createHostPort(store, { startAgent, ...progressCallbacks(progress) })
 				return pendingKind === "questionnaire"
 					? resumeWithAnswer(workflow, events, candidate as Record<string, unknown>, host, {
 							signal,

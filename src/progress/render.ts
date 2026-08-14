@@ -39,6 +39,11 @@ export interface RenderOptions {
 	 */
 	readonly frame?: number
 	/**
+	 * Monotonic time since `view` was projected. Applied only to live values, so an animation frame can
+	 * display current elapsed time without rebuilding the tree or letting the renderer read a clock.
+	 */
+	readonly elapsedSinceProjectionMs?: number
+	/**
 	 * The run's short form for the header (progress §4.1) — `runIdHash(runId)`, which the host computes,
 	 * since `src/host/naming.ts` owns that shape and this layer may not import it. Defaults to the run
 	 * id's trailing 8 characters, which is the same string.
@@ -111,7 +116,8 @@ interface Layout {
  */
 export function render(view: ProgressView, rows: readonly ProgressRow[], options: RenderOptions): string[] {
 	const { width, theme } = options
-	const cells = rows.map((row) => rowCells(row, options.frame ?? 0))
+	const elapsedDelta = frameElapsed(options)
+	const cells = rows.map((row) => rowCells(row, options.frame ?? 0, elapsedDelta))
 	const layout = planLayout(cells, width)
 
 	const lines = ["", headerLine(view, options), ""]
@@ -169,7 +175,7 @@ function max(values: readonly number[]): number {
 
 // -- Rows ----------------------------------------------------------------------------------------------
 
-function rowCells(row: ProgressRow, frame: number): RowCells {
+function rowCells(row: ProgressRow, frame: number, elapsedDelta: number): RowCells {
 	const [glyph, glyphColour] = glyphOf(row, frame)
 	return {
 		row,
@@ -177,7 +183,7 @@ function rowCells(row: ProgressRow, frame: number): RowCells {
 		glyph,
 		glyphColour,
 		name: row.node.name,
-		status: statusCell(row),
+		status: statusCell(row, elapsedDelta),
 		token: tokenCell(row.node),
 	}
 }
@@ -255,15 +261,15 @@ function glyphOf(row: ProgressRow, frame: number): readonly [string, ProgressCol
  * is arbitrarily long and a right-aligned column cannot take one without squeezing the grid, which
  * §4.10 forbids. The text is on the node (`failureReason`) for the terminal card, which has room.
  */
-function statusCell(row: ProgressRow): string {
+function statusCell(row: ProgressRow, elapsedDelta: number): string {
 	const node = row.node
-	if (row.collapsed) return collapsedSummary(node)
+	if (row.collapsed) return collapsedSummary(node, elapsedDelta)
 
 	switch (node.state) {
 		case "crashed":
-			return dotted(["failed", node.optional ? "optional" : undefined, durationText(node)])
+			return dotted(["failed", node.optional ? "optional" : undefined, durationText(node, elapsedDelta)])
 		case "cancelled":
-			return dotted(["cancelled", durationText(node)])
+			return dotted(["cancelled", durationText(node, elapsedDelta)])
 		case "skipped":
 			return "skipped"
 		case "blocked":
@@ -283,19 +289,19 @@ function statusCell(row: ProgressRow): string {
 			node.state === "in_progress"
 				? `retry ${node.retry.attempt}${node.retry.of === undefined ? "" : `/${node.retry.of}`} · ${RETRY_REASONS[node.retry.reason]}`
 				: // `attempt` is the attempt that FAILED (spec §9.1), so the try that settled is the next one.
-					dotted([`${node.retry.attempt + 1} tries`, durationText(node)])
+					dotted([`${node.retry.attempt + 1} tries`, durationText(node, elapsedDelta)])
 		return badge
 	}
 	if (node.repairs) {
 		return node.state === "in_progress"
 			? `repair ${node.repairs}`
-			: dotted([plural(node.repairs, "repair"), durationText(node)])
+			: dotted([plural(node.repairs, "repair"), durationText(node, elapsedDelta)])
 	}
 
 	const counter = counterCell(node)
 	if (counter) return counter
-	if (node.live) return `running · ${durationText(node)}`
-	return durationText(node) ?? ""
+	if (node.live) return `running · ${durationText(node, elapsedDelta)}`
+	return durationText(node, elapsedDelta) ?? ""
 }
 
 /**
@@ -313,8 +319,8 @@ function counterCell(node: ProgressNode): string | undefined {
 }
 
 /** Progress §6.1: `↻ 3 iterations · 38.1s`, `✓ 7 items · 2m 10s`, `✓ 4 steps · 51.0s`. */
-function collapsedSummary(node: ProgressNode): string {
-	const duration = durationText(node)
+function collapsedSummary(node: ProgressNode, elapsedDelta: number): string {
+	const duration = durationText(node, elapsedDelta)
 	if (node.loop) return dotted([`↻ ${plural(node.loop.iteration, "iteration")}`, duration])
 	if (node.foreach) return dotted([`✓ ${plural(node.foreach.count, "item")}`, duration])
 	if (node.steps !== undefined) return dotted([`✓ ${plural(node.steps, "step")}`, duration])
@@ -357,7 +363,11 @@ function headerRight(view: ProgressView, options: RenderOptions): string {
 	// `runIdHash` (src/host/naming.ts) is the same slice; it is not imported because this layer depends
 	// on the host in no direction (progress §2.1), and a host that has the real function passes it in.
 	const label = options.runLabel ?? (view.runId === undefined ? undefined : view.runId.slice(-8))
-	return dotted([label, formatClock(view.elapsedMs ?? 0)], " · ")
+	const elapsed =
+		view.elapsedMs === undefined || !view.live || view.status !== "in_progress"
+			? (view.elapsedMs ?? 0)
+			: view.elapsedMs + frameElapsed(options)
+	return dotted([label, formatClock(elapsed)], " · ")
 }
 
 /**
@@ -398,9 +408,13 @@ function track(done: number, count: number): string {
  * ticking through them ten times a second is the single fastest way to make a calm panel feel frantic.
  * This is also the guarantee that two renders inside one second are byte-identical.
  */
-function durationText(node: ProgressNode): string | undefined {
+function durationText(node: ProgressNode, elapsedDelta: number): string | undefined {
 	if (node.elapsedMs === undefined) return undefined
-	return node.live ? formatWholeSeconds(node.elapsedMs) : formatDuration(node.elapsedMs)
+	return node.live ? formatWholeSeconds(node.elapsedMs + elapsedDelta) : formatDuration(node.elapsedMs)
+}
+
+function frameElapsed(options: RenderOptions): number {
+	return Math.max(0, options.elapsedSinceProjectionMs ?? 0)
 }
 
 /** `3.1s` under a minute, `1m 04s` under an hour, `1:04:22` beyond (progress §4.7). */

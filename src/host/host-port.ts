@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import type { AgentRequest, AgentSession, HostPort, RunEvent } from "../engine/types.ts"
+import type { AgentRequest, AgentSession, HostPort, RunEvent, RunUpdate } from "../engine/types.ts"
 import type { RunStore } from "./types.ts"
 
 /** Overrides for the non-deterministic `HostPort` inputs. Handy for deterministic tests. */
@@ -23,6 +23,8 @@ export interface HostPortOptions {
 	 * catches everything and self-disables rather than relying on a guard here.
 	 */
 	onEvent?: (event: RunEvent) => void
+	/** A non-durable progress tee. Unlike `onEvent`, it performs no store write. */
+	onUpdate?: (update: RunUpdate) => void
 }
 
 /**
@@ -45,6 +47,7 @@ export function createHostPort(store: RunStore, options: HostPortOptions = {}): 
 			await store.appendEvent(event)
 			options.onEvent?.(event)
 		},
+		update: (update) => options.onUpdate?.(update),
 	}
 }
 

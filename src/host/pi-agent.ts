@@ -5,9 +5,9 @@
  * the `agent_end` event, and return the last assistant message's text. Compiles against the real
  * `@earendil-works/pi-coding-agent` types (`AgentEndEvent = { messages }`).
  *
- * A single `agent_end` listener is registered per bridge (the extension holds one bridge for its
- * lifetime) — `pi.on` exposes no unsubscribe, so `dispose()` clears the bridge's OWN in-flight turn
- * rather than removing the listener. That listener backs every IN-SESSION turn (never `background` or
+ * One shared set of stream/lifecycle listeners is registered per bridge (the extension holds one bridge
+ * for its lifetime) — `pi.on` exposes no unsubscribe, so `dispose()` clears the bridge's OWN in-flight
+ * turn rather than removing listeners. They back every IN-SESSION turn (never `background` or
  * statically `isolated` ones, spec §2.2 — those go through `backgroundSession` below, a real subprocess
  * per turn, with no shared listener to correlate). There is at most one real PI session, so at most one
  * in-session turn may ever be awaiting that listener at a time: `inFlight` tracks exactly that one turn
@@ -86,7 +86,7 @@
 import { existsSync, mkdirSync } from "node:fs"
 import path from "node:path"
 import type { ContextEvent, ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
-import type { AgentRequest, AgentSession, AgentTurn, ConversationMessage } from "../engine/types.ts"
+import type { AgentRequest, AgentSession, AgentTurn, AgentTurnOptions, ConversationMessage } from "../engine/types.ts"
 import { resumeSessionFile, stepSessionName, traceSessionFile } from "./naming.ts"
 import {
 	type AgentMessages,
@@ -240,7 +240,7 @@ function claimResumeFile(file: string, request: AgentRequest): () => void {
 }
 
 /**
- * Create the PI agent bridge. Call once per extension instance (registers one `agent_end` listener),
+ * Create the PI agent bridge. Call once per extension instance (registers shared PI event listeners),
  * then obtain a per-invocation `AgentStarter` bound to the command's model registry AND to the
  * directory that invocation's sessions belong in. The directory arrives at BIND time, not here: this
  * runs at extension LOAD, when no `ctx` — and therefore no session directory — exists yet, while every
@@ -268,6 +268,8 @@ export function createPiAgentBridge(
 				readonly stepName: string
 				readonly resolve: (turn: AgentTurn) => void
 				readonly cleanup: () => void
+				readonly onUsage: AgentTurnOptions["onUsage"]
+				lastReportedTokens: number | undefined
 		  }
 		| undefined
 	let lastConversation: AgentMessages = []
@@ -275,6 +277,22 @@ export function createPiAgentBridge(
 	// into every outgoing LLM call — see the header comment. Token-guarded exactly like `inFlight`, so a
 	// session can only ever clear the seed IT set (never a sibling's), and cleared in `dispose()`.
 	let activeHistory: { readonly token: object; readonly history: AgentMessages } | undefined
+
+	// PI 0.84.1 keeps the cumulative assistant message on in-process updates. Its JSON protocol strips
+	// that message, so only this shared-session path can report confirmed usage before `agent_end`.
+	pi.on("message_update", (event) => {
+		const turn = inFlight
+		if (!turn?.onUsage) return
+		const usage = lastAssistantUsage([event.message] as AgentMessages)
+		if (!usage || usage.totalTokens <= 0 || usage.totalTokens === turn.lastReportedTokens) return
+		turn.lastReportedTokens = usage.totalTokens
+		try {
+			turn.onUsage(usage)
+		} catch {
+			// A transient display callback must never interrupt the agent stream. Final usage still arrives
+			// through `agent_end` and remains the durable source of truth.
+		}
+	})
 
 	pi.on("agent_end", (event) => {
 		lastConversation = event.messages
@@ -319,7 +337,7 @@ export function createPiAgentBridge(
 			activeHistory = { token: sessionToken, history: request.history as AgentMessages }
 		}
 		return {
-			async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
+			async sendAndAwaitEnd(message: string, options?: AgentTurnOptions): Promise<AgentTurn> {
 				// Safety net, not the primary mechanism (spec §2.2): static isolation is what is SUPPOSED to
 				// keep two in-session turns from ever overlapping. If it somehow fails — a bug elsewhere, a step
 				// the static analysis missed — this must fail LOUDLY and SPECIFICALLY rather than silently
@@ -376,7 +394,15 @@ export function createPiAgentBridge(
 						reject(error)
 					}
 
-					inFlight = { sessionToken, turnToken, stepName: request.stepName, resolve, cleanup }
+					inFlight = {
+						sessionToken,
+						turnToken,
+						stepName: request.stepName,
+						resolve,
+						cleanup,
+						onUsage: options?.onUsage,
+						lastReportedTokens: undefined,
+					}
 
 					if (request.signal) {
 						const abortTurn = () => {

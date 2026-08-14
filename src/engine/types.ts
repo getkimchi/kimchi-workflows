@@ -179,6 +179,16 @@ export type RunEvent =
 	// this is scoped to exactly the step being abandoned, emitted BEFORE the run's own `run-crashed`.
 	| { type: "step-cancelled"; runId: string; path: string; at: string }
 
+/**
+ * Non-durable state that can refresh a live progress surface between lifecycle events.
+ *
+ * These updates are deliberately separate from {@link RunEvent}: cumulative streaming usage is
+ * replaced as a turn advances and must not be replayed or added to a run's final cost.
+ */
+export type RunUpdate =
+	| { type: "agent-usage-preview"; runId: string; path: string; totalTokens: number }
+	| { type: "agent-usage-preview-cleared"; runId: string; path: string }
+
 /** One message of an agent conversation. Opaque to the engine — the host defines the concrete shape. */
 export type ConversationMessage = unknown
 
@@ -270,6 +280,12 @@ export interface TokenUsage {
 	readonly totalTokens: number
 }
 
+/** Optional observers for one streaming assistant turn. */
+export interface AgentTurnOptions {
+	/** Receives cumulative, provider-confirmed usage while the turn is still streaming. */
+	readonly onUsage?: (usage: TokenUsage) => void
+}
+
 /** A `submit_*` tool call the agent made, as seen in the turn's transcript. */
 export interface SubmittedOutput {
 	/** Which output tool was called — the discriminator (see engine/output-tools.ts). */
@@ -324,8 +340,8 @@ export interface AgentTurn {
  * step's schema and sums against `maxTokens`). All network and PI coupling lives behind this seam.
  */
 export interface AgentSession {
-	/** Send `message`, run the agent loop to `agent_end`, and resolve with the turn's submission + usage. */
-	sendAndAwaitEnd(message: string): Promise<AgentTurn>
+	/** Send `message`, observe confirmed cumulative usage when available, and resolve at `agent_end`. */
+	sendAndAwaitEnd(message: string, options?: AgentTurnOptions): Promise<AgentTurn>
 	/** The full conversation after the last turn — captured when a Q&A step blocks, to resume it (spec §8.4). */
 	getConversation(): readonly ConversationMessage[]
 	/** Release any listeners/resources for this session. Called by the engine in a `finally`. */
@@ -352,6 +368,8 @@ export interface HostPort {
 	startAgent(request: AgentRequest): AgentSession
 	/** Receive a lifecycle event, in emission order. */
 	emit(event: RunEvent): void | Promise<void>
+	/** Receive replaceable presentation state. Unlike `emit`, this is never persisted. */
+	update?(update: RunUpdate): void
 }
 
 /** Per-invocation run options (spec §8.6): an external `AbortSignal` for cooperative cancellation. */

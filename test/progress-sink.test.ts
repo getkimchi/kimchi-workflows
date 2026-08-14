@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import type { RunEvent } from "../src/engine/types.ts"
+import type { RunEvent, RunUpdate } from "../src/engine/types.ts"
 import { createStep, createWorkflow } from "../src/flow/index.ts"
 import { createHostPort } from "../src/host/host-port.ts"
 import { createProgressSink, PROGRESS_OFF_ENV, type ProgressCtx, type ProgressMode } from "../src/host/progress-sink.ts"
@@ -63,6 +63,8 @@ function harness(mode: ProgressMode, sessionDir = "/tmp/session") {
 	const working: (string | undefined)[] = []
 	const entries: [string, unknown][] = []
 	const lines: string[] = []
+	let wallNow = Date.parse(at(12_000))
+	let monotonicNow = 1000
 
 	const ctx: ProgressCtx = {
 		mode,
@@ -80,12 +82,24 @@ function harness(mode: ProgressMode, sessionDir = "/tmp/session") {
 		outline,
 		runLabel: "3f9a2c1d",
 		workflowFilePath: "/abs/demo.workflow.ts",
-		now: () => new Date(Date.parse(at(12_000))),
+		now: () => new Date(wallNow),
+		monotonicNow: () => monotonicNow,
 		write: (line: string) => void lines.push(line),
 		env: {},
 	})
 
-	return { sink, widgets, notes, working, entries, lines }
+	return {
+		sink,
+		widgets,
+		notes,
+		working,
+		entries,
+		lines,
+		advance(ms: number): void {
+			wallNow += ms
+			monotonicNow += ms
+		},
+	}
 }
 
 describe("progress sink (progress §7.2): one case per ctx.mode", () => {
@@ -374,5 +388,93 @@ describe("progress widget: the TUI timer (progress §7.3)", () => {
 		)
 		vi.advanceTimersByTime(5000)
 		expect(renders).toBe(0)
+	})
+
+	it("derives live elapsed time in the render path and re-anchors on the next update", () => {
+		const h = harness("tui")
+		h.sink.accept(runStarted("demo"))
+		h.sink.accept(runningStep("analyze", 0))
+
+		const factory = h.widgets[0]?.[1] as WidgetFactory
+		const component = factory({ requestRender: () => {} }, plainTheme)
+		let lines = component.render(72)
+		expect(lines.find((line) => line.includes("3f9a2c1d"))).toContain("00:12")
+		expect(lines.find((line) => line.includes("analyze"))).toContain("running · 12s")
+
+		h.advance(4200)
+		lines = component.render(72)
+		expect(lines.find((line) => line.includes("3f9a2c1d"))).toContain("00:16")
+		expect(lines.find((line) => line.includes("analyze"))).toContain("running · 16s")
+
+		// A usage update re-projects at the current wall clock and resets the monotonic anchor. The
+		// displayed clock stays continuous instead of adding the same interval twice.
+		h.sink.update({ type: "agent-usage-preview", runId: RUN_ID, path: "analyze", totalTokens: 250 })
+		expect(component.render(72).find((line) => line.includes("analyze"))).toContain("running · 16s")
+	})
+
+	it("requests a TUI render for each distinct usage snapshot", () => {
+		const h = harness("tui")
+		h.sink.accept(runStarted("demo"))
+		h.sink.accept(runningStep("analyze", 0))
+
+		let renders = 0
+		const factory = h.widgets[0]?.[1] as WidgetFactory
+		factory({ requestRender: () => renders++ }, plainTheme)
+
+		h.sink.update({ type: "agent-usage-preview", runId: RUN_ID, path: "analyze", totalTokens: 100 })
+		expect(renders).toBe(1)
+		h.sink.update({ type: "agent-usage-preview", runId: RUN_ID, path: "analyze", totalTokens: 100 })
+		expect(renders).toBe(1)
+		h.sink.update({ type: "agent-usage-preview", runId: RUN_ID, path: "analyze", totalTokens: 120 })
+		expect(renders).toBe(2)
+
+		h.sink.dispose()
+	})
+})
+
+describe("progress sink: transient usage", () => {
+	const preview = (totalTokens: number): RunUpdate => ({
+		type: "agent-usage-preview",
+		runId: RUN_ID,
+		path: "analyze",
+		totalTokens,
+	})
+
+	it("replaces cumulative previews, deduplicates identical updates, and settles without double counting", () => {
+		const h = harness("rpc")
+		h.sink.accept(runStarted("demo"))
+		h.sink.accept(runningStep("analyze", 0))
+
+		h.sink.update(preview(100))
+		let lines = h.widgets.at(-1)?.[1] as string[]
+		expect(lines.find((line) => line.includes("analyze"))).toContain("100 tok")
+
+		const pushes = h.widgets.length
+		h.sink.update(preview(100))
+		expect(h.widgets).toHaveLength(pushes)
+
+		h.sink.update(preview(140))
+		lines = h.widgets.at(-1)?.[1] as string[]
+		expect(lines.find((line) => line.includes("analyze"))).toContain("140 tok")
+
+		h.sink.accept(usage("analyze", 140, 5000))
+		lines = h.widgets.at(-1)?.[1] as string[]
+		expect(lines.find((line) => line.includes("analyze"))).toContain("140 tok")
+		expect(lines.join("\n")).not.toContain("280 tok")
+	})
+
+	it("clears previews explicitly and ignores zero values", () => {
+		const h = harness("rpc")
+		h.sink.accept(runStarted("demo"))
+		h.sink.accept(runningStep("analyze", 0))
+
+		const pushes = h.widgets.length
+		h.sink.update(preview(0))
+		expect(h.widgets).toHaveLength(pushes)
+
+		h.sink.update(preview(90))
+		h.sink.update({ type: "agent-usage-preview-cleared", runId: RUN_ID, path: "analyze" })
+		const lines = h.widgets.at(-1)?.[1] as string[]
+		expect(lines.find((line) => line.includes("analyze"))).not.toContain("tok")
 	})
 })
