@@ -102,11 +102,11 @@ describe("resolveWorkflow", () => {
 		}
 	})
 
-	it("keeps the requested name when a catalog match fails during its final load", async () => {
+	it("retains and returns a validated catalog match without evaluating it a second time", async () => {
 		const counter = `__kimchi_catalog_loads_${Date.now()}__`
 		const source = [
 			`import { createStep, createWorkflow } from "${flowImport}";`,
-			`const state = globalThis as Record<string, number>;`,
+			`const state = globalThis as unknown as Record<string, number>;`,
 			`state[${JSON.stringify(counter)}] = (state[${JSON.stringify(counter)}] ?? 0) + 1;`,
 			`if (state[${JSON.stringify(counter)}] > 1) throw new Error("second catalog load failed");`,
 			`const step = createStep({ name: "ship", run: () => undefined });`,
@@ -117,11 +117,9 @@ describe("resolveWorkflow", () => {
 		try {
 			const resolved = await resolveWorkflow(root, "release")
 
-			expect(resolved.ok).toBe(false)
-			if (!resolved.ok) {
-				expect(resolved.error).toContain('workflow "release" could not load')
-				expect(resolved.error).toContain("second catalog load failed")
-			}
+			expect(resolved.ok).toBe(true)
+			if (resolved.ok) expect(resolved.workflow.name).toBe("release")
+			expect((globalThis as unknown as Record<string, number>)[counter]).toBe(1)
 		} finally {
 			delete (globalThis as Record<string, unknown>)[counter]
 		}
@@ -169,7 +167,7 @@ describe("resolveWorkflow", () => {
 		if (!resolved.ok) {
 			expect(resolved.error).toContain('workflow "broken" could not load')
 			expect(resolved.error).toContain(path.join(workflowsDir(root), "broken.workflow.ts"))
-			expect(resolved.error).toMatch(/ParseError|SyntaxError/)
+			expect(resolved.error).toContain("TS1109")
 			expect(resolved.error).not.toContain("no workflow named")
 		}
 	})

@@ -131,19 +131,17 @@ describe("handleStatus (progress §11.4)", () => {
 	 * the card needed `registerEntryRenderer`, which pi 0.80.2 does not have, and calling it took the
 	 * whole extension down at load. Plain text answers the question on every harness (progress-card.ts).
 	 */
-	it("answers identically in every mode, with or without a session", async () => {
+	it.each([
+		["tui", ""], // `--no-session`
+		["rpc", "/tmp/session"],
+		["json", "/tmp/session"],
+	] as const)("answers identically in %s mode, with or without a session", async (mode, sessionDir) => {
 		const { store } = await recordedRun()
-		for (const [mode, sessionDir] of [
-			["tui", ""], // `--no-session`
-			["rpc", "/tmp/session"],
-			["json", "/tmp/session"],
-		] as const) {
-			const h = fakeCtx(mode, sessionDir)
-			await handleStatus(h.ctx, store, h.deps, "1a2b3c4d")
-			expect(h.notes).toHaveLength(1)
-			expect(h.notes[0]?.[0]).toContain("✓ collect")
-			expect(h.notes[0]?.[0]).toContain("3 of 3")
-		}
+		const h = fakeCtx(mode, sessionDir)
+		await handleStatus(h.ctx, store, h.deps, "1a2b3c4d")
+		expect(h.notes).toHaveLength(1)
+		expect(h.notes[0]?.[0]).toContain("✓ collect")
+		expect(h.notes[0]?.[0]).toContain("3 of 3")
 	})
 
 	it("shows a crashed run's failing path and root cause together", async () => {

@@ -17,7 +17,6 @@ import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-
 import { workflowsDir } from "../project-dir.ts"
 import type { RunLock } from "../run-lock.ts"
 import type { RunStore } from "../types.ts"
-import { validateWorkflowTypeScript } from "../workflow-candidate-validator.ts"
 import { resolveWorkflow } from "../workflow-catalog.ts"
 import { handleAttendedInput, humanInputOf } from "./attended.ts"
 import {
@@ -143,20 +142,6 @@ export async function handleRun(
 	const resolution = await resolveWorkflow(ctx.cwd, target)
 	if (!resolution.ok) {
 		ctx.ui.notify(resolution.error, "error")
-		return
-	}
-
-	try {
-		await validateWorkflowTypeScript({ entryPath: resolution.filePath, projectRoot: ctx.cwd })
-	} catch (error) {
-		ctx.ui.notify(
-			[
-				`workflow "${resolution.workflow.name}" could not load`,
-				`  File: ${resolution.filePath}`,
-				`  ${describe(error)}`,
-			].join("\n"),
-			"error",
-		)
 		return
 	}
 

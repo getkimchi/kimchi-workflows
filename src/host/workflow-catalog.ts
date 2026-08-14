@@ -7,9 +7,9 @@
  * step sessions moved to the harness's session directory (project-dir.ts's `runArtifactsDir`), and the
  * only non-source file left here is the dot-prefixed run lock.
  *
- * Discovery *imports* every candidate to read its declared name, which executes project code — the
- * same trust boundary the harness's own `extensions/` sits behind. Workflow modules must therefore be
- * free of import-time side effects: build the definition, export it, do nothing else.
+ * Listing imports every candidate to read its declared name, which executes trusted project code.
+ * Run resolution uses a validated loader instead: semantic TypeScript must pass before any candidate
+ * is evaluated, including candidates inspected during declared-name fallback.
  */
 import { existsSync } from "node:fs"
 import { readdir } from "node:fs/promises"
@@ -17,6 +17,7 @@ import path from "node:path"
 import type { WorkflowDefinition } from "../flow/types.ts"
 import { loadWorkflowFile, WORKFLOW_SUFFIX } from "./load-workflow.ts"
 import { workflowsDir } from "./project-dir.ts"
+import { loadValidatedWorkflow } from "./workflow-preflight.ts"
 
 export { WORKFLOW_SUFFIX } from "./load-workflow.ts"
 
@@ -38,23 +39,39 @@ export interface WorkflowCatalog {
 	readonly broken: readonly BrokenWorkflow[]
 }
 
+type WorkflowLoader = (filePath: string) => Promise<WorkflowDefinition>
+type LoadedWorkflowEntry = WorkflowEntry & { readonly workflow: WorkflowDefinition }
+
+interface LoadedWorkflowCatalog {
+	readonly entries: readonly LoadedWorkflowEntry[]
+	readonly broken: readonly BrokenWorkflow[]
+}
+
 /**
  * Load every workflow in the project's workflows directory, sorted by name. A file that throws is
  * reported in `broken` instead of failing the whole catalog — one unparseable workflow must not make
  * `/workflow list` useless. A missing directory is simply an empty catalog.
  */
 export async function discoverWorkflows(projectRoot: string): Promise<WorkflowCatalog> {
+	const catalog = await scanWorkflows(projectRoot, loadWorkflowFile)
+	return {
+		entries: catalog.entries.map(({ workflow: _, ...entry }) => entry),
+		broken: catalog.broken,
+	}
+}
+
+async function scanWorkflows(projectRoot: string, load: WorkflowLoader): Promise<LoadedWorkflowCatalog> {
 	const dir = workflowsDir(projectRoot)
 	const files = await readdir(dir).catch(() => [] as string[])
 
-	const entries: WorkflowEntry[] = []
+	const entries: LoadedWorkflowEntry[] = []
 	const broken: BrokenWorkflow[] = []
 
 	for (const file of files.filter((name) => name.endsWith(WORKFLOW_SUFFIX)).sort()) {
 		const filePath = path.join(dir, file)
 		try {
-			const workflow = await loadWorkflowFile(filePath)
-			entries.push({ name: workflow.name, description: workflow.description, filePath })
+			const workflow = await load(filePath)
+			entries.push({ name: workflow.name, description: workflow.description, filePath, workflow })
 		} catch (err) {
 			broken.push({ filePath, error: err instanceof Error ? err.message : String(err) })
 		}
@@ -76,25 +93,26 @@ export type WorkflowResolution =
  * `.ts` path, the `<name>.workflow.ts` convention, then a full catalog scan — each its own helper below.
  */
 export async function resolveWorkflow(projectRoot: string, arg: string): Promise<WorkflowResolution> {
+	const load = validatedLoader(projectRoot)
 	if (arg.endsWith(".ts")) {
 		const filePath = path.resolve(projectRoot, arg)
 		if (!existsSync(filePath)) return { ok: false, error: `workflow: file does not exist\n  ${filePath}` }
-		return loadAsResolution(filePath, arg)
+		return loadAsResolution(filePath, arg, load)
 	}
 
 	// Fast path: by convention a workflow lives in `<name>.workflow.ts`. Trying that first means the
 	// common case imports exactly one module, instead of executing every workflow in the project just
 	// to read their declared names.
-	const byConvention = await resolveByConvention(projectRoot, arg)
+	const byConvention = await resolveByConvention(projectRoot, arg, load)
 	if (byConvention) return byConvention
 
-	return resolveByCatalogName(projectRoot, arg)
+	return resolveByCatalogName(projectRoot, arg, load)
 }
 
 /** Load `filePath` as a workflow, wrapping a failure with `arg` (the user-facing argument) for context. */
-async function loadAsResolution(filePath: string, arg: string): Promise<WorkflowResolution> {
+async function loadAsResolution(filePath: string, arg: string, load: WorkflowLoader): Promise<WorkflowResolution> {
 	try {
-		return { ok: true, workflow: await loadWorkflowFile(filePath), filePath }
+		return { ok: true, workflow: await load(filePath), filePath }
 	} catch (err) {
 		return {
 			ok: false,
@@ -104,22 +122,30 @@ async function loadAsResolution(filePath: string, arg: string): Promise<Workflow
 }
 
 /** The `<name>.workflow.ts` convention path, if it exists AND its declared name actually matches `arg`. */
-async function resolveByConvention(projectRoot: string, arg: string): Promise<WorkflowResolution | undefined> {
+async function resolveByConvention(
+	projectRoot: string,
+	arg: string,
+	load: WorkflowLoader,
+): Promise<WorkflowResolution | undefined> {
 	const byConvention = path.join(workflowsDir(projectRoot), `${arg}${WORKFLOW_SUFFIX}`)
 	if (!existsSync(byConvention)) return undefined
-	const loaded = await loadAsResolution(byConvention, arg)
+	const loaded = await loadAsResolution(byConvention, arg, load)
 	if (!loaded.ok) return loaded
 	return loaded.workflow.name === arg ? loaded : undefined
 }
 
 /** Fall back to a full catalog scan, matching `arg` against every discovered workflow's declared name. */
-async function resolveByCatalogName(projectRoot: string, arg: string): Promise<WorkflowResolution> {
-	const { entries } = await discoverWorkflows(projectRoot)
+async function resolveByCatalogName(
+	projectRoot: string,
+	arg: string,
+	load: WorkflowLoader,
+): Promise<WorkflowResolution> {
+	const { entries, broken } = await scanWorkflows(projectRoot, load)
 	const matches = entries.filter((entry) => entry.name === arg)
 
 	if (matches.length === 1) {
-		const match = matches[0] as WorkflowEntry
-		return loadAsResolution(match.filePath, arg)
+		const match = matches[0] as LoadedWorkflowEntry
+		return { ok: true, workflow: match.workflow, filePath: match.filePath }
 	}
 	if (matches.length > 1) {
 		return {
@@ -131,5 +157,16 @@ async function resolveByCatalogName(projectRoot: string, arg: string): Promise<W
 	const known = entries.map((entry) => entry.name)
 	const searched = path.join(workflowsDir(projectRoot), `${arg}${WORKFLOW_SUFFIX}`)
 	const hint = known.length > 0 ? `\n  Known workflows: ${known.join(", ")}` : ""
-	return { ok: false, error: `workflow: cannot find "${arg}"\n  Looked for: ${searched}${hint}` }
+	const brokenHint = broken
+		.map((entry) => `\n  File: ${entry.filePath}\n  ${entry.error.replaceAll("\n", "\n  ")}`)
+		.join("")
+	return { ok: false, error: `workflow: cannot find "${arg}"\n  Looked for: ${searched}${hint}${brokenHint}` }
+}
+
+function validatedLoader(projectRoot: string): WorkflowLoader {
+	return async (filePath) => {
+		const loaded = await loadValidatedWorkflow({ filePath, projectRoot })
+		if (loaded.ok) return loaded.workflow
+		throw new Error(loaded.cause ?? "The workflow file no longer exists.")
+	}
 }
