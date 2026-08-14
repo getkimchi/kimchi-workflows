@@ -99,7 +99,12 @@ describe("rich questionnaire form state", () => {
 		}
 		let state = initialFormState(questionnaire)
 		;({ state } = reduceForm(state, { kind: "key-escape" }))
-		;({ state } = reduceForm(state, { kind: "key-left" }))
+		const boundary = reduceForm(state, { kind: "navigate", delta: -1 })
+		expect(boundary.state.currentPage).toBe(0)
+		expect(boundary.effects).toEqual([])
+		;({ state } = reduceForm(state, { kind: "navigate", delta: 1 }))
+		;({ state } = reduceForm(state, { kind: "key-escape" }))
+		;({ state } = reduceForm(state, { kind: "navigate", delta: 1 }))
 		expect(isSubmitPage(state)).toBe(true)
 		expect(reduceForm(state, { kind: "key-enter" }).effects).toEqual([])
 	})

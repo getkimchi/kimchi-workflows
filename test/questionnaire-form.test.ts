@@ -11,7 +11,7 @@ const theme = {
 } as Theme
 
 function form(questionnaire: Questionnaire) {
-	const tui = { requestRender: vi.fn() } as unknown as TUI
+	const tui = { requestRender: vi.fn(), terminal: { rows: 40, columns: 120 } } as unknown as TUI
 	const done = vi.fn<(answers: Record<string, unknown> | undefined) => void>()
 	const component = createQuestionnaireForm(tui, theme, questionnaire, done)
 	return { component, done, tui }
@@ -68,11 +68,16 @@ describe("rich questionnaire component keyboard interaction", () => {
 			],
 		})
 
+		const firstTabs = component.render(100).find((line) => line.includes("Submit")) ?? ""
+		expect(firstTabs).not.toContain("←")
 		press(component, "\r")
 		expect(done).not.toHaveBeenCalled()
+		expect(component.render(100).join("\n")).toContain("←")
 		press(component, "\r")
 		expect(done).not.toHaveBeenCalled()
-		expect(component.render(100).join("\n")).toContain("Ready to submit")
+		const submitLines = component.render(100)
+		expect(submitLines.join("\n")).toContain("Ready to submit")
+		expect(submitLines.find((line) => line.includes("Submit"))).not.toContain("→")
 
 		press(component, "\r")
 		expect(done).toHaveBeenCalledWith({ environment: "prod", region: "eu" })
@@ -90,5 +95,32 @@ describe("rich questionnaire component keyboard interaction", () => {
 		press(component, "\r")
 
 		expect(done).toHaveBeenCalledWith({ details: "first line\nsecond line" })
+	})
+
+	it("switches pages from a textarea at its edges and preserves the draft", () => {
+		const { component, done } = form({
+			questions: [
+				{ key: "details", header: "Details", question: "Describe it", kind: "text" },
+				{
+					key: "priority",
+					header: "Priority",
+					question: "Priority?",
+					kind: "single",
+					options: [{ value: "high", label: "High" }],
+				},
+			],
+		})
+
+		press(component, "draft")
+		press(component, "\u001b[D") // move within the textarea
+		expect(component.render(100).join("\n")).toContain("Describe it")
+		press(component, "\u001b[C") // return to the text boundary
+		press(component, "\u001b[C") // move to the next page
+		expect(component.render(100).join("\n")).toContain("Priority?")
+
+		press(component, "\r")
+		expect(component.render(100).join("\n")).toContain("Details: draft")
+		press(component, "\r")
+		expect(done).toHaveBeenCalledWith({ details: "draft", priority: "high" })
 	})
 })

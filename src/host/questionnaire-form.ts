@@ -90,7 +90,9 @@ export function createQuestionnaireForm(
 
 	function handleInput(data: string): void {
 		if (state.inputMode) {
-			if (matchesKey(data, Key.escape)) dispatch({ kind: "key-escape" })
+			const navigation = editorNavigation(data, state, editor)
+			if (navigation) dispatch(navigation)
+			else if (matchesKey(data, Key.escape)) dispatch({ kind: "key-escape" })
 			else {
 				editor.handleInput(data)
 				cachedLines = undefined
@@ -141,7 +143,8 @@ export function createQuestionnaireForm(
 			for (const line of editor.render(Math.max(1, renderWidth - 2))) addWithPrefix(" ", line)
 			lines.push("")
 			const action = questionnaire.questions.length > 1 ? "Enter continue" : "Enter submit"
-			addWithPrefix(" ", theme.fg("dim", `${action} • Shift+Enter newline • Esc close editor`))
+			const navigation = questionnaire.questions.length > 1 ? "Tab/Shift+Tab pages • ←/→ at text edges • " : ""
+			addWithPrefix(" ", theme.fg("dim", `${navigation}${action} • Shift+Enter newline • Esc close editor`))
 		} else if (isSubmitPage(state)) {
 			renderSubmitPage(state, theme, addWithPrefix, lines)
 		} else if (question?.kind === "text" || question?.kind === "chat") {
@@ -188,16 +191,39 @@ export function createQuestionnaireForm(
 function keyEvent(data: string): FormEvent | undefined {
 	if (matchesKey(data, Key.up)) return { kind: "key-up" }
 	if (matchesKey(data, Key.down)) return { kind: "key-down" }
-	if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) return { kind: "key-right" }
-	if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) return { kind: "key-left" }
+	if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) return { kind: "navigate", delta: 1 }
+	if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) return { kind: "navigate", delta: -1 }
 	if (matchesKey(data, Key.enter)) return { kind: "key-enter" }
 	if (matchesKey(data, Key.escape)) return { kind: "key-escape" }
 	if (matchesKey(data, Key.space)) return { kind: "key-space" }
 	return undefined
 }
 
+function editorNavigation(data: string, state: FormState, editor: Editor): FormEvent | undefined {
+	if (state.questionnaire.questions.length <= 1) return undefined
+	const canGoBack = state.currentPage > 0
+	const canGoForward = state.currentPage < state.questionnaire.questions.length
+	const backwards = matchesKey(data, Key.shift("tab")) || (matchesKey(data, Key.left) && editorAtStart(editor))
+	const forwards = matchesKey(data, Key.tab) || (matchesKey(data, Key.right) && editorAtEnd(editor))
+	if (backwards && canGoBack) return { kind: "navigate", delta: -1, text: editor.getExpandedText() }
+	if (forwards && canGoForward) return { kind: "navigate", delta: 1, text: editor.getExpandedText() }
+	return undefined
+}
+
+function editorAtStart(editor: Editor): boolean {
+	const cursor = editor.getCursor()
+	return cursor.line === 0 && cursor.col === 0
+}
+
+function editorAtEnd(editor: Editor): boolean {
+	const cursor = editor.getCursor()
+	const lines = editor.getLines()
+	const lastLine = Math.max(0, lines.length - 1)
+	return cursor.line === lastLine && cursor.col === (lines[lastLine]?.length ?? 0)
+}
+
 function renderTabs(state: FormState, theme: Theme, addWithPrefix: (prefix: string, text: string) => void): void {
-	const tabs = ["← "]
+	const tabs = state.currentPage > 0 ? ["← "] : []
 	for (const [index, question] of state.questionnaire.questions.entries()) {
 		const answered = state.answers.has(question.key)
 		const text = ` ${answered ? "■" : "□"} ${question.header} `
@@ -211,7 +237,7 @@ function renderTabs(state: FormState, theme: Theme, addWithPrefix: (prefix: stri
 	const submit = isSubmitPage(state)
 		? theme.bg("selectedBg", theme.fg("text", submitText))
 		: theme.fg(allQuestionsAnswered(state) ? "success" : "dim", submitText)
-	tabs.push(`${submit} →`)
+	tabs.push(`${submit}${state.currentPage < state.questionnaire.questions.length ? " →" : ""}`)
 	addWithPrefix(" ", tabs.join(""))
 }
 

@@ -11,8 +11,7 @@ import { assembleAnswers, OTHER_LABEL, OTHER_VALUE, orderedOptions, type RawSele
 export type FormEvent =
 	| { kind: "key-up" }
 	| { kind: "key-down" }
-	| { kind: "key-left" }
-	| { kind: "key-right" }
+	| { kind: "navigate"; delta: -1 | 1; text?: string }
 	| { kind: "key-enter" }
 	| { kind: "key-escape" }
 	| { kind: "key-space" }
@@ -78,6 +77,19 @@ export function reduceForm(state: FormState, event: FormEvent): FormTransition {
 	let next = state
 	const effects: FormEffect[] = []
 
+	if (event.kind === "navigate") {
+		if (!isMultiPage(next)) return { state: next, effects }
+		if (event.text !== undefined) {
+			const question = currentFormQuestion(next)
+			if (question) {
+				const selection: RawSelection =
+					question.kind === "single" ? { option: OTHER_VALUE, text: event.text } : { text: event.text }
+				next = withAnswer(next, question.key, selection)
+			}
+		}
+		return navigate(next, event.delta)
+	}
+
 	if (event.kind === "editor-submit") {
 		const question = currentFormQuestion(next)
 		if (!question) return { state: next, effects }
@@ -96,11 +108,6 @@ export function reduceForm(state: FormState, event: FormEvent): FormTransition {
 			effects.push({ kind: "editor-set-text", text: "" }, { kind: "render" })
 		}
 		return { state: next, effects }
-	}
-
-	if (isMultiPage(next)) {
-		if (event.kind === "key-right") return navigate(next, 1)
-		if (event.kind === "key-left") return navigate(next, -1)
 	}
 
 	if (isSubmitPage(next)) {
@@ -173,8 +180,8 @@ function withAnswer(state: FormState, key: string, selection: RawSelection): For
 }
 
 function navigate(state: FormState, delta: 1 | -1): FormTransition {
-	const totalPages = state.questionnaire.questions.length + 1
-	return enterPage(state, (state.currentPage + delta + totalPages) % totalPages)
+	const currentPage = Math.min(state.questionnaire.questions.length, Math.max(0, state.currentPage + delta))
+	return currentPage === state.currentPage ? { state, effects: [] } : enterPage(state, currentPage)
 }
 
 function enterTextMode(state: FormState, question: Question): FormTransition {
