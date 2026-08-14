@@ -209,7 +209,7 @@ describe("resolveWorkflow does not execute unrelated workflows (adversarial regr
 		const dir = workflowsDir(root)
 		await mkdir(dir, { recursive: true })
 		const log = path.join(root, "imports.log")
-		for (const name of ["alpha", "beta", "gamma"]) {
+		for (const name of ["alpha", "beta"]) {
 			const source = [
 				`import { appendFileSync } from "node:fs";`,
 				`appendFileSync(${JSON.stringify(log)}, "${name}\\n");`,
@@ -234,12 +234,19 @@ describe("resolveWorkflow does not execute unrelated workflows (adversarial regr
 
 	it("falls back to a full scan only when the convention does not hold", async () => {
 		const { root, log } = await projectWithTracing()
-		// A workflow whose declared name does not match its filename can only be found by scanning.
-		await writeFile(path.join(workflowsDir(root), "misnamed.workflow.ts"), workflowSource("delta"), "utf8")
+		// A workflow whose declared name does not match its filename can only be found by scanning. Reuse
+		// beta rather than adding more candidates: two modules are the minimum needed to prove the scan
+		// evaluates an unrelated workflow, and each candidate intentionally runs a real TypeScript preflight.
+		const misnamed = [
+			`import { appendFileSync } from "node:fs";`,
+			`appendFileSync(${JSON.stringify(log)}, "beta\\n");`,
+			workflowSource("delta"),
+		].join("\n")
+		await writeFile(path.join(workflowsDir(root), "beta.workflow.ts"), misnamed, "utf8")
 
 		const resolved = await resolveWorkflow(root, "delta")
 
 		expect(resolved.ok).toBe(true)
-		expect((await imported(log)).length).toBeGreaterThan(1) // the scan did import the others
+		expect(await imported(log)).toEqual(["alpha", "beta"])
 	})
 })
