@@ -212,7 +212,7 @@ log. Ruled out as framework causes **by measurement**: engine state accumulation
 - **In-session "nudge" on invalid output for resumable steps.** Written, then dropped: making
   `implement` schema-free removes the failure entirely, leaving the capability with no consumer. The
   simpler fix beat the more clever one.
-- **A `submit_result` tool for in-loop validation** (`ExtensionAPI.registerTool` does exist). Viable and
+- **A `workflow_submit_result` tool for in-loop validation** (`ExtensionAPI.registerTool` does exist). Viable and
   strictly cheaper than out-of-loop retries, but needs `-e` passed to subagents plus a recursion guard —
   and is moot now that acting steps need no validation at all.
 - **`BUN_JSC_forceRAMSize`** to curb orchestrator memory. Accepted by the binary but **could not be

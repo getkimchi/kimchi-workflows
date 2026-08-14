@@ -8,7 +8,7 @@
  */
 
 /** Submits the step's result. Parameters are `{ result: <the step's outputSchema> }`. */
-export const SUBMIT_RESULT_TOOL = "submit_result"
+export const SUBMIT_RESULT_TOOL = "workflow_submit_result"
 
 /** Submits a question batch instead of a result, blocking the run (spec §10.1). Parameters are the questionnaire. */
-export const SUBMIT_QUESTIONS_TOOL = "submit_questions"
+export const SUBMIT_QUESTIONS_TOOL = "workflow_submit_questions"

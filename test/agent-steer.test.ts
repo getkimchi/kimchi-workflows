@@ -85,7 +85,7 @@ describe("output steering (Phase 4b, spec §9.2)", () => {
 		expect(result.status).toBe("completed")
 		const steers = steerEvents(await store.loadEvents(result.runId))
 		expect(steers).toHaveLength(1)
-		expect(steers[0]?.violation).toMatch(/without calling submit_result/)
+		expect(steers[0]?.violation).toMatch(/without calling workflow_submit_result/)
 	})
 
 	it("falls back to the repeat policy once repairs are exhausted, when the step declares retry (spec §9.2/§9.3)", async () => {
@@ -144,12 +144,12 @@ describe("output steering (Phase 4b, spec §9.2)", () => {
 	})
 
 	/**
-	 * A background step that ends its turn without calling `submit_result` used to fail the
+	 * A background step that ends its turn without calling `workflow_submit_result` used to fail the
 	 * attempt outright: no correction, and the next attempt re-prompted from scratch. The model was never
 	 * told what it had omitted, so a model prone to omitting it omitted it again. The subprocess resumes
 	 * the step's session file, so the correction below reaches it with its own work still in front of it.
 	 */
-	describe("a background step that never calls submit_result", () => {
+	describe("a background step that never calls workflow_submit_result", () => {
 		// Prose from a turn that did real work and simply forgot to submit — no JSON, nothing to salvage.
 		const workedButNoSubmit = "I've edited the files and run the tests. All done."
 
@@ -170,8 +170,8 @@ describe("output steering (Phase 4b, spec §9.2)", () => {
 			expect(result.output).toEqual({ summary: "ok", keywords: ["k"] })
 			expect(agent.opened).toBe(1) // the SAME session — nothing restarted, nothing lost
 			expect(agent.messages).toHaveLength(2)
-			expect(agent.messages[1]).toMatch(/without calling submit_result/) // told what it omitted…
-			expect(agent.messages[1]).toMatch(/call submit_result/i) // …and what to do about it
+			expect(agent.messages[1]).toMatch(/without calling workflow_submit_result/) // told what it omitted…
+			expect(agent.messages[1]).toMatch(/call workflow_submit_result/i) // …and what to do about it
 
 			const events = await store.loadEvents(result.runId)
 			expect(steerEvents(events)).toHaveLength(1)
@@ -206,7 +206,7 @@ describe("output steering (Phase 4b, spec §9.2)", () => {
 		it("includes the violation text, the JSON Schema, and the submit instruction", () => {
 			const message = buildCorrectionMessage(outputSchema, 'expected required property "keywords"')
 			expect(message).toMatch(/expected required property "keywords"/) // the violation
-			expect(message).toMatch(/call submit_result/i) // the instruction
+			expect(message).toMatch(/call workflow_submit_result/i) // the instruction
 			// The schema object itself is embedded (round-trips to the same schema).
 			const schemaJson = message.slice(message.indexOf("{"))
 			expect(JSON.parse(schemaJson)).toEqual(JSON.parse(JSON.stringify(outputSchema)))

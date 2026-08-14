@@ -55,7 +55,7 @@ describe("the schema handoff a spawned step is given", () => {
 // --- registration ---------------------------------------------------------
 
 describe("registration inside a spawned step", () => {
-	it("registers submit_result typed by the step's own schema", () => {
+	it("registers workflow_submit_result typed by the step's own schema", () => {
 		const { pi, registerTool } = fakePi()
 		registerStepOutputTools(pi, { outputSchema })
 
@@ -68,7 +68,7 @@ describe("registration inside a spawned step", () => {
 		expect(tool.parameters.properties.result).toEqual(outputSchema)
 	})
 
-	it("offers submit_questions only to a step that can block", () => {
+	it("offers workflow_submit_questions only to a step that can block", () => {
 		const asking = fakePi()
 		registerStepOutputTools(asking.pi, { outputSchema, asks: true })
 		expect(asking.registerTool.mock.calls.map((c) => (c[0] as { name: string }).name)).toEqual([

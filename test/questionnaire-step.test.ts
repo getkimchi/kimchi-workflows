@@ -102,7 +102,7 @@ describe("Q&A agent step — elicitation (B2, spec §10.1)", () => {
 		// The framework auto-injected the asking protocol (the author's prompt is task-only).
 		const firstMessage = blocked.agent("elicit").messages[0] ?? ""
 		expect(firstMessage).toMatch(/"questions":/)
-		expect(firstMessage).toMatch(/submit_result/)
+		expect(firstMessage).toMatch(/workflow_submit_result/)
 		expect(firstMessage).toMatch(/[Bb]atch as many questions/)
 
 		const done = await blocked.answer({ answer: "42" })

@@ -1,6 +1,6 @@
 /**
  * Host side of the output-tool contract (engine/output-tools.ts): the handoff that lets a SPAWNED step
- * register `submit_result`/`submit_questions` typed by that step's own schema, and the registration
+ * register `workflow_submit_result`/`workflow_submit_questions` typed by that step's own schema, and the registration
  * itself.
  *
  * Why a handoff at all: a background/isolated step runs as a fresh `kimchi` process (pi-agent.ts), and
@@ -29,7 +29,7 @@ import {
 /** Env var naming the JSON file that describes which output tools a spawned step should register. */
 export const STEP_OUTPUT_TOOLS_ENV = "KIMCHI_WORKFLOW_STEP_OUTPUT_TOOLS"
 
-/** The handoff file's contents. `asks` decides whether `submit_questions` is offered alongside the result tool. */
+/** The handoff file's contents. `asks` decides whether `workflow_submit_questions` is offered alongside the result tool. */
 export interface StepOutputToolSpec {
 	readonly outputSchema: TSchema
 	readonly asks?: boolean
@@ -124,8 +124,8 @@ export function registerStepOutputTools(pi: ExtensionAPI, spec: StepOutputToolSp
  *
  * A shared session runs every step in one process, so a tool registered for one step is visible to all
  * the others unless the ACTIVE set is narrowed per step. Three leaks this closes: a step that cannot
- * block still seeing `submit_questions` (which the engine rejects, burning its repair budget); a step
- * with no contract still seeing `submit_result` typed by the PREVIOUS step's schema (its output would
+ * block still seeing `workflow_submit_questions` (which the engine rejects, burning its repair budget); a step
+ * with no contract still seeing `workflow_submit_result` typed by the PREVIOUS step's schema (its output would
  * silently become `""`); and both tools surviving into the user's own session after the run.
  *
  * Pass `baseline` back with no spec to restore it.

@@ -3,7 +3,7 @@
  *
  * Run it: `/workflow run examples/summarize.workflow.ts` inside the kimchi harness (the agent step
  * runs on the session model, or `kimchi-dev/kimi-k2.7` when set as the default). The step submits its
- * result by calling `submit_result`, and the engine validates that payload against `output`.
+ * result by calling `workflow_submit_result`, and the engine validates that payload against `output`.
  */
 import { Type } from "typebox"
 import { createAgentStep, createStep, createWorkflow } from "../src/flow/index.ts"

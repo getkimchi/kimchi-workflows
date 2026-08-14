@@ -37,14 +37,14 @@ const messages = (...items: unknown[]) => items as AgentMessages
 // --- readSubmittedPayload -------------------------------------------------
 
 describe("readSubmittedPayload: the tool identity is the discriminator", () => {
-	it("reads submit_result's `result` argument as a result", () => {
+	it("reads workflow_submit_result's `result` argument as a result", () => {
 		expect(readSubmittedPayload({ tool: SUBMIT_RESULT_TOOL, arguments: { result: { grade: "A" } } })).toEqual({
 			kind: "result",
 			value: { grade: "A" },
 		})
 	})
 
-	it("reads submit_questions' whole arguments object as a questionnaire", () => {
+	it("reads workflow_submit_questions' whole arguments object as a questionnaire", () => {
 		const batch = { title: "Scope", questions: [{ key: "db", kind: "text", question: "Which DB?" }] }
 		expect(readSubmittedPayload({ tool: SUBMIT_QUESTIONS_TOOL, arguments: batch })).toEqual({
 			kind: "questions",
@@ -52,7 +52,7 @@ describe("readSubmittedPayload: the tool identity is the discriminator", () => {
 		})
 	})
 
-	it("reports a submit_result with no `result` key as malformed, not as a result of undefined", () => {
+	it("reports a workflow_submit_result with no `result` key as malformed, not as a result of undefined", () => {
 		// `undefined` VALIDATES against a permissive contract, so reporting it as a result would record an
 		// empty call as the step's output, indistinguishable from a step that produced nothing.
 		expect(readSubmittedPayload({ tool: SUBMIT_RESULT_TOOL, arguments: {} })).toEqual({

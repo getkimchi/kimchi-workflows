@@ -3,7 +3,7 @@
  *
  * The failure mode this exists for: a request the provider refuses still completes a turn. PI records an
  * assistant message with `content: []`, zero usage and `stopReason: "error"`, then ends the loop — which
- * at the engine's boundary is shaped exactly like a model that chose not to call `submit_result`. Read
+ * at the engine's boundary is shaped exactly like a model that chose not to call `workflow_submit_result`. Read
  * as the latter it produces a violation the model never committed, a steering correction sent into a
  * session that cannot answer, and a step failure whose stated cause is wrong.
  *
@@ -163,7 +163,7 @@ describe("what the engine does with a failed turn", () => {
 
 		expect(result.error).toMatch(/provider-error/)
 		expect(result.error).toMatch(/upstream 503/)
-		expect(result.error).not.toMatch(/submit_result/)
+		expect(result.error).not.toMatch(/workflow_submit_result/)
 
 		const errors = agentErrors(await store.loadEvents(result.runId))
 		expect(errors).toHaveLength(1)

@@ -92,7 +92,7 @@ export function submittedFromMessage(message: AgentMessages[number]): SubmittedO
  *
  * `ToolCall.arguments` is typed as an object, but that is a property of the providers pi has been used
  * with, not a guarantee: an OpenAI-compatible gateway may pass the raw JSON string through. Dropping it
- * would turn every submission into "the turn ended without calling submit_result" — a violation blaming
+ * would turn every submission into "the turn ended without calling workflow_submit_result" — a violation blaming
  * the model for the transport's shape.
  */
 function toArguments(args: unknown): Record<string, unknown> {
