@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -150,6 +150,33 @@ describe("/workflow run --input", () => {
 		// A round trip through the JSON-lines store drops an `undefined`-valued key entirely rather than
 		// keeping it null, so absence — not a `toMatchObject` on the key — is the honest assertion here.
 		expect(started && "input" in started ? (started as { input: unknown }).input : undefined).toBeUndefined()
+	})
+
+	it("rejects a semantic TypeScript error before creating a run", async () => {
+		const invalidFile = path.join(projectRoot, "semantic-error.workflow.ts")
+		await writeFile(
+			invalidFile,
+			[
+				`import { createStep, createWorkflow } from "${flowImport}";`,
+				`const invalid: number = "not a number";`,
+				`const step = createStep({ name: "noop", run: () => invalid });`,
+				`export default createWorkflow({ name: "semantic-error" }).then(step).commit();`,
+			].join("\n"),
+			"utf8",
+		)
+		const spy = notifySpy()
+
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, invalidFile)
+
+		expect(await store.list()).toHaveLength(0)
+		expect(spy.notes).toHaveLength(1)
+		expect(spy.notes[0]?.[1]).toBe("error")
+		expect(spy.notes[0]?.[0]).toContain(`workflow "semantic-error" could not load`)
+		expect(spy.notes[0]?.[0]).toContain(`File: ${invalidFile}`)
+		expect(spy.notes[0]?.[0]).toContain("TS2322")
+		expect((await readdir(path.dirname(invalidFile))).filter((name) => name.startsWith(".pi-run-typecheck-"))).toEqual(
+			[],
+		)
 	})
 })
 

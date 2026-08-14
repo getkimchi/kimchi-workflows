@@ -1,4 +1,5 @@
-import { mkdtemp, writeFile } from "node:fs/promises"
+import { existsSync } from "node:fs"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { describe, expect, it } from "vitest"
@@ -30,6 +31,25 @@ export default createWorkflow({ name: "audit" })
     [() => true, createWorkflow({ name: "review" }).then(createStep({ name: "check", run: () => ({ ok: true }) })).commit()],
     [() => false, createWorkflow({ name: "migrate" }).then(createStep({ name: "apply", run: () => ({ ok: true }) })).commit()],
   ], { name: "gate" })
+  .commit();
+`
+
+const CRASHING_WORKFLOW_SOURCE = `
+import { createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows";
+
+export default createWorkflow({ name: "audit" })
+  .then(createStep({ name: "publish", run: () => { throw new Error("registry denied the release"); } }))
+  .commit();
+`
+
+const semanticallyInvalidWorkflowSource = (evaluated: string) => `
+import { writeFileSync } from "node:fs";
+import { createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows";
+
+writeFileSync(${JSON.stringify(evaluated)}, "evaluated");
+const invalid: number = "not a number";
+export default createWorkflow({ name: "audit" })
+  .then(createStep({ name: "collect", run: () => invalid }))
   .commit();
 `
 
@@ -68,6 +88,23 @@ async function recordedRun() {
 	})
 	const result = await runWorkflow(workflow, undefined, host)
 	return { store, result, file }
+}
+
+async function recordedCrash() {
+	const dir = await mkdtemp(path.join(tmpdir(), "pi-workflows-status-crash-"))
+	const file = path.join(dir, "audit.workflow.ts")
+	await writeFile(file, CRASHING_WORKFLOW_SOURCE, "utf8")
+	const workflow = await loadWorkflowFile(file)
+	const store = createMemoryStore()
+	const host = createHostPort(store, { generateRunId: () => "workflow-audit-1a2b3c4d" })
+	await store.appendEvent({
+		type: "run-meta",
+		runId: "workflow-audit-1a2b3c4d",
+		workflowFilePath: file,
+		at: new Date().toISOString(),
+	})
+	const result = await runWorkflow(workflow, undefined, host)
+	return { store, result }
 }
 
 describe("handleStatus (progress §11.4)", () => {
@@ -109,6 +146,51 @@ describe("handleStatus (progress §11.4)", () => {
 		}
 	})
 
+	it("shows a crashed run's failing path and root cause together", async () => {
+		const { store, result } = await recordedCrash()
+		expect(result).toMatchObject({ status: "crashed", path: "publish", error: "registry denied the release" })
+
+		const h = fakeCtx("tui")
+		await handleStatus(h.ctx, store, h.deps, "1a2b3c4d")
+
+		expect(h.notes).toHaveLength(1)
+		expect(h.notes[0]?.[0]).toContain('Failure at "publish": registry denied the release')
+		expect(h.notes[0]?.[0]).toContain("✗ publish")
+		expect(h.notes[0]?.[1]).toBe("error")
+	})
+
+	it("explains a workflow file deleted after the run and preserves the recorded result", async () => {
+		const { store, file } = await recordedRun()
+		await rm(file)
+		const h = fakeCtx("tui")
+
+		await handleStatus(h.ctx, store, h.deps, "1a2b3c4d")
+
+		expect(h.notes).toHaveLength(1)
+		expect(h.notes[0]?.[0]).toContain('workflow "audit" cannot show status (run workflow-audit-1a2b3c4d)')
+		expect(h.notes[0]?.[0]).toContain(`File: ${file}`)
+		expect(h.notes[0]?.[0]).toContain("The workflow file no longer exists")
+		expect(h.notes[0]?.[0]).toContain("The recorded run has been preserved")
+		expect(h.notes[0]?.[1]).toBe("error")
+	})
+
+	it("shows a new semantic TypeScript error instead of rendering a stale status tree", async () => {
+		const { store, file } = await recordedRun()
+		const evaluated = path.join(path.dirname(file), "semantic-workflow-evaluated.txt")
+		await writeFile(file, semanticallyInvalidWorkflowSource(evaluated), "utf8")
+		const h = fakeCtx("tui")
+
+		await handleStatus(h.ctx, store, h.deps, "1a2b3c4d")
+
+		expect(h.notes).toHaveLength(1)
+		expect(h.notes[0]?.[0]).toContain('workflow "audit" cannot show status (run workflow-audit-1a2b3c4d)')
+		expect(h.notes[0]?.[0]).toContain(`File: ${file}`)
+		expect(h.notes[0]?.[0]).toContain("TS2322")
+		expect(h.notes[0]?.[0]).toContain("The recorded run has been preserved")
+		expect(h.notes[0]?.[1]).toBe("error")
+		expect(existsSync(evaluated)).toBe(false)
+	})
+
 	it("reports an unknown run rather than showing an empty tree", async () => {
 		const { store } = await recordedRun()
 		const h = fakeCtx("tui")
@@ -142,6 +224,8 @@ describe("handleStatus (progress §11.4)", () => {
 		})
 		const h = fakeCtx("tui")
 		await handleStatus(h.ctx, store, h.deps, "9f9f9f9f")
-		expect(h.notes[0]?.[0]).toContain("does not record which workflow file")
+		expect(h.notes[0]?.[0]).toContain("workflow run workflow-orphan-9f9f9f9f cannot be shown")
+		expect(h.notes[0]?.[0]).toContain("does not record the workflow file it came from")
+		expect(h.notes[0]?.[0]).toContain("The recorded run has been preserved")
 	})
 })

@@ -5,6 +5,7 @@
  * `host.startAgent`; all delay (backoff + budget timers) is `host.sleep`.
  */
 
+import { invokeCallback } from "../flow/callback-result.ts"
 import { isValidResumeKey } from "../flow/isolation.ts"
 import {
 	buildAskingProtocol,
@@ -143,6 +144,8 @@ export async function runFunctionStep(
 ): Promise<StepOutcome> {
 	const ctx = createRunContext(state, parentPath, frames, path)
 	const logger = createStepLogger(host, state.runId, path)
+	const budget = invokeCallback(`step "${step.name}" maxDurationMs callback`, () => resolveBudgetMs(step, ctx))
+	if (!budget.ok) return { kind: "crashed", error: budget.error }
 	return retryLoop(
 		step,
 		host,
@@ -150,7 +153,7 @@ export async function runFunctionStep(
 		signal,
 		path,
 		(sig) => runFunctionAttempt(step, input, ctx, logger, sig),
-		resolveBudgetMs(step, ctx),
+		budget.value,
 	)
 }
 
@@ -171,6 +174,8 @@ export async function runAgentStep(
 	entry: AgentEntry,
 ): Promise<StepOutcome> {
 	const ctx = createRunContext(state, parentPath, frames, path)
+	const budget = invokeCallback(`step "${step.name}" maxDurationMs callback`, () => resolveBudgetMs(step, ctx))
+	if (!budget.ok) return { kind: "crashed", error: budget.error }
 
 	// Budget carry across a block/answer boundary (spec §9.4): an answer-continuation is the SAME attempt
 	// resuming, not a fresh one, so the wall time and tokens spent before the block carry into THIS
@@ -191,7 +196,7 @@ export async function runAgentStep(
 	// `workflow_submit_result` in the same resumed session, whether it runs in-process or as a background
 	// subprocess. `background`/`isolated` control HOW the session runs, not whether it can be steered.
 	// A step with no output contract cannot be wrong, so neither repairs nor default retries apply.
-	return retryLoop(step, host, state, signal, path, attempt, resolveBudgetMs(step, ctx), carryOverMs)
+	return retryLoop(step, host, state, signal, path, attempt, budget.value, carryOverMs)
 }
 
 /**
@@ -391,34 +396,52 @@ async function runAgentSession(
 	// same value, and a per-execution `resumable()` may read the run context, so re-resolving at call
 	// time is not free of consequence. The events record the key so a consumer can tell a failing
 	// session from a failing step (see `agent-error`).
-	const resumeKey = resolveResumeKey(step, ctx)
+	const resolvedResumeKey = invokeCallback(`agent step "${step.name}" resumable callback`, () =>
+		resolveResumeKey(step, ctx),
+	)
+	if (!resolvedResumeKey.ok) return { kind: "fatal", error: resolvedResumeKey.error }
+	const resumeKey = resolvedResumeKey.value
 	// `resumeKey` defaults to the step's own name: every execution of THIS step continues the same
 	// conversation, which is what makes a round-two worker pick up where round one was cut off (spec
 	// §2.2). A step declaring a STRING instead continues the conversation under THAT key, which several
 	// steps may share to take turns in one orchestrator context — `.commit()` has already established
 	// that they cannot overlap, so the file has one writer at a time.
-	const session = host.startAgent({
-		model,
-		history,
-		stepName: step.name,
-		// Run/execution identity (spec §8.5): everything a host needs to give this session a durable name
-		// of its own — see `AgentRequest.runId`. All four are already here; none of them changes what the
-		// engine does with the session.
-		runId: state.runId,
-		workflowName: state.workflowName,
-		path,
-		attempt,
-		background: step.background,
-		isolated,
-		resumeKey,
-		// Handed over so a host running this out-of-process can register `workflow_submit_result` typed by it there.
-		outputSchema: step.outputSchema,
-		asks: step.asks,
-		signal,
-	})
+	let session: ReturnType<HostPort["startAgent"]>
+	try {
+		session = host.startAgent({
+			model,
+			history,
+			stepName: step.name,
+			// Run/execution identity (spec §8.5): everything a host needs to give this session a durable name
+			// of its own — see `AgentRequest.runId`. All four are already here; none of them changes what the
+			// engine does with the session.
+			runId: state.runId,
+			workflowName: state.workflowName,
+			path,
+			attempt,
+			background: step.background,
+			isolated,
+			resumeKey,
+			// Handed over so a host running this out-of-process can register `workflow_submit_result` typed by it there.
+			outputSchema: step.outputSchema,
+			asks: step.asks,
+			signal,
+		})
+	} catch (error) {
+		return {
+			kind: "retryable",
+			reason: "thrown-error",
+			error: `agent step "${step.name}" session startup failed: ${error instanceof Error ? error.message : String(error)}`,
+		}
+	}
 
 	try {
-		let message = entry.kind === "answer" ? formatAnswers(entry.answers) : freshPrompt(step, input, ctx)
+		const builtPrompt =
+			entry.kind === "answer"
+				? ({ ok: true, value: formatAnswers(entry.answers) } as const)
+				: invokeCallback(`agent step "${step.name}" prompt builder`, () => freshPrompt(step, input, ctx))
+		if (!builtPrompt.ok) return { kind: "fatal", error: builtPrompt.error }
+		let message = builtPrompt.value
 		let lastViolation = ""
 		let totalTokens = startingTokens
 

@@ -77,7 +77,9 @@ export type WorkflowResolution =
  */
 export async function resolveWorkflow(projectRoot: string, arg: string): Promise<WorkflowResolution> {
 	if (arg.endsWith(".ts")) {
-		return loadAsResolution(path.resolve(projectRoot, arg), arg)
+		const filePath = path.resolve(projectRoot, arg)
+		if (!existsSync(filePath)) return { ok: false, error: `workflow: file does not exist\n  ${filePath}` }
+		return loadAsResolution(filePath, arg)
 	}
 
 	// Fast path: by convention a workflow lives in `<name>.workflow.ts`. Trying that first means the
@@ -94,7 +96,10 @@ async function loadAsResolution(filePath: string, arg: string): Promise<Workflow
 	try {
 		return { ok: true, workflow: await loadWorkflowFile(filePath), filePath }
 	} catch (err) {
-		return { ok: false, error: `failed to load "${arg}": ${err instanceof Error ? err.message : String(err)}` }
+		return {
+			ok: false,
+			error: `workflow "${arg}" could not load\n  File: ${filePath}\n  ${err instanceof Error ? err.message : String(err)}`,
+		}
 	}
 }
 
@@ -102,8 +107,9 @@ async function loadAsResolution(filePath: string, arg: string): Promise<Workflow
 async function resolveByConvention(projectRoot: string, arg: string): Promise<WorkflowResolution | undefined> {
 	const byConvention = path.join(workflowsDir(projectRoot), `${arg}${WORKFLOW_SUFFIX}`)
 	if (!existsSync(byConvention)) return undefined
-	const workflow = await loadWorkflowFile(byConvention).catch(() => undefined)
-	return workflow?.name === arg ? { ok: true, workflow, filePath: byConvention } : undefined
+	const loaded = await loadAsResolution(byConvention, arg)
+	if (!loaded.ok) return loaded
+	return loaded.workflow.name === arg ? loaded : undefined
 }
 
 /** Fall back to a full catalog scan, matching `arg` against every discovered workflow's declared name. */
@@ -113,14 +119,17 @@ async function resolveByCatalogName(projectRoot: string, arg: string): Promise<W
 
 	if (matches.length === 1) {
 		const match = matches[0] as WorkflowEntry
-		return loadAsResolution(match.filePath, match.filePath)
+		return loadAsResolution(match.filePath, arg)
 	}
 	if (matches.length > 1) {
-		return { ok: false, error: `"${arg}" is ambiguous: ${matches.map((entry) => entry.filePath).join(", ")}` }
+		return {
+			ok: false,
+			error: `workflow "${arg}" is ambiguous\n${matches.map((entry) => `  ${entry.filePath}`).join("\n")}\n  Run again with an explicit file path.`,
+		}
 	}
 
 	const known = entries.map((entry) => entry.name)
-	const hint =
-		known.length > 0 ? ` Known workflows: ${known.join(", ")}.` : ` No workflows found in ${workflowsDir(projectRoot)}.`
-	return { ok: false, error: `no workflow named "${arg}" (and no such file).${hint}` }
+	const searched = path.join(workflowsDir(projectRoot), `${arg}${WORKFLOW_SUFFIX}`)
+	const hint = known.length > 0 ? `\n  Known workflows: ${known.join(", ")}` : ""
+	return { ok: false, error: `workflow: cannot find "${arg}"\n  Looked for: ${searched}${hint}` }
 }

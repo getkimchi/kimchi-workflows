@@ -25,6 +25,7 @@
  *
  * Zero imports from PI, `node:fs`, or any network lib — see src/engine/types.ts.
  */
+import { invokeCallback } from "../flow/callback-result.ts"
 import type { ForeachNode, ParallelNode, ScopeFrame } from "../flow/types.ts"
 import {
 	createRunContext,
@@ -134,7 +135,9 @@ export async function runForeachNode(
 ): Promise<ExecOutcome> {
 	const foreachPath = appendSegment(parentPath, node.name)
 	const ctx = createRunContext(state, parentPath, frames, formatPath(foreachPath))
-	const items = node.selector(ctx) // pure, deterministic — a resume re-runs it to the same array (spec §3.4)
+	const selected = invokeCallback(`foreach "${node.name}" selector`, () => node.selector(ctx))
+	if (!selected.ok) return { kind: "crashed", error: selected.error, path: formatPath(foreachPath) }
+	const items = selected.value // pure, deterministic — a resume re-runs it to the same array (spec §3.4)
 
 	// A non-array selector result is a deterministic wiring failure (spec §3.4), exactly like an
 	// input-schema violation (§3.8): crash immediately, before any lifecycle event, rather than treating

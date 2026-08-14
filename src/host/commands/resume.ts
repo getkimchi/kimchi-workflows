@@ -8,17 +8,17 @@
  * loop.
  */
 import { resumeWorkflow } from "../../engine/resume-workflow.ts"
+import { missingWorkflowProvenance, recordedWorkflowLoadFailure } from "../failure-messages.ts"
 import { createHostPort } from "../host-port.ts"
-import { loadWorkflowFile } from "../load-workflow.ts"
 import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
 import { resumeAction } from "../resume-router.ts"
 import type { RunLock } from "../run-lock.ts"
 import { summarizeRun } from "../summarize-run.ts"
 import type { RunStore } from "../types.ts"
+import { loadValidatedWorkflow } from "../workflow-preflight.ts"
 import { handleAttendedInput, humanInputOf, pendingHumanInput } from "./attended.ts"
 import {
 	type CommandCtx,
-	describe,
 	notifier,
 	rejectIfBusy,
 	reportResult,
@@ -45,21 +45,28 @@ export async function handleResume(
 	// cannot resume — pre-slug runs are inert by design (no migration), and saying so plainly beats
 	// guessing at a path.
 	const events = await store.loadEvents(runId)
-	const status = summarizeRun(events)?.status
-	if (!status) return void ctx.ui.notify(`workflow: run "${runId}" has no recorded events.`, "error")
+	const summary = summarizeRun(events)
+	if (!summary) return void ctx.ui.notify(`workflow: run "${runId}" has no recorded events.`, "error")
+	const status = summary.status
 
 	const workflowFilePath = events.find((event) => event.type === "run-meta")?.workflowFilePath
-	if (!workflowFilePath)
-		return void ctx.ui.notify(
-			`workflow: run ${runId} does not record which workflow file it was launched from; it cannot be resumed.`,
+	if (!workflowFilePath) return void ctx.ui.notify(missingWorkflowProvenance(runId, "resumed"), "error")
+
+	const loaded = await loadValidatedWorkflow({ filePath: workflowFilePath, projectRoot: ctx.cwd })
+	if (!loaded.ok) {
+		ctx.ui.notify(
+			recordedWorkflowLoadFailure({
+				workflowName: summary.workflowName,
+				runId,
+				workflowFilePath,
+				action: "resume",
+				cause: loaded.cause,
+			}),
 			"error",
 		)
-
-	const workflow = await loadWorkflowFile(workflowFilePath).catch((err: unknown) => {
-		ctx.ui.notify(`workflow: failed to reload "${workflowFilePath}" for resume: ${describe(err)}`, "error")
-		return undefined
-	})
-	if (!workflow) return
+		return
+	}
+	const workflow = loaded.workflow
 
 	// Pure routing (spec §5.2): blocked → answer path; crashed/cancelled → re-run; completed → error.
 	const action = resumeAction(status)

@@ -22,6 +22,7 @@
 import type { RunStatus } from "../engine/run-status.ts"
 import { formatClock, formatTokens } from "../progress/render.ts"
 import type { ProgressView } from "../progress/types.ts"
+import { workflowCrashHeading, workflowCrashRecovery } from "./failure-messages.ts"
 
 /** How a summary should be announced — `notify`'s own severity vocabulary. */
 export type SummaryLevel = "info" | "warning" | "error"
@@ -48,23 +49,45 @@ export interface RunSummaryText {
  */
 export function runSummaryText(view: ProgressView, runLabel: string, workflowFilePath?: string): RunSummaryText {
 	const status = view.status ?? "in_progress"
-	const [glyph, level] = STATUS[status]
+	const [glyph, statusLevel] = STATUS[status]
+	const level = status === "completed" && view.optionalFailures.length > 0 ? "warning" : statusLevel
 
-	const facts = [
+	const metrics = [
 		`${view.stepsSettled} of ${view.stepsTotal} steps`,
 		formatClock(view.elapsedMs ?? 0),
 		view.tokens > 0 ? `${formatTokens(view.tokens)} tok` : undefined,
-		runLabel,
 	].filter((fact): fact is string => fact !== undefined)
+	const facts = [...metrics, runLabel]
 
-	const lines = [`${glyph} workflow "${view.workflowName}" ${status} · ${facts.join(" · ")}`]
+	const lines: string[] = []
+	if (status === "crashed") {
+		lines.push(
+			`${glyph} ${workflowCrashHeading({
+				workflowName: view.workflowName,
+				runId: runLabel,
+				path: view.failurePath,
+			})}`,
+			`  ${metrics.join(" · ")}`,
+		)
+	} else if (status === "completed" && view.optionalFailures.length > 0) {
+		const count = view.optionalFailures.length
+		lines.push(
+			`${glyph} workflow "${view.workflowName}" completed with ${count} optional step ${count === 1 ? "failure" : "failures"} · ${facts.join(" · ")}`,
+		)
+	} else {
+		lines.push(`${glyph} workflow "${view.workflowName}" ${status} · ${facts.join(" · ")}`)
+	}
 	// The failure reason is the one thing a crashed run is opened for, so it goes on its own line rather
 	// than being truncated into the first one.
 	if (status === "crashed" && view.failureReason) lines.push(`  ${view.failureReason}`)
+	if (status === "completed") {
+		for (const failure of view.optionalFailures) lines.push(`  "${failure.path}": ${failure.error}`)
+	}
 	if (workflowFilePath) lines.push(`  ${workflowFilePath}`)
+	if (status === "crashed") lines.push(...workflowCrashRecovery(runLabel).map((line) => `  ${line}`))
 	// `/workflow status` is where the fully expanded tree lives (§11.4, §6.6) — say so, since the panel
 	// that was showing it has just been cleared.
-	lines.push(`  /workflow status ${runLabel} for the full tree`)
+	if (status !== "crashed") lines.push(`  Details: /workflow status ${runLabel}`)
 
 	return { message: lines.join("\n"), level }
 }

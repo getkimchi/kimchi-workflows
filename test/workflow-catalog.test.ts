@@ -102,6 +102,31 @@ describe("resolveWorkflow", () => {
 		}
 	})
 
+	it("keeps the requested name when a catalog match fails during its final load", async () => {
+		const counter = `__kimchi_catalog_loads_${Date.now()}__`
+		const source = [
+			`import { createStep, createWorkflow } from "${flowImport}";`,
+			`const state = globalThis as Record<string, number>;`,
+			`state[${JSON.stringify(counter)}] = (state[${JSON.stringify(counter)}] ?? 0) + 1;`,
+			`if (state[${JSON.stringify(counter)}] > 1) throw new Error("second catalog load failed");`,
+			`const step = createStep({ name: "ship", run: () => undefined });`,
+			`export default createWorkflow({ name: "release" }).then(step).commit();`,
+		].join("\n")
+		const root = await project({ "aliased.workflow.ts": source })
+
+		try {
+			const resolved = await resolveWorkflow(root, "release")
+
+			expect(resolved.ok).toBe(false)
+			if (!resolved.ok) {
+				expect(resolved.error).toContain('workflow "release" could not load')
+				expect(resolved.error).toContain("second catalog load failed")
+			}
+		} finally {
+			delete (globalThis as Record<string, unknown>)[counter]
+		}
+	})
+
 	it("resolves a path relative to the project root", async () => {
 		const root = await project({ "deploy.workflow.ts": workflowSource("deploy") })
 
@@ -121,7 +146,7 @@ describe("resolveWorkflow", () => {
 
 		expect(resolved.ok).toBe(false)
 		if (!resolved.ok) {
-			expect(resolved.error).toMatch(/no workflow named "nope"/)
+			expect(resolved.error).toMatch(/cannot find "nope"/)
 			expect(resolved.error).toMatch(/Known workflows: deploy/)
 		}
 	})
@@ -132,7 +157,47 @@ describe("resolveWorkflow", () => {
 		const resolved = await resolveWorkflow(root, path.relative(root, path.join(workflowsDir(root), "bad.workflow.ts")))
 
 		expect(resolved.ok).toBe(false)
-		if (!resolved.ok) expect(resolved.error).toMatch(/failed to load/)
+		if (!resolved.ok) expect(resolved.error).toMatch(/could not load/)
+	})
+
+	it("reports an existing broken conventional file instead of calling its workflow missing", async () => {
+		const root = await project({ "broken.workflow.ts": "export default const nope = ;" })
+
+		const resolved = await resolveWorkflow(root, "broken")
+
+		expect(resolved.ok).toBe(false)
+		if (!resolved.ok) {
+			expect(resolved.error).toContain('workflow "broken" could not load')
+			expect(resolved.error).toContain(path.join(workflowsDir(root), "broken.workflow.ts"))
+			expect(resolved.error).toMatch(/ParseError|SyntaxError/)
+			expect(resolved.error).not.toContain("no workflow named")
+		}
+	})
+
+	it("distinguishes a missing explicit file from a workflow-name lookup", async () => {
+		const root = await project({ "deploy.workflow.ts": workflowSource("deploy") })
+		const missing = path.join("custom", "missing.workflow.ts")
+
+		const resolved = await resolveWorkflow(root, missing)
+
+		expect(resolved.ok).toBe(false)
+		if (!resolved.ok) {
+			expect(resolved.error).toBe(`workflow: file does not exist\n  ${path.resolve(root, missing)}`)
+			expect(resolved.error).not.toContain("failed to load")
+		}
+	})
+
+	it("gives an unknown name its searched path and known workflows", async () => {
+		const root = await project({ "deploy.workflow.ts": workflowSource("deploy") })
+
+		const resolved = await resolveWorkflow(root, "deply")
+
+		expect(resolved.ok).toBe(false)
+		if (!resolved.ok) {
+			expect(resolved.error).toContain('workflow: cannot find "deply"')
+			expect(resolved.error).toContain(path.join(workflowsDir(root), "deply.workflow.ts"))
+			expect(resolved.error).toContain("Known workflows: deploy")
+		}
 	})
 })
 

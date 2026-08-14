@@ -360,15 +360,18 @@ describe("a resume key computed per execution", () => {
 		const { host } = createTestHost({ startAgent: agent.startAgent })
 		// "#" is node-path syntax, banned in a resume key exactly as it is in a step name (spec §3). A
 		// static key is rejected at `.commit()` and never starts the run at all; a computed one can only be
-		// caught here — so it is fatal in the same way rather than a step failure the retry policy absorbs.
-		// Both say the same thing: the WORKFLOW is wrong, not the work.
-		await expect(
-			runWorkflow(
-				perItemWorkflow(() => "bad#key"),
-				undefined,
-				host,
-			),
-		).rejects.toThrow(/not a valid resume key/)
+		// caught here. It is fatal rather than something the retry policy absorbs, but it still becomes a
+		// recorded workflow crash so the run is never left looking active and the failing item stays visible.
+		const result = await runWorkflow(
+			perItemWorkflow(() => "bad#key"),
+			undefined,
+			host,
+		)
+		expect(result).toMatchObject({
+			status: "crashed",
+			path: "items@0/worker",
+			error: expect.stringMatching(/resumable callback threw:.*not a valid resume key/),
+		})
 	})
 })
 

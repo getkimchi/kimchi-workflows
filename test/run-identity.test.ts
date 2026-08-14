@@ -99,6 +99,11 @@ describe("run identity through the command handlers", () => {
 		expect(events[0]).toMatchObject({ type: "run-meta", runId, workflowFilePath: file })
 		expect(events[1]?.type).toBe("run-started")
 		expect(existsSync(path.join(runDir, `${runId}.events.jsonl`))).toBe(true)
+		const failure = spy.notes.find(([, type]) => type === "error")?.[0] ?? ""
+		expect(failure).toContain(`workflow "flaky-demo" crashed at "flaky" (run ${runId})`)
+		expect(failure).toContain("first attempt fails")
+		expect(failure).toContain(`Resume: /workflow resume ${runId}`)
+		expect(failure).toContain(`Details: /workflow status ${runId}`)
 	})
 
 	it("resumes by the run's short hash, reloading the workflow from the recorded path", async () => {
@@ -116,6 +121,78 @@ describe("run identity through the command handlers", () => {
 		expect((await store.list())[0]).toMatchObject({ runId, status: "completed" })
 	})
 
+	it("explains a deleted workflow file and preserves the crashed run", async () => {
+		const file = await writeFlaky()
+		const spy = notifySpy()
+		const ctx = fakeCtx(projectRoot, spy.notify)
+
+		await handleRun(ctx, store, createFakeRunLock(), noAgent, file)
+		const run = (await store.list())[0]
+		expect(run?.status).toBe("crashed")
+		spy.notes.length = 0
+		await rm(file)
+
+		await handleResume(ctx, store, createFakeRunLock(), noAgent, run?.runId ?? "")
+
+		expect(spy.notes).toHaveLength(1)
+		expect(spy.notes[0]?.[0]).toContain(`workflow "flaky-demo" cannot resume (run ${run?.runId})`)
+		expect(spy.notes[0]?.[0]).toContain(`File: ${file}`)
+		expect(spy.notes[0]?.[0]).toContain("The workflow file no longer exists")
+		expect(spy.notes[0]?.[0]).toContain("The recorded run has been preserved")
+		expect((await store.list())[0]).toMatchObject({ runId: run?.runId, status: "crashed" })
+	})
+
+	it("shows the loader cause when the workflow became invalid before resume", async () => {
+		const file = await writeFlaky()
+		const spy = notifySpy()
+		const ctx = fakeCtx(projectRoot, spy.notify)
+
+		await handleRun(ctx, store, createFakeRunLock(), noAgent, file)
+		const run = (await store.list())[0]
+		spy.notes.length = 0
+		await writeFile(file, "export default const invalid = ;", "utf8")
+
+		await handleResume(ctx, store, createFakeRunLock(), noAgent, run?.runId ?? "")
+
+		expect(spy.notes).toHaveLength(1)
+		expect(spy.notes[0]?.[0]).toContain(`workflow "flaky-demo" cannot resume (run ${run?.runId})`)
+		expect(spy.notes[0]?.[0]).toContain(`File: ${file}`)
+		expect(spy.notes[0]?.[0]).toContain("TS1109")
+		expect(spy.notes[0]?.[0]).toContain("The recorded run has been preserved")
+	})
+
+	it("rejects a new semantic TypeScript error before resuming the recorded run", async () => {
+		const file = await writeFlaky()
+		const evaluated = path.join(projectRoot, "semantic-workflow-evaluated.txt")
+		const spy = notifySpy()
+		const ctx = fakeCtx(projectRoot, spy.notify)
+
+		await handleRun(ctx, store, createFakeRunLock(), noAgent, file)
+		const run = (await store.list())[0]
+		spy.notes.length = 0
+		await writeFile(
+			file,
+			[
+				`import { writeFileSync } from "node:fs";`,
+				`import { createStep, createWorkflow } from "${flowImport}";`,
+				`writeFileSync(${JSON.stringify(evaluated)}, "evaluated");`,
+				`const invalid: number = "not a number";`,
+				`const flaky = createStep({ name: "flaky", run: () => invalid });`,
+				`export default createWorkflow({ name: "flaky-demo" }).then(flaky).commit();`,
+			].join("\n"),
+			"utf8",
+		)
+
+		await handleResume(ctx, store, createFakeRunLock(), noAgent, run?.runId ?? "")
+
+		expect(spy.notes).toHaveLength(1)
+		expect(spy.notes[0]?.[0]).toContain(`workflow "flaky-demo" cannot resume (run ${run?.runId})`)
+		expect(spy.notes[0]?.[0]).toContain("TS2322")
+		expect(spy.notes[0]?.[0]).toContain("The recorded run has been preserved")
+		expect(existsSync(evaluated)).toBe(false)
+		expect((await store.list())[0]).toMatchObject({ runId: run?.runId, status: "crashed" })
+	})
+
 	it("refuses to resume a log that records no provenance (a pre-slug run — inert by design)", async () => {
 		const spy = notifySpy()
 		const legacy: RunEvent[] = [
@@ -126,7 +203,9 @@ describe("run identity through the command handlers", () => {
 
 		await handleResume(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, "3f2a1c4b-old")
 
-		expect(spy.notes[0]?.[0]).toMatch(/does not record which workflow file it was launched from/)
+		expect(spy.notes[0]?.[0]).toContain("workflow run 3f2a1c4b-old cannot be resumed")
+		expect(spy.notes[0]?.[0]).toContain("does not record the workflow file it came from")
+		expect(spy.notes[0]?.[0]).toContain("The recorded run has been preserved")
 		expect(spy.notes[0]?.[1]).toBe("error")
 	})
 })

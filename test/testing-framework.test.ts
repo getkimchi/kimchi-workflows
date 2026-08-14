@@ -125,9 +125,21 @@ describe("agent script validation (fails at construction, not mid-run)", () => {
 			/requires a step declared asks: true/,
 		)
 	})
+})
 
-	it("reports an agent step that ran with nothing scripted", async () => {
-		await expect(createTestRun(plainWorkflow)).rejects.toThrow(/no replies were scripted/)
+describe("agent session startup failures", () => {
+	const plain = createAgentStep({ name: "plain", output: planSchema, prompt: () => "go" })
+	const plainWorkflow = createWorkflow({ name: "plain-agent" }).then(plain).commit()
+
+	it("records an agent step that ran with nothing scripted as a workflow crash", async () => {
+		const run = await createTestRun(plainWorkflow)
+
+		expect(run).toMatchObject({
+			status: "crashed",
+			path: "plain",
+			error: expect.stringMatching(/session startup failed:.*no replies were scripted/),
+		})
+		expect(run.eventsOf("run-crashed")).toHaveLength(1)
 	})
 })
 

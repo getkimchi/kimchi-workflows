@@ -1,3 +1,4 @@
+import { invokeCallback } from "./callback-result.ts"
 import type { FunctionStep, MapFn } from "./types.ts"
 
 /**
@@ -14,6 +15,10 @@ export function createMapStep(name: string, transform: MapFn): FunctionStep {
 	return {
 		kind: "function",
 		name,
-		run: ({ ctx }) => transform(ctx),
+		run: ({ ctx }) => {
+			const transformed = invokeCallback(`map "${name}" transform`, () => transform(ctx))
+			if (!transformed.ok) throw new Error(transformed.error)
+			return transformed.value
+		},
 	}
 }
