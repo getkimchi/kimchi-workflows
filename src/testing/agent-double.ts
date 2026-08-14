@@ -44,13 +44,13 @@ export type AgentTurnScript =
 		readonly sideEffect?: () => void | Promise<void>
 	}
 
-/** Script the agent asking: a `submit_questions` call, on which the run blocks (spec §10.1). */
+/** Script the agent asking: a `workflow_submit_questions` call, on which the run blocks (spec §10.1). */
 export function ask(questionnaire: Questionnaire, trailingText?: string): AgentTurnScript {
 	return { kind: "submit", tool: SUBMIT_QUESTIONS_TOOL, args: { ...questionnaire }, trailingText }
 }
 
 /**
- * Script the step's success payload: a `submit_result` call carrying `value`.
+ * Script the step's success payload: a `workflow_submit_result` call carrying `value`.
  *
  * `trailingText` is prose the model wrote AFTER submitting — what an injected harness nudge leaves
  * behind. It must never be mistaken for the output, which is the point of submitting through a tool.
@@ -63,7 +63,7 @@ export function reply(value: unknown, trailingText?: string): AgentTurnScript {
  * Attach an action to a scripted turn, run immediately before the scripted response is returned.
  *
  * This models acting agents whose product includes filesystem changes while retaining their real
- * `submit_result` contract. It is deliberately test-only; production agents perform the action with
+ * `workflow_submit_result` contract. It is deliberately test-only; production agents perform the action with
  * their ordinary tools.
  */
 export function withSideEffect(turn: AgentTurnScript, sideEffect: () => void | Promise<void>): AgentTurnScript {

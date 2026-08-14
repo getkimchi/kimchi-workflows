@@ -110,7 +110,7 @@ describe("the in-session bridge registers the tools it promises", () => {
 			...over,
 		}) as AgentRequest
 
-	it("registers submit_result typed by THIS step's schema before sending the prompt", async () => {
+	it("registers workflow_submit_result typed by THIS step's schema before sending the prompt", async () => {
 		const { registered, start } = fakePi()
 		await start(request({ outputSchema })).sendAndAwaitEnd("go")
 
@@ -120,7 +120,7 @@ describe("the in-session bridge registers the tools it promises", () => {
 		expect(parameters.properties.result).toEqual(outputSchema)
 	})
 
-	it("offers submit_questions only while an asking step is running", async () => {
+	it("offers workflow_submit_questions only while an asking step is running", async () => {
 		const { active, start } = fakePi()
 
 		const asking = start(request({ outputSchema, asks: true }))
@@ -136,7 +136,7 @@ describe("the in-session bridge registers the tools it promises", () => {
 		expect(active()).not.toContain(SUBMIT_QUESTIONS_TOOL)
 	})
 
-	it("hides submit_result from a step with no contract, whose output IS its text", async () => {
+	it("hides workflow_submit_result from a step with no contract, whose output IS its text", async () => {
 		// Mirrors the engine, which disposes each step's session in a `finally` before the next one starts.
 		const { active, start } = fakePi()
 		const contract = start(request({ outputSchema }))
@@ -179,7 +179,7 @@ describe("the in-session bridge registers the tools it promises", () => {
 
 	it("re-captures a baseline that already carries the tools, rather than baking them in", async () => {
 		// pi's own registerTool appends the new name to the ACTIVE set, so by the time a later step reads
-		// the baseline it may already contain submit_result. Treating that as "the user had it" would leave
+		// the baseline it may already contain workflow_submit_result. Treating that as "the user had it" would leave
 		// the tool active for every later step and hand it back to the user on dispose.
 		const { active, start } = fakePi()
 		const first = start(request({ outputSchema }))
@@ -254,15 +254,19 @@ describe("what the model is told", () => {
 	})
 
 	it("keeps asking on the table when correcting a step that may ask", () => {
-		// Offering only submit_result tells a model that was trying to ask a question to invent the answer.
-		const correction = buildCorrectionMessage(outputSchema, "the turn ended without calling submit_result", true)
+		// Offering only workflow_submit_result tells a model that was trying to ask a question to invent the answer.
+		const correction = buildCorrectionMessage(
+			outputSchema,
+			"the turn ended without calling workflow_submit_result",
+			true,
+		)
 
 		expect(correction).toContain(SUBMIT_QUESTIONS_TOOL)
 		expect(correction).toContain("do NOT invent")
 		expect(correction).toContain('"questions"') // the questionnaire schema, so the model can comply
 	})
 
-	it("does not offer submit_questions when correcting a step that cannot ask", () => {
+	it("does not offer workflow_submit_questions when correcting a step that cannot ask", () => {
 		expect(buildCorrectionMessage(outputSchema, "bad", false)).not.toContain(SUBMIT_QUESTIONS_TOOL)
 	})
 

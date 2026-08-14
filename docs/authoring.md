@@ -21,7 +21,7 @@ export default createWorkflow({ name: "hello" }).then(greet).commit()
 - `createStep` runs deterministic TypeScript. Use it for formatting, validation, file or API clients, and other
   behavior that does not require a model.
 - `createAgentStep` runs the harness agent loop. Declare `output` when later steps consume structured data; the
-  agent then completes through `submit_result`. Omit `output` when the step's product is its side effects.
+  agent then completes through `workflow_submit_result`. Omit `output` when the step's product is its side effects.
 - `createQuestionnaireStep` deterministically collects schema-shaped user input.
 - `createInteractiveStep` is for a custom resumable host interaction.
 

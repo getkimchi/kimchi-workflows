@@ -19,7 +19,7 @@ export { SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL }
 export const OUTPUT_TOOL_NAMES: readonly string[] = [SUBMIT_RESULT_TOOL, SUBMIT_QUESTIONS_TOOL]
 
 /**
- * The `submit_result` parameter schema for a step whose contract is `outputSchema`.
+ * The `workflow_submit_result` parameter schema for a step whose contract is `outputSchema`.
  *
  * The result is WRAPPED in an object because tool parameters must be one — `outputSchema` itself may be
  * any schema, including a bare string or array.
@@ -28,7 +28,7 @@ export function submitResultParameters(outputSchema: TSchema): TSchema {
 	return Type.Object({ result: outputSchema })
 }
 
-/** The `submit_questions` parameter schema — framework-owned and identical for every step. */
+/** The `workflow_submit_questions` parameter schema — framework-owned and identical for every step. */
 export function submitQuestionsParameters(): TSchema {
 	return QuestionnaireSchema
 }

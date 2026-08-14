@@ -27,7 +27,7 @@ createAgentStep<TInputSchema extends TSchema | undefined = undefined, TOutputSch
 Creates an agent step that acts, reports structured output, or interactively asks for information.
 
 Remarks: Omit `output` for an acting step whose result is its side effects. Declare `output` for a reporting
-step; the agent must call `submit_result` with a matching value. Add `asks: true` when it may submit
+step; the agent must call `workflow_submit_result` with a matching value. Add `asks: true` when it may submit
 questionnaire batches before its result. Never combine `asks: true` with `background: true`.
 
 Example: ```ts

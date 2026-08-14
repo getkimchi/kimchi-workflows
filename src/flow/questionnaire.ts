@@ -112,7 +112,7 @@ export function buildOutputProtocol(outputSchema: TSchema): string {
 
 /**
  * The protocol text injected into an `asks` agent step's prompt (pure). Tells the model to ask by calling
- * `submit_questions` (batching them) and to finish by calling `submit_result`, embedding both the
+ * `workflow_submit_questions` (batching them) and to finish by calling `workflow_submit_result`, embedding both the
  * {@link QuestionnaireSchema} and the target output schema (TypeBox schemas *are* JSON Schema).
  */
 export function buildAskingProtocol(outputSchema: TSchema): string {

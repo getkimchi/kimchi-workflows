@@ -244,13 +244,13 @@ export interface AgentRequest {
 	/**
 	 * The step's declared output contract, when it has one (spec §9.2).
 	 *
-	 * Passed so a host that runs this request out-of-process can register a `submit_result` tool typed by
+	 * Passed so a host that runs this request out-of-process can register a `workflow_submit_result` tool typed by
 	 * it inside that process — the payload then travels as a tool call, which a later message cannot
 	 * displace. A host with nowhere to register tools leaves this undefined, and every step under a
 	 * contract then fails — there is no text channel behind it.
 	 */
 	readonly outputSchema?: TSchema
-	/** True when the step may answer with a questionnaire instead of a result (spec §10.1) — enables `submit_questions`. */
+	/** True when the step may answer with a questionnaire instead of a result (spec §10.1) — enables `workflow_submit_questions`. */
 	readonly asks?: boolean
 	/**
 	 * The attempt's abort signal — the run's cancel signal (spec §8.8) combined with the step's wall-time
@@ -283,7 +283,7 @@ export interface SubmittedOutput {
  *
  * A refused request still completes a turn: the harness records an assistant message with no content
  * and ends the loop, so from the outside it is shaped exactly like a model that declined to submit.
- * Without this distinction the engine reports "the turn ended without calling submit_result" — blaming
+ * Without this distinction the engine reports "the turn ended without calling workflow_submit_result" — blaming
  * a model that was never asked — and spends a repair turn correcting an omission that never happened.
  *
  *  - `context-window-exceeded` — the request was larger than the model's context. Terminal for a session

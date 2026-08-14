@@ -25,7 +25,7 @@ export interface CreateAgentStepOptions<TInputSchema extends TSchema | undefined
 	input?: TInputSchema
 	/**
 	 * TypeBox schema the agent's submitted result is validated against. The step reports by calling
-	 * `submit_result`; assistant text is never read as output.
+	 * `workflow_submit_result`; assistant text is never read as output.
 	 *
 	 * Omit it for a step that ACTS rather than REPORTS: no contract is injected, no tool is offered, and
 	 * the raw final text becomes the output. Use that when the step's product is its side effects and
@@ -76,7 +76,7 @@ export interface CreateAgentStepOptions<TInputSchema extends TSchema | undefined
  *
  * @remarks
  * Omit `output` for an acting step whose result is its side effects. Declare `output` for a reporting
- * step; the agent must call `submit_result` with a matching value. Add `asks: true` when it may submit
+ * step; the agent must call `workflow_submit_result` with a matching value. Add `asks: true` when it may submit
  * questionnaire batches before its result. Never combine `asks: true` with `background: true`.
  *
  * @example

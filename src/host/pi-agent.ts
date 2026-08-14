@@ -494,7 +494,7 @@ function backgroundSession(
 			// session's name is deliberately left alone — that one belongs to the user, not to us.
 			// A spawned worker has no UI in which to confirm permission prompts. Run Kimchi workers in yolo
 			// mode so a classifier outage cannot refuse their tools — including the framework-owned
-			// `submit_result` that every reporting step needs to finish. The environment variable is ignored by
+			// `workflow_submit_result` that every reporting step needs to finish. The environment variable is ignored by
 			// plain PI, unlike a Kimchi-only CLI flag that would make PI reject the invocation. This deliberately
 			// bypasses every Kimchi permission check for the subprocess worker; an in-process step keeps the
 			// parent session's permission posture.
@@ -523,7 +523,7 @@ function backgroundSession(
 			// harness reads its prompt from stdin and, with a piped (non-TTY) stdin, silently ignores a
 			// positional argument — verified against a real `pi` binary (stdin: full reply, positional arg: nothing).
 
-			// The step's output contract, handed to the child so it can register `submit_result` typed by it
+			// The step's output contract, handed to the child so it can register `workflow_submit_result` typed by it
 			// (step-output-tools.ts). A tool call cannot be displaced by a later message, which is the whole
 			// point. If the child never registers the tool the step FAILS — there is no text channel behind
 			// it — so the handoff is written per EXECUTION, never per session file (see stepOutputToolsStem).

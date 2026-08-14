@@ -225,11 +225,11 @@ export interface AgentStep extends StepBase {
 	 */
 	readonly maxOutputRepairs?: number
 	/**
-	 * Q&A capability (spec §10.1), framework-set. When true the step may call `submit_questions` instead
-	 * of `submit_result` (the framework owns the questionnaire schema and auto-injects the asking
+	 * Q&A capability (spec §10.1), framework-set. When true the step may call `workflow_submit_questions` instead
+	 * of `workflow_submit_result` (the framework owns the questionnaire schema and auto-injects the asking
 	 * protocol); which tool it called is what distinguishes the two. A question batch blocks the run, and
 	 * the collected answers resume the **same** agent loop (spec §8.4). When false/absent only
-	 * `submit_result` is offered and the step can never block. Enabled via `createAgentStep({ asks: true })`.
+	 * `workflow_submit_result` is offered and the step can never block. Enabled via `createAgentStep({ asks: true })`.
 	 */
 	readonly asks?: boolean
 	/**

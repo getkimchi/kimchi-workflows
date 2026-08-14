@@ -43,7 +43,7 @@ Execution semantics:
 - createStep runs deterministic TypeScript. createAgentStep runs the harness agent tool loop.
 - Agent steps can use registered harness tools in either execution mode. Foreground shares the current session;
   background: true requests an isolated subprocess and context window.
-- A reporting agent declares output and completes through submit_result. An acting agent whose product is side
+- A reporting agent declares output and completes through workflow_submit_result. An acting agent whose product is side
   effects may omit output.
 - Adjacent nodes exchange the previous output through the next input schema. Logical plan stages do not need to
   map one-to-one to agent steps; prefer bounded structured hand-offs over raw webpages or command output.

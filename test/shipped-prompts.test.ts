@@ -1,7 +1,7 @@
 /**
  * No prompt this package ships may teach the deleted text protocol.
  *
- * A step under an output contract reports ONLY through `submit_result`/`submit_questions`, and the
+ * A step under an output contract reports ONLY through `workflow_submit_result`/`workflow_submit_questions`, and the
  * engine appends that protocol to every such prompt. An author prompt that also says "reply with ONLY
  * JSON" therefore contradicts the framework's own instruction three lines later — and a model that
  * obeys the author submits nothing, so the step fails blaming the model.

@@ -43,7 +43,7 @@ const SAMPLES: { [K in RunEvent["type"]]: Extract<RunEvent, { type: K }> } = {
 		path: "review",
 		attempt: 2,
 		reason: "invalid-output",
-		error: "submit_result: /summary: expected string",
+		error: "workflow_submit_result: /summary: expected string",
 		at: AT,
 	},
 	"agent-steer": {
@@ -51,7 +51,7 @@ const SAMPLES: { [K in RunEvent["type"]]: Extract<RunEvent, { type: K }> } = {
 		runId: RUN_ID,
 		path: "review",
 		attempt: 1,
-		violation: "submit_result: /summary: expected string",
+		violation: "workflow_submit_result: /summary: expected string",
 		violationKind: "schema-violation",
 		resumeKey: "orchestrator",
 		at: AT,

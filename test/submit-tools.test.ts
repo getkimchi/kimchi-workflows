@@ -1,5 +1,5 @@
 /**
- * End-to-end: a step's output submitted through `submit_result`/`submit_questions`, and the text
+ * End-to-end: a step's output submitted through `workflow_submit_result`/`workflow_submit_questions`, and the text
  * fallback underneath it.
  *
  * The bug these close: the engine used to read a step's output from the LAST assistant message, so any
@@ -41,9 +41,9 @@ async function run(
 	return { result: await runWorkflow(workflow, undefined, host), store, agent }
 }
 
-// --- submit_result --------------------------------------------------------
+// --- workflow_submit_result --------------------------------------------------------
 
-describe("submit_result carries the step's output", () => {
+describe("workflow_submit_result carries the step's output", () => {
 	it("takes the submitted payload as the step output", async () => {
 		const { workflow } = gradeWorkflow()
 		const { result } = await run(workflow, { grade: [reply(GRADE)] })
@@ -65,16 +65,16 @@ describe("submit_result carries the step's output", () => {
 		const { result } = await run(workflow, { grade: [reply({ grade: "B" })] }) // rationale missing
 
 		expect(result.status).toBe("crashed")
-		expect(result.error).toMatch(/submit_result/)
+		expect(result.error).toMatch(/workflow_submit_result/)
 		expect(result.error).toMatch(/rationale/)
 	})
 
 	it("reports a submission with no `result` argument rather than falling back to the prose beside it", async () => {
 		const { workflow } = gradeWorkflow()
-		const { result } = await run(workflow, { grade: [submitRaw("submit_result", {}, NUDGE_REPLY)] })
+		const { result } = await run(workflow, { grade: [submitRaw("workflow_submit_result", {}, NUDGE_REPLY)] })
 
 		expect(result.status).toBe("crashed")
-		expect(result.error).toMatch(/submit_result/)
+		expect(result.error).toMatch(/workflow_submit_result/)
 	})
 
 	it("fails a turn that spoke but submitted nothing", async () => {
@@ -83,14 +83,14 @@ describe("submit_result carries the step's output", () => {
 
 		// Text is not an output channel any more, however well-formed it looks.
 		expect(result.status).toBe("crashed")
-		expect(result.error).toMatch(/without calling submit_result/)
+		expect(result.error).toMatch(/without calling workflow_submit_result/)
 	})
 
 	it("names both tools when an asking step submits nothing", async () => {
 		const { workflow } = gradeWorkflow({ asks: true })
 		const { result } = await run(workflow, { grade: [raw("thinking out loud")] })
 
-		expect(result.error).toMatch(/without calling submit_result or submit_questions/)
+		expect(result.error).toMatch(/without calling workflow_submit_result or workflow_submit_questions/)
 	})
 
 	it("never mistakes another tool for a submission, even beside a valid-looking text reply", async () => {
@@ -99,13 +99,13 @@ describe("submit_result carries the step's output", () => {
 
 		// Text is not an output channel: JSON in the transcript is not a submission.
 		expect(result.status).toBe("crashed")
-		expect(result.error).toMatch(/without calling submit_result/)
+		expect(result.error).toMatch(/without calling workflow_submit_result/)
 	})
 })
 
-// --- submit_questions -----------------------------------------------------
+// --- workflow_submit_questions -----------------------------------------------------
 
-describe("submit_questions blocks the run on a batch", () => {
+describe("workflow_submit_questions blocks the run on a batch", () => {
 	const questionnaire = {
 		title: "Scope",
 		questions: [{ key: "db", header: "Database", kind: "text" as const, question: "Which database?" }],
@@ -141,10 +141,12 @@ describe("submit_questions blocks the run on a batch", () => {
 
 	it("rejects a batch that does not match the questionnaire schema", async () => {
 		const { workflow } = gradeWorkflow({ asks: true })
-		const { result } = await run(workflow, { grade: [submitRaw("submit_questions", { questions: "not-an-array" })] })
+		const { result } = await run(workflow, {
+			grade: [submitRaw("workflow_submit_questions", { questions: "not-an-array" })],
+		})
 
 		expect(result.status).toBe("crashed")
-		expect(result.error).toMatch(/submit_questions/)
+		expect(result.error).toMatch(/workflow_submit_questions/)
 	})
 
 	it("is rejected at script construction for a step that cannot block", async () => {

@@ -3,13 +3,13 @@ import type { AgentRequest, AgentSession, AgentTurnError, SubmittedOutput } from
 
 /**
  * How a scripted string reaches the engine, now that a step under a contract reports ONLY through
- * `submit_result`/`submit_questions` (engine/output-tools.ts).
+ * `workflow_submit_result`/`workflow_submit_questions` (engine/output-tools.ts).
  *
  * A string that parses as JSON is delivered as a SUBMISSION — the same payload the old text protocol
  * encoded, so a test that scripts `'{"summary":"x"}'` still means "the step produced that output".
  * Anything else is delivered as text with no submission, which is what drives output steering. An
- * `asks` step keeps the old union's spelling: `{questions}` becomes a `submit_questions` call and
- * `{result}` a `submit_result` one, so those tests read unchanged.
+ * `asks` step keeps the old union's spelling: `{questions}` becomes a `workflow_submit_questions` call and
+ * `{result}` a `workflow_submit_result` one, so those tests read unchanged.
  */
 function submissionFor(text: string, asks: boolean | undefined): SubmittedOutput | undefined {
 	let parsed: unknown

@@ -383,7 +383,7 @@ ${JSON.stringify(priorDocument.plan, null, 2)}
 
 Preserve every unaffected acceptance criterion and confirmed decision. Ask only if the requested revision
 creates a material ambiguity; never re-ask a settled question merely to confirm it. Return the revised
-behavior through submit_result. Do not ask for approval yourself.`
+behavior through workflow_submit_result. Do not ask for approval yourself.`
 	}
 
 	return `Design the first useful version of a workflow from the user's goal.
@@ -508,7 +508,7 @@ test or use the parent repository's typecheck, lint, test configuration, or depe
 workflow package's focused verifier against the entry and test while authoring; the framework will run that same
 package-owned command after submission.
 
-Save both files before submitting. Return the test path through submit_result. Include verification only for
+Save both files before submitting. Return the test path through workflow_submit_result. Include verification only for
 additional project checks that project instructions required and that you actually ran; omit it otherwise.
 
 The framework independently loads the workflow through its real Jiti runtime, verifies argument-free invocation

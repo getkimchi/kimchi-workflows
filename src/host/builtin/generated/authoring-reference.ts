@@ -35,7 +35,7 @@ export const GENERATED_AUTHORING_REFERENCE: Readonly<Record<AuthoringCapability,
 				signature:
 					"createAgentStep<TInputSchema extends TSchema | undefined = undefined, TOutputSchema extends TSchema = TSchema>(options: CreateAgentStepOptions<TInputSchema, TOutputSchema>): AgentStep",
 				documentation:
-					'Creates an agent step that acts, reports structured output, or interactively asks for information.\n\nRemarks: Omit `output` for an acting step whose result is its side effects. Declare `output` for a reporting\nstep; the agent must call `submit_result` with a matching value. Add `asks: true` when it may submit\nquestionnaire batches before its result. Never combine `asks: true` with `background: true`.\n\nExample: ```ts\nconst review = createAgentStep({\n  name: "review",\n  input: changeSchema,\n  output: reviewSchema,\n  prompt: ({ input }) => `Review ${input.path}`,\n})\n```',
+					'Creates an agent step that acts, reports structured output, or interactively asks for information.\n\nRemarks: Omit `output` for an acting step whose result is its side effects. Declare `output` for a reporting\nstep; the agent must call `workflow_submit_result` with a matching value. Add `asks: true` when it may submit\nquestionnaire batches before its result. Never combine `asks: true` with `background: true`.\n\nExample: ```ts\nconst review = createAgentStep({\n  name: "review",\n  input: changeSchema,\n  output: reviewSchema,\n  prompt: ({ input }) => `Review ${input.path}`,\n})\n```',
 			},
 			{
 				symbol: "CreateQuestionnaireStepOptions",

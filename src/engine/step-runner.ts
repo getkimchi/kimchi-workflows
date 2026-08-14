@@ -188,7 +188,7 @@ export async function runAgentStep(
 	}
 
 	// A step with an output contract is always steerable: the model can be reminded to call
-	// `submit_result` in the same resumed session, whether it runs in-process or as a background
+	// `workflow_submit_result` in the same resumed session, whether it runs in-process or as a background
 	// subprocess. `background`/`isolated` control HOW the session runs, not whether it can be steered.
 	// A step with no output contract cannot be wrong, so neither repairs nor default retries apply.
 	return retryLoop(step, host, state, signal, path, attempt, resolveBudgetMs(step, ctx), carryOverMs)
@@ -411,7 +411,7 @@ async function runAgentSession(
 		background: step.background,
 		isolated,
 		resumeKey,
-		// Handed over so a host running this out-of-process can register `submit_result` typed by it there.
+		// Handed over so a host running this out-of-process can register `workflow_submit_result` typed by it there.
 		outputSchema: step.outputSchema,
 		asks: step.asks,
 		signal,
