@@ -40,9 +40,13 @@ describe("createPiAgentBridge background requests (spec §2.2): a real subproces
 		const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(fakeModelRegistry(), sessionsDir)
 
 		const session = startAgent(agentRequest({ stepName: "bg", background: true }))
-		const turn = await session.sendAndAwaitEnd("do the task")
+		const liveUsage: number[] = []
+		const turn = await session.sendAndAwaitEnd("do the task", {
+			onUsage: (usage) => liveUsage.push(usage.totalTokens),
+		})
 
 		expect(turn).toEqual({ text: "hello", usage: { totalTokens: 5 } })
+		expect(liveUsage).toEqual([]) // PI 0.84.1's JSON updates carry no confirmed usage; final-only is honest.
 		expect(calls[0]?.command).toBe("pi")
 		// The step is not resumable, so its session is a per-execution trace nothing reads back — it starts
 		// cold as before, but what it spent is now recoverable afterwards. `--session` takes a PATH, never

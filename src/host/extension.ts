@@ -41,7 +41,7 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 	if (registerStepOutputToolsFromEnv(pi)) return
 
 	const guard = createRunLock() // one execution slot per project, backed by the file lock (spec §7)
-	const bindAgentStarter = createPiAgentBridge(pi) // one agent_end listener for the extension's lifetime
+	const bindAgentStarter = createPiAgentBridge(pi) // one shared listener set for the extension's lifetime
 	const completionSources = createCompletionSources()
 
 	// The completion callback is given no context of its own (spec §14.2), so the pair the store is built

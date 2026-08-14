@@ -8,9 +8,10 @@
  * Two constraints are load-bearing and invisible from any single field below:
  *
  *  - **Nothing here reaches a clock.** Every duration is already a NUMBER of milliseconds by the time
- *    it lands on a node; `project(outline, events, now)` is the one place `now` enters the layer, as a
- *    parameter. A renderer that could read the clock would be a renderer no test could pin (progress
- *    §2.1), and the whole-second guarantee of §4.8 would have nowhere to live.
+ *    it lands on a node; `project(outline, events, now)` samples wall time and the presentation layer
+ *    can add an explicit monotonic delta for a later frame. A renderer that read the clock itself would
+ *    be impossible to pin in a test (progress §2.1), and §4.8's whole-second guarantee would have
+ *    nowhere to live.
  *  - **`state` is never computed here.** It is `deriveStepStates`' answer, copied (progress §3.1).
  *    Everything else on a node — counters, timings, badges, token sums — is what a *tree* needs and the
  *    state map does not carry. Two answers to "is this step done?" is the bug this layer is shaped to

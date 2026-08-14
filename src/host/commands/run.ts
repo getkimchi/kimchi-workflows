@@ -13,7 +13,7 @@ import { describeSchemaViolations } from "../../flow/validation.ts"
 import createWorkflowWorkflow from "../builtin/create.workflow.ts"
 import { createHostPort } from "../host-port.ts"
 import { mintRunId } from "../naming.ts"
-import { noProgressFor, type ProgressFor } from "../progress-sink.ts"
+import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
 import { workflowsDir } from "../project-dir.ts"
 import type { RunLock } from "../run-lock.ts"
 import type { RunStore } from "../types.ts"
@@ -213,7 +213,11 @@ async function startRun(
 			// which is deliberately unaware of files, so where this run came FROM is recorded separately —
 			// before the first engine event, so a crash mid-run still leaves a resumable log.
 			await store.appendEvent({ type: "run-meta", runId, workflowFilePath, at: new Date().toISOString() })
-			const host = createHostPort(store, { generateRunId: () => runId, startAgent, onEvent: progress.accept })
+			const host = createHostPort(store, {
+				generateRunId: () => runId,
+				startAgent,
+				...progressCallbacks(progress),
+			})
 			return runWorkflow(workflow, initialInput, host, { signal })
 		})
 		if (!result) return // guard was busy (race) — already notified

@@ -11,20 +11,21 @@
  *    not die because a terminal could not draw a box. This is not defensive programming for its own
  *    sake — the sink runs inside `emit`, which the engine awaits, so an exception here would propagate
  *    into the step that emitted the event and fail work that had already succeeded.
- *  - **Rendering is state-free between events** (§2.4). The accumulated `RunEvent[]` is re-projected
- *    each time rather than mutated, which makes the live widget, a resumed run, and the terminal card
- *    literally the same function of the same input — the property that stops the three from drifting.
- *    Re-projection is O(events) over a list a real run keeps in the thousands at worst.
+ *  - **Durable rendering state is re-projected, never mutated** (§2.4). The accumulated `RunEvent[]` is
+ *    re-projected each time, which makes the live widget, a resumed run, and the terminal card the same
+ *    function of the same history. Monotonic time since that projection and the current turn's usage
+ *    preview are explicitly transient inputs: neither can contaminate replay or a final summary.
  *
  * The surface is chosen by `ctx.mode`, not by `hasUI` (§7.2) — see progress-widget.ts for why those
  * two disagree exactly where it matters.
  */
 import type { ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent"
-import type { RunEvent } from "../engine/types.ts"
+import type { RunEvent, RunUpdate } from "../engine/types.ts"
 import type { WorkflowDefinition } from "../flow/types.ts"
 import { buildOutline } from "../progress/outline.ts"
 import { project } from "../progress/project.ts"
 import type { Outline, ProgressView } from "../progress/types.ts"
+import { withUsagePreviews } from "../progress/usage-preview.ts"
 import { runIdHash } from "./naming.ts"
 import { runSummaryText } from "./progress-card.ts"
 import { createPlainProgress, type LineWriter } from "./progress-plain.ts"
@@ -53,6 +54,8 @@ export interface ProgressSinkOptions {
 	readonly workflowFilePath?: string
 	/** Injected so a test can freeze it; the pure layer takes `now` as a parameter for the same reason. */
 	readonly now?: () => Date
+	/** Monotonic frame clock. Separate from wall time so system-clock changes cannot move a live duration. */
+	readonly monotonicNow?: () => number
 	/** Where headless lines go. Default stderr — NEVER stdout (§8.2). */
 	readonly write?: LineWriter
 	readonly env?: Record<string, string | undefined>
@@ -61,12 +64,22 @@ export interface ProgressSinkOptions {
 export interface ProgressSink {
 	/** Tee one event. Never throws: a broken surface disables itself instead (§2.3). */
 	accept(event: RunEvent): void
+	/** Apply a non-durable update such as the current turn's cumulative usage. Never throws. */
+	update(update: RunUpdate): void
 	/** Seed from a log loaded off disk, so a resumed run opens showing its history (§9.1). */
 	seed(events: readonly RunEvent[]): void
 	/** Whether the run's outcome has already been reported by a card, so `notify` should not repeat it (§7.8). */
 	reportedOutcome(): boolean
 	/** Clear the live surface. Safe to call more than once. */
 	dispose(): void
+}
+
+/** The complete progress attachment for a host port—kept together so an execution path cannot omit live updates. */
+export function progressCallbacks(progress: ProgressSink): {
+	readonly onEvent: (event: RunEvent) => void
+	readonly onUpdate: (update: RunUpdate) => void
+} {
+	return { onEvent: progress.accept, onUpdate: progress.update }
 }
 
 /** A run-level terminal event — where the widget clears and the card lands (§7.1, §7.6). */
@@ -84,12 +97,14 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
 	if (env[PROGRESS_OFF_ENV] === "off") return inertSink()
 
 	const now = options.now ?? (() => new Date())
+	const monotonicNow = options.monotonicNow ?? (() => performance.now())
 	const events: RunEvent[] = []
+	const usageByPath = new Map<string, number>()
 
 	// `json`/`print` have no UI at all (§7.2's third row): plain lines on stderr, and nothing else.
 	const headless = ctx.mode === "json" || ctx.mode === "print"
 	const plain = headless ? createPlainProgress(outline, options.write ?? writeStderr) : undefined
-	const surface = headless ? undefined : chooseSurface(ctx, runLabel)
+	const surface = headless ? undefined : chooseSurface(ctx, runLabel, monotonicNow)
 
 	let disabled = false
 	let carded = false
@@ -111,9 +126,12 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
 
 	const draw = (terminal: boolean): void => {
 		if (plain) return // headless already wrote its line per event; there is nothing to redraw (§8.3)
-		const view = project(outline, events, now())
+		const projected = project(outline, events, now())
+		// A terminal summary is durable history only. Normally the engine has already settled or cleared
+		// every preview; ignoring the map here also protects the summary from a misbehaving host adapter.
+		const view = terminal ? projected : withUsagePreviews(projected, usageByPath)
 		if (!terminal) {
-			surface?.update(view, workingMessage(view))
+			surface?.update({ view, observedAtMs: monotonicNow() }, workingMessage(view))
 			return
 		}
 		surface?.clear()
@@ -125,8 +143,26 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
 			if (disabled) return
 			try {
 				events.push(event)
+				// The durable final turn usage supersedes its preview. Delete before drawing so the handoff is
+				// one logical update and can never count the same turn twice.
+				if (event.type === "agent-usage") usageByPath.delete(event.path)
 				plain?.accept(event)
 				draw(isTerminal(event))
+			} catch (err) {
+				disable(err)
+			}
+		},
+
+		update(update: RunUpdate): void {
+			if (disabled || plain) return
+			try {
+				if (update.type === "agent-usage-preview") {
+					if (update.totalTokens <= 0 || usageByPath.get(update.path) === update.totalTokens) return
+					usageByPath.set(update.path, update.totalTokens)
+				} else if (!usageByPath.delete(update.path)) {
+					return
+				}
+				draw(false)
 			} catch (err) {
 				disable(err)
 			}
@@ -149,6 +185,7 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
 		},
 
 		dispose(): void {
+			usageByPath.clear()
 			try {
 				surface?.clear()
 			} catch {
@@ -172,8 +209,8 @@ function announce(options: ProgressSinkOptions, view: ProgressView): boolean {
 }
 
 /** Progress §7.2's first two rows: `rpc` cannot take a component factory, `tui` is the only one that can. */
-function chooseSurface(ctx: ProgressCtx, runLabel: string): ProgressSurface {
-	return ctx.mode === "rpc" ? createRpcSurface(ctx.ui, runLabel) : createTuiSurface(ctx.ui, runLabel)
+function chooseSurface(ctx: ProgressCtx, runLabel: string, monotonicNow: () => number): ProgressSurface {
+	return ctx.mode === "rpc" ? createRpcSurface(ctx.ui, runLabel) : createTuiSurface(ctx.ui, runLabel, monotonicNow)
 }
 
 function writeStderr(line: string): void {
@@ -181,7 +218,7 @@ function writeStderr(line: string): void {
 }
 
 function inertSink(): ProgressSink {
-	return { accept: () => {}, seed: () => {}, reportedOutcome: () => false, dispose: () => {} }
+	return { accept: () => {}, update: () => {}, seed: () => {}, reportedOutcome: () => false, dispose: () => {} }
 }
 
 /**
@@ -197,7 +234,7 @@ export type ProgressFor = (workflow: WorkflowDefinition, runId: string, workflow
 /** Bind a factory to one invocation's context. Called once per `/workflow` command, in extension.ts. */
 export function bindProgress(
 	ctx: ProgressCtx,
-	overrides: Pick<ProgressSinkOptions, "now" | "write" | "env"> = {},
+	overrides: Pick<ProgressSinkOptions, "now" | "monotonicNow" | "write" | "env"> = {},
 ): ProgressFor {
 	return (workflow, runId, workflowFilePath) =>
 		createProgressSink({

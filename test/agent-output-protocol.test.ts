@@ -1,6 +1,7 @@
 import { Type } from "typebox"
 import { describe, expect, it } from "vitest"
 import { runWorkflow } from "../src/engine/run-workflow.ts"
+import type { RunUpdate } from "../src/engine/types.ts"
 import { createAgentStep, createWorkflow } from "../src/flow/index.ts"
 import { createTestRun, raw, reply, usage } from "../src/testing/index.ts"
 import { createTestHost } from "./helpers.ts"
@@ -74,6 +75,75 @@ describe("output protocol injection", () => {
  * what it spent.
  */
 describe("agent-usage events", () => {
+	it("forwards streaming usage as replaceable updates before persisting the final turn total", async () => {
+		const updates: RunUpdate[] = []
+		const order: string[] = []
+		const { host } = createTestHost({
+			startAgent: () => ({
+				async sendAndAwaitEnd(_message, options) {
+					options?.onUsage?.({ totalTokens: 100 })
+					options?.onUsage?.({ totalTokens: 140 })
+					return { text: "done", usage: { totalTokens: 140 } }
+				},
+				getConversation: () => [],
+				dispose: () => {},
+			}),
+			onUpdate: (update) => {
+				updates.push(update)
+				order.push(`${update.type}:${"totalTokens" in update ? update.totalTokens : ""}`)
+			},
+			onEvent: (event) => {
+				if (event.type === "agent-usage") order.push(`durable:${event.totalTokens}`)
+			},
+		})
+		const workflow = createWorkflow({ name: "usage-live" })
+			.then(createAgentStep({ name: "observe", prompt: () => "Observe." }))
+			.commit()
+
+		const result = await runWorkflow(workflow, undefined, host)
+
+		expect(result.status).toBe("completed")
+		expect(updates).toEqual([
+			{ type: "agent-usage-preview", runId: result.runId, path: "observe", totalTokens: 100 },
+			{ type: "agent-usage-preview", runId: result.runId, path: "observe", totalTokens: 140 },
+		])
+		expect(order).toEqual(["agent-usage-preview:100", "agent-usage-preview:140", "durable:140"])
+	})
+
+	it("clears a preview when a turn fails before authoritative usage arrives", async () => {
+		const updates: RunUpdate[] = []
+		let sessions = 0
+		const { host } = createTestHost({
+			startAgent: () => {
+				const session = sessions++
+				return {
+					async sendAndAwaitEnd(_message: string, options?: { onUsage?: (usage: { totalTokens: number }) => void }) {
+						if (session === 0) {
+							options?.onUsage?.({ totalTokens: 90 })
+							throw new Error("connection reset")
+						}
+						return { text: "done" }
+					},
+					getConversation: () => [],
+					dispose: () => {},
+				}
+			},
+			onUpdate: (update) => updates.push(update),
+		})
+		const workflow = createWorkflow({ name: "usage-clear" })
+			.then(createAgentStep({ name: "observe", retry: { maxRetry: 1 }, prompt: () => "Observe." }))
+			.commit()
+
+		const result = await runWorkflow(workflow, undefined, host)
+
+		expect(result.status).toBe("completed")
+		expect(updates).toContainEqual({
+			type: "agent-usage-preview-cleared",
+			runId: result.runId,
+			path: "observe",
+		})
+	})
+
 	it("records each turn's usage against the step's path", async () => {
 		const step = createAgentStep({ name: "judge", output: outputSchema, prompt: () => "Decide." })
 		const workflow = createWorkflow({ name: "usage" }).then(step).commit()

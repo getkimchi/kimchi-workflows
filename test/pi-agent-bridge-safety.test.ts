@@ -37,6 +37,7 @@ type UserMessage = Parameters<ExtensionAPI["sendUserMessage"]>[0]
 function fakePi(scriptedTurns: readonly unknown[] = []): {
 	pi: ExtensionAPI
 	fireAgentEnd: (text: string) => void
+	fireMessageUpdate: (totalTokens: number) => void
 	fireContext: (messages: unknown[]) => ContextResult
 	sentMessages: SentMessage[]
 	userMessages: UserMessage[]
@@ -44,6 +45,7 @@ function fakePi(scriptedTurns: readonly unknown[] = []): {
 	activeTools: () => string[]
 } {
 	let endHandler: ((event: AgentEndEvent) => void) | undefined
+	let messageUpdateHandler: ((event: { message: unknown }) => void) | undefined
 	let contextHandler: ((event: { type: "context"; messages: unknown[] }) => ContextResult) | undefined
 	const sentMessages: SentMessage[] = []
 	const userMessages: UserMessage[] = []
@@ -51,8 +53,9 @@ function fakePi(scriptedTurns: readonly unknown[] = []): {
 	let activeTools: string[] = ["bash", "read"]
 	let scriptedTurn = 0
 	const pi = {
-		on: (event: string, h: (event: AgentEndEvent | { type: "context"; messages: unknown[] }) => unknown) => {
+		on: (event: string, h: (event: never) => unknown) => {
 			if (event === "agent_end") endHandler = h as (event: AgentEndEvent) => void
+			if (event === "message_update") messageUpdateHandler = h as (event: { message: unknown }) => void
 			if (event === "context") contextHandler = h as (event: { type: "context"; messages: unknown[] }) => ContextResult
 		},
 		sendMessage: (...[message, options]: SendMessageArgs) => {
@@ -88,6 +91,12 @@ function fakePi(scriptedTurns: readonly unknown[] = []): {
 				type: "agent_end",
 				messages: [{ role: "assistant", content: [{ type: "text", text }], usage: { totalTokens: 1 } }],
 			} as unknown as AgentEndEvent)
+		},
+		fireMessageUpdate: (totalTokens: number) => {
+			if (!messageUpdateHandler) throw new Error("test bug: no message_update handler was registered")
+			messageUpdateHandler({
+				message: { role: "assistant", content: [], usage: { totalTokens } },
+			})
 		},
 		fireContext: (messages: unknown[]) => {
 			if (!contextHandler) throw new Error("test bug: no context handler was registered")
@@ -176,6 +185,40 @@ describe("createPiAgentBridge in-session visibility: framework traffic is model-
 			hiddenMessage(expect.stringContaining("Your previous turn did not submit a valid result.")),
 		)
 		expect(userMessages).toEqual([])
+	})
+})
+
+describe("createPiAgentBridge in-session usage updates", () => {
+	it("reports each distinct confirmed cumulative snapshot and leaves final usage authoritative", async () => {
+		const { pi, fireAgentEnd, fireMessageUpdate } = fakePi()
+		const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir)
+		const session = startAgent(agentRequest({ stepName: "streaming" }))
+		const observed: number[] = []
+
+		const turn = session.sendAndAwaitEnd("go", { onUsage: (usage) => observed.push(usage.totalTokens) })
+		fireMessageUpdate(0)
+		fireMessageUpdate(100)
+		fireMessageUpdate(100)
+		fireMessageUpdate(120)
+		fireAgentEnd("done")
+
+		await expect(turn).resolves.toEqual({ text: "done", usage: { totalTokens: 1 } })
+		expect(observed).toEqual([100, 120])
+	})
+
+	it("does not let a usage observer failure interrupt the PI turn", async () => {
+		const { pi, fireAgentEnd, fireMessageUpdate } = fakePi()
+		const startAgent = createPiAgentBridge(pi)(fakeModelRegistry(), sessionsDir)
+		const session = startAgent(agentRequest({ stepName: "streaming" }))
+
+		const turn = session.sendAndAwaitEnd("go", {
+			onUsage: () => {
+				throw new Error("display failed")
+			},
+		})
+		expect(() => fireMessageUpdate(100)).not.toThrow()
+		fireAgentEnd("done")
+		await expect(turn).resolves.toEqual({ text: "done", usage: { totalTokens: 1 } })
 	})
 })
 

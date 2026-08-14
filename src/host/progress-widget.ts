@@ -27,8 +27,8 @@ export const PROGRESS_WIDGET_KEY = "pi-workflows:progress"
 
 const PLACEMENT: WidgetPlacement = "aboveEditor"
 
-/** Progress §4.8/§7.3: the spinner's tick, and the only recurring work this feature does. */
-const SPINNER_INTERVAL_MS = 120
+/** Progress §4.8/§7.3: the live frame cadence for the spinner and whole-second elapsed values. */
+const FRAME_INTERVAL_MS = 120
 
 /** RPC has no terminal width to report, so the tree is drawn to a conventional one. */
 const RPC_WIDTH = 80
@@ -39,10 +39,16 @@ const UNSTYLED: ProgressTheme = { fg: (_colour, text) => text, bold: (text) => t
 /** The slice of PI's UI a surface touches. Narrow on purpose: a fake in a test is three functions. */
 export type WidgetUI = Pick<ExtensionUIContext, "setWidget" | "setWorkingMessage">
 
+/** One authoritative projection plus the transient facts known when the surface received it. */
+export interface ProgressSnapshot {
+	readonly view: ProgressView
+	readonly observedAtMs: number
+}
+
 /** Somewhere a projection can be pushed. The sink holds one and never asks which kind it is. */
 export interface ProgressSurface {
-	/** Draw `view`. `working` names the current step for the harness's own working indicator (§7.4). */
-	update(view: ProgressView, working: string | undefined): void
+	/** Draw `snapshot`. `working` names the current step for the harness's own working indicator (§7.4). */
+	update(snapshot: ProgressSnapshot, working: string | undefined): void
 	/** Remove the widget and stop anything recurring. Idempotent. */
 	clear(): void
 }
@@ -53,8 +59,12 @@ export interface ProgressSurface {
  * The factory is installed ONCE and then fed by mutation — `setWidget` on every event would hand PI a
  * new component each time, discarding the one holding the timer and leaking an interval per event.
  */
-export function createTuiSurface(ui: WidgetUI, runLabel: string): ProgressSurface {
-	let view: ProgressView | undefined
+export function createTuiSurface(
+	ui: WidgetUI,
+	runLabel: string,
+	monotonicNow: () => number = () => performance.now(),
+): ProgressSurface {
+	let snapshot: ProgressSnapshot | undefined
 	let frame = 0
 	let installed = false
 	let timer: ReturnType<typeof setInterval> | undefined
@@ -67,20 +77,20 @@ export function createTuiSurface(ui: WidgetUI, runLabel: string): ProgressSurfac
 
 	// Start on the first in-flight node, stop the moment there is none — `blocked` included (§7.3).
 	const syncTimer = (): void => {
-		const busy = view !== undefined && hasWorkInFlight(view)
+		const busy = snapshot !== undefined && hasWorkInFlight(snapshot.view)
 		if (!busy || requestRender === undefined) return void stop()
 		if (timer) return
 		timer = setInterval(() => {
 			frame += 1
 			requestRender?.()
-		}, SPINNER_INTERVAL_MS)
+		}, FRAME_INTERVAL_MS)
 		// A run is not the only thing in the process; never hold the event loop open for a spinner.
 		timer.unref?.()
 	}
 
 	return {
-		update(next: ProgressView, working: string | undefined): void {
-			view = next
+		update(next: ProgressSnapshot, working: string | undefined): void {
+			snapshot = next
 			if (!installed) {
 				ui.setWidget(
 					PROGRESS_WIDGET_KEY,
@@ -88,7 +98,16 @@ export function createTuiSurface(ui: WidgetUI, runLabel: string): ProgressSurfac
 						requestRender = () => tui.requestRender()
 						syncTimer()
 						return {
-							render: (width: number) => (view ? render(view, collapse(view), { width, theme, frame, runLabel }) : []),
+							render: (width: number) => {
+								if (!snapshot) return []
+								return render(snapshot.view, collapse(snapshot.view), {
+									width,
+									theme,
+									frame,
+									runLabel,
+									elapsedSinceProjectionMs: monotonicNow() - snapshot.observedAtMs,
+								})
+							},
 							invalidate: () => {},
 							dispose: stop,
 						}
@@ -118,16 +137,18 @@ export function createTuiSurface(ui: WidgetUI, runLabel: string): ProgressSurfac
 
 /**
  * The RPC surface: the same tree as `string[]`, re-pushed per event. No factory (it cannot cross the
- * wire) and no timer (there is no `requestRender` on the far side to drive one), so the spinner never
- * advances — an honest still frame rather than an animation nobody would see.
+ * wire) and no timer (there is no `requestRender` on the far side to drive one), so the spinner and
+ * elapsed time advance only with events — an honest still frame rather than animation nobody would see.
  */
 export function createRpcSurface(ui: WidgetUI, runLabel: string): ProgressSurface {
 	let installed = false
 	return {
-		update(view: ProgressView): void {
-			ui.setWidget(PROGRESS_WIDGET_KEY, render(view, collapse(view), { width: RPC_WIDTH, theme: UNSTYLED, runLabel }), {
-				placement: PLACEMENT,
-			})
+		update(snapshot: ProgressSnapshot): void {
+			ui.setWidget(
+				PROGRESS_WIDGET_KEY,
+				render(snapshot.view, collapse(snapshot.view), { width: RPC_WIDTH, theme: UNSTYLED, runLabel }),
+				{ placement: PLACEMENT },
+			)
 			installed = true // only once the push landed — see the TUI surface's note
 		},
 		clear(): void {
