@@ -12,10 +12,11 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent"
 import type { Question, Questionnaire } from "../flow/questionnaire.ts"
 import {
-	collectQuestionnaire,
+	assembleAnswers,
+	OTHER_LABEL,
+	OTHER_VALUE,
 	optionLabel,
 	orderedOptions,
-	type Picker,
 	questionTitle,
 	type RawSelection,
 } from "./answer-assembly.ts"
@@ -23,27 +24,56 @@ import {
 /** The subset of `ctx.ui` the fallback needs — narrowed so tests can supply a scripted stand-in. */
 export type DialogUI = Pick<ExtensionUIContext, "select" | "confirm" | "input">
 
-/** A {@link Picker} over PI's native dialogs — the primitives single/text collection is shared on. */
-function dialogPicker(ui: DialogUI): Picker {
-	return {
-		pick: (title, labels) => ui.select(title, labels),
-		text: (title, placeholder) => ui.input(title, placeholder),
-	}
-}
-
 /**
  * Drive the questionnaire through native dialogs and return the structured answers keyed by
  * `question.key`. Returns `undefined` if the user dismisses any dialog: dismiss ≠ cancel, so the
  * caller keeps the run blocked (spec §10.2).
  */
-export function collectViaDialogs(
+export async function collectViaDialogs(
 	ui: DialogUI,
 	questionnaire: Questionnaire,
 ): Promise<Record<string, unknown> | undefined> {
-	return collectQuestionnaire(questionnaire, dialogPicker(ui), (question) => collectMulti(ui, question))
+	const raw: Record<string, RawSelection> = {}
+	for (const question of questionnaire.questions) {
+		const selection = await collectOne(ui, question)
+		if (selection === undefined) return undefined
+		raw[question.key] = selection
+	}
+	return assembleAnswers(questionnaire, raw)
 }
 
-/** Multi-choice is the one question kind the shared driver cannot serve over `Picker`: one yes/no confirm per option. */
+function collectOne(ui: DialogUI, question: Question): Promise<RawSelection | undefined> {
+	switch (question.kind) {
+		case "single":
+			return collectSingle(ui, question)
+		case "multi":
+			return collectMulti(ui, question)
+		case "text":
+		case "chat":
+			return collectText(ui, question)
+	}
+}
+
+async function collectSingle(ui: DialogUI, question: Question): Promise<RawSelection | undefined> {
+	const options = orderedOptions(question)
+	const labels = options.map(optionLabel)
+	if (question.allowOther) labels.push(OTHER_LABEL)
+
+	const picked = await ui.select(questionTitle(question), labels)
+	if (picked === undefined) return undefined
+	if (question.allowOther && picked === OTHER_LABEL) {
+		const text = await ui.input(`${question.header}: other`, "type your answer")
+		return text === undefined ? undefined : { option: OTHER_VALUE, text }
+	}
+	return { option: options[labels.indexOf(picked)]?.value ?? picked }
+}
+
+async function collectText(ui: DialogUI, question: Question): Promise<RawSelection | undefined> {
+	const text = await ui.input(questionTitle(question), question.header)
+	return text === undefined ? undefined : { text }
+}
+
+/** Collect a multi-choice answer through one yes/no confirmation per option. */
 async function collectMulti(ui: DialogUI, question: Question): Promise<RawSelection> {
 	const chosen: string[] = []
 	for (const option of orderedOptions(question)) {

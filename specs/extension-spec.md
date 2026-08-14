@@ -683,7 +683,11 @@ that step. **Dismissing/exiting the prompt does not cancel** — the step stays
 `blocked` and the question resurfaces on return or via `resume`. Stopping a blocked
 run requires explicit `/workflow cancel`. With several questions pending — within one
 run (§8.6) or across runs — `list` surfaces them and the queue is answered in order;
-`resume <run-id>` selects which run to answer. *(decision)*
+`resume <run-id>` selects which run to answer. In the rich TUI, a batch is one
+multi-page form: text answers use a multiline editor, Space toggles a focused
+multi-select option without advancing, and batches with more than one question
+complete only from a final review/Submit page. The native-dialog fallback keeps its
+per-question interaction. *(decision)*
 
 10.3. **Unattended execution is a design property, not a policy.** A workflow with
 no Q&A steps never blocks on a human. A workflow that reaches a Q&A step with no

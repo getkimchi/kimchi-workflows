@@ -1,10 +1,9 @@
 /**
  * Host adapter — pure answer assembly (spec §10; no PI runtime, no fs, no network).
  *
- * The single typed core both render paths feed. A renderer captures a {@link RawSelection} per
- * question (widget-shaped); {@link assembleAnswers} turns the batch into the structured answers
- * object keyed by `question.key` (dotted for nested sections), which the engine then maps back onto
- * the target schema via `answersToOutput`/`validateAnswers`.
+ * The shared typed core both render paths feed. A renderer captures a {@link RawSelection} per question
+ * (widget-shaped); {@link assembleAnswers} turns the batch into the structured answers object keyed by
+ * `question.key` (dotted for nested sections), which the engine then maps back onto the target schema.
  *
  * The only PI reference here is a *type* — the run mode for the capability gate — a type-only import,
  * fully erased at runtime, so this module stays offline-testable.
@@ -20,9 +19,6 @@ export const OTHER_VALUE = "__other__"
 
 /** Display label for the implicit "Other" choice appended to a single-choice question. */
 export const OTHER_LABEL = "Other…"
-
-/** Display label for the "finish selecting" entry of the rich multi-select loop. */
-export const DONE_LABEL = "Done"
 
 /**
  * A renderer's raw capture for one question, before typing. Both render paths (the rich `ctx.ui.custom`
@@ -93,85 +89,4 @@ export function optionLabel(option: QuestionOption): string {
  */
 export function useRichForm(mode: ExtensionMode, hasUI: boolean): boolean {
 	return hasUI && mode === "tui"
-}
-
-/**
- * The two UI primitives single/text collection needs — a selection list and a free-text input. Both
- * render paths implement this seam over their own widgets (native dialogs vs `ctx.ui.custom`), so the
- * "Other"-handling business logic below lives in exactly one place. `undefined` means the user dismissed.
- */
-export interface Picker {
-	pick(title: string, labels: string[]): Promise<string | undefined>
-	text(title: string, placeholder?: string): Promise<string | undefined>
-}
-
-/**
- * Single-choice collection (spec §10): present ordered options (recommended first) plus an implicit
- * "Other → free text" entry, then map the pick back to its option value. Pure over the {@link Picker}
- * seam; returns a {@link RawSelection}, or `undefined` when the user dismisses.
- */
-export async function collectSingle(picker: Picker, question: Question): Promise<RawSelection | undefined> {
-	const options = orderedOptions(question)
-	const labels = options.map(optionLabel)
-	if (question.allowOther) labels.push(OTHER_LABEL)
-
-	const picked = await picker.pick(questionTitle(question), labels)
-	if (picked === undefined) return undefined
-	if (question.allowOther && picked === OTHER_LABEL) {
-		const text = await picker.text(`${question.header}: other`, "type your answer")
-		if (text === undefined) return undefined
-		return { option: OTHER_VALUE, text }
-	}
-	const chosen = options[labels.indexOf(picked)]
-	return { option: chosen ? chosen.value : picked }
-}
-
-/**
- * Text/chat collection (spec §10): a single free-text input. Pure over the {@link Picker} seam; returns
- * a {@link RawSelection}, or `undefined` when the user dismisses.
- */
-export async function collectText(picker: Picker, question: Question): Promise<RawSelection | undefined> {
-	const text = await picker.text(questionTitle(question), question.header)
-	if (text === undefined) return undefined
-	return { text }
-}
-
-/**
- * Drive a whole questionnaire over the {@link Picker} seam and assemble the structured answers keyed by
- * `question.key` — the one collection loop BOTH render paths run (native dialogs and the rich TUI form),
- * so "ask every question in order, stop on dismissal, assemble once" is defined exactly once rather than
- * re-implemented per widget set. Returns `undefined` as soon as the user dismisses any question: dismiss
- * ≠ cancel, so the caller keeps the run blocked (spec §10.2).
- *
- * Multi-choice is the one genuinely widget-shaped question kind (a confirm per option vs a check/uncheck
- * selector loop), so it stays with the render path and arrives here as `collectMulti`.
- */
-export async function collectQuestionnaire(
-	questionnaire: Questionnaire,
-	picker: Picker,
-	collectMulti: (question: Question) => Promise<RawSelection | undefined>,
-): Promise<Record<string, unknown> | undefined> {
-	const raw: Record<string, RawSelection> = {}
-	for (const question of questionnaire.questions) {
-		const selection = await collectOne(question, picker, collectMulti)
-		if (selection === undefined) return undefined
-		raw[question.key] = selection
-	}
-	return assembleAnswers(questionnaire, raw)
-}
-
-function collectOne(
-	question: Question,
-	picker: Picker,
-	collectMulti: (question: Question) => Promise<RawSelection | undefined>,
-): Promise<RawSelection | undefined> {
-	switch (question.kind) {
-		case "single":
-			return collectSingle(picker, question)
-		case "multi":
-			return collectMulti(question)
-		case "text":
-		case "chat":
-			return collectText(picker, question)
-	}
 }

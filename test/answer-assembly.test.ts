@@ -1,13 +1,10 @@
 import { describe, expect, it } from "vitest"
-import type { Question, Questionnaire } from "../src/flow/index.ts"
+import type { Questionnaire } from "../src/flow/index.ts"
 import {
 	assembleAnswers,
-	collectSingle,
-	collectText,
 	OTHER_VALUE,
 	optionLabel,
 	orderedOptions,
-	type Picker,
 	questionTitle,
 	useRichForm,
 } from "../src/host/answer-assembly.ts"
@@ -116,77 +113,6 @@ describe("useRichForm capability gate (pure)", () => {
 	})
 })
 
-// -- shared Picker collection (collectSingle / collectText) -----------------------------------------
-
-/** A scripted {@link Picker}: dequeues pick/text responses in call order and records what it was shown. */
-function fakePicker(script: { pick?: (string | undefined)[]; text?: (string | undefined)[] }): Picker & {
-	pickCalls: { title: string; labels: string[] }[]
-} {
-	const pick = [...(script.pick ?? [])]
-	const text = [...(script.text ?? [])]
-	const pickCalls: { title: string; labels: string[] }[] = []
-	return {
-		pickCalls,
-		pick(title, labels) {
-			pickCalls.push({ title, labels })
-			return Promise.resolve(pick.shift())
-		},
-		text() {
-			return Promise.resolve(text.shift())
-		},
-	}
-}
-
-describe("collectSingle (shared over Picker seam)", () => {
-	const question: Question = {
-		key: "env",
-		header: "Environment",
-		question: "Which environment?",
-		kind: "single",
-		allowOther: true,
-		options: [
-			{ value: "dev", label: "Dev" },
-			{ value: "prod", label: "Prod", recommended: true },
-		],
-	}
-
-	it("presents recommended options first + an Other entry, and maps the pick back to its value", async () => {
-		const picker = fakePicker({ pick: ["Dev"] })
-		expect(await collectSingle(picker, question)).toEqual({ option: "dev" })
-		expect(picker.pickCalls[0]?.labels).toEqual(["Prod (recommended)", "Dev", "Other…"])
-		expect(picker.pickCalls[0]?.title).toBe("Which environment?")
-	})
-
-	it("routes the Other entry to a free-text input", async () => {
-		const picker = fakePicker({ pick: ["Other…"], text: ["staging"] })
-		expect(await collectSingle(picker, question)).toEqual({ option: OTHER_VALUE, text: "staging" })
-	})
-
-	it("returns undefined when the selection is dismissed", async () => {
-		const picker = fakePicker({ pick: [undefined] })
-		expect(await collectSingle(picker, question)).toBeUndefined()
-	})
-
-	it("returns undefined when the Other free-text is dismissed", async () => {
-		const picker = fakePicker({ pick: ["Other…"], text: [undefined] })
-		expect(await collectSingle(picker, question)).toBeUndefined()
-	})
-})
-
-describe("collectText (shared over Picker seam)", () => {
-	const question: Question = { key: "name", header: "Name", question: "Your name?", kind: "text" }
-
-	it("captures the entered text", async () => {
-		const picker = fakePicker({ text: ["Ada"] })
-		expect(await collectText(picker, question)).toEqual({ text: "Ada" })
-	})
-
-	it("returns undefined when dismissed", async () => {
-		const picker = fakePicker({ text: [undefined] })
-		expect(await collectText(picker, question)).toBeUndefined()
-	})
-})
-
 // -- §3 native-dialog fallback (scripted fake ctx.ui) -----------------------------------------------
 
 /** A scripted `ctx.ui` subset: dequeues responses in call order and records what it was shown. */
@@ -276,5 +202,14 @@ describe("collectViaDialogs (native fallback, spec §10.2)", () => {
 	it("returns undefined when the user dismisses (dismiss ≠ cancel → stay blocked)", async () => {
 		const ui = fakeDialogs({ select: [undefined] })
 		expect(await collectViaDialogs(ui, single)).toBeUndefined()
+	})
+
+	it("returns undefined when a free-text input is dismissed", async () => {
+		expect(await collectViaDialogs(fakeDialogs({ select: ["Other…"], input: [undefined] }), single)).toBeUndefined()
+		expect(
+			await collectViaDialogs(fakeDialogs({ input: [undefined] }), {
+				questions: [{ key: "name", header: "Name", question: "Your name?", kind: "text" }],
+			}),
+		).toBeUndefined()
 	})
 })
