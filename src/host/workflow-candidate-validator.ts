@@ -120,20 +120,27 @@ export async function validateWorkflowFile(options: ValidateWorkflowFileOptions)
 }
 
 /**
- * Type-check an existing workflow against the package versions running this host without evaluating
- * its module. Run resolution may already have loaded it; resume/status preflight deliberately calls
- * this first so invalid source cannot execute top-level side effects.
+ * Type-check an existing workflow against its nearest prepared package without evaluating its module.
+ * The extension package is a fallback for source checkouts and legacy layouts. Run resolution may
+ * already have loaded the file; resume/status preflight deliberately calls this first so invalid
+ * source cannot execute top-level side effects.
  */
 export async function validateWorkflowTypeScript(options: {
 	readonly entryPath: string
 	readonly projectRoot: string
 	readonly signal?: AbortSignal
+	/** Test seam; production uses the bounded native TypeScript runner. */
+	readonly runCommand?: CommandRunner
 }): Promise<void> {
+	const entryPackageRoot = nearestPackageRoot(options.entryPath)
+	const packageRoots = entryPackageRoot ? uniquePaths([entryPackageRoot, FRAMEWORK_ROOT]) : [FRAMEWORK_ROOT]
 	await typecheckWorkflowEntry({
-		...options,
+		entryPath: options.entryPath,
+		projectRoot: options.projectRoot,
+		signal: options.signal,
 		diagnosticPath: options.entryPath,
-		packageRoot: FRAMEWORK_ROOT,
-		runner: runCommand,
+		packageRoots,
+		runner: options.runCommand ?? runCommand,
 		artifactPrefix: ".pi-run-typecheck",
 	})
 }
@@ -148,7 +155,7 @@ async function validateWorkflowModule(options: ValidateWorkflowModuleOptions): P
 		entryPath: options.entryPath,
 		diagnosticPath: options.diagnosticPath,
 		projectRoot: options.projectRoot,
-		packageRoot: options.packageRoot,
+		packageRoots: [options.packageRoot],
 		signal: options.signal,
 		runner,
 		artifactPrefix: ".pi-create-typecheck",
@@ -187,7 +194,7 @@ async function typecheckWorkflowEntry(options: {
 	readonly entryPath: string
 	readonly diagnosticPath: string
 	readonly projectRoot: string
-	readonly packageRoot: string
+	readonly packageRoots: readonly string[]
 	readonly signal?: AbortSignal
 	readonly runner: CommandRunner
 	readonly artifactPrefix: string
@@ -200,7 +207,7 @@ async function typecheckWorkflowEntry(options: {
 	try {
 		let toolchain: ValidationToolchain
 		try {
-			toolchain = await resolveValidationToolchain(options.packageRoot)
+			toolchain = await resolveValidationToolchain(options.packageRoots)
 		} catch (error) {
 			throw validationError("typescript", error)
 		}
@@ -241,11 +248,24 @@ interface PackageManifest {
 }
 
 /**
- * Build the static-validation environment exclusively from the package prepared for this project.
- * This keeps the quick candidate gate on the same public declarations and versions as package
- * verification, without duplicating either Kimchi, TypeBox, or PI types inside the validator.
+ * Build the static-validation environment from one complete package environment. Existing workflows
+ * prefer the nearest package to their entry (normally `.kimchi/workflows`) and fall back to the
+ * extension package. Candidate validation supplies only its explicitly prepared package.
  */
-async function resolveValidationToolchain(packageRoot: string): Promise<ValidationToolchain> {
+async function resolveValidationToolchain(packageRoots: readonly string[]): Promise<ValidationToolchain> {
+	let lastMissing: MissingValidationPackageError | undefined
+	for (const packageRoot of uniquePaths(packageRoots)) {
+		try {
+			return await resolveValidationToolchainAt(packageRoot)
+		} catch (error) {
+			if (!(error instanceof MissingValidationPackageError)) throw error
+			lastMissing = error
+		}
+	}
+	throw lastMissing ?? new Error("workflow validation has no package environment to inspect")
+}
+
+async function resolveValidationToolchainAt(packageRoot: string): Promise<ValidationToolchain> {
 	const [framework, typebox, pi, node, typescript] = await Promise.all([
 		readInstalledPackage(packageRoot, "@kimchi-dev/kimchi-workflows"),
 		readInstalledPackage(packageRoot, "typebox"),
@@ -301,16 +321,82 @@ async function readInstalledPackage(packageRoot: string, name: string): Promise<
 			// The regular diagnostic below describes an unreadable/malformed selected manifest.
 		}
 	}
+	if (!existsSync(manifestPath) && existsSync(rootManifest)) {
+		// npm commonly hoists dependencies beside the package that owns this root. Resolve from its
+		// manifest instead of assuming every dependency is nested inside the package directory.
+		const hoistedManifest = await resolveHoistedPackageManifest(rootManifest, name)
+		if (!hoistedManifest) throw new MissingValidationPackageError(name, resolvedRoot, installedManifest)
+		manifestPath = hoistedManifest
+		directory = path.dirname(manifestPath)
+	}
 	let manifest: PackageManifest
 	try {
 		manifest = JSON.parse(await readFile(manifestPath, "utf8")) as PackageManifest
 	} catch (error) {
-		throw new Error(`prepared workflow package is missing ${name} at ${manifestPath}: ${describe(error)}`)
+		if (!existsSync(manifestPath)) throw new MissingValidationPackageError(name, resolvedRoot, manifestPath, error)
+		throw new Error(`could not read workflow validation package ${name} at ${manifestPath}: ${describe(error)}`)
 	}
 	if (manifest.name !== name) {
 		throw new Error(`prepared workflow package entry ${manifestPath} identifies itself as ${String(manifest.name)}`)
 	}
 	return { name, directory, manifestPath, manifest }
+}
+
+async function resolveHoistedPackageManifest(rootManifest: string, name: string): Promise<string | undefined> {
+	const packageRequire = createRequire(rootManifest)
+	try {
+		return packageRequire.resolve(`${name}/package.json`)
+	} catch {
+		// Packages commonly hide package.json behind `exports`; resolve their public entry and walk
+		// upward to the owning manifest instead.
+	}
+
+	let entry: string
+	try {
+		entry = packageRequire.resolve(name)
+	} catch {
+		return undefined
+	}
+
+	let directory = path.dirname(realpathSync(entry))
+	for (;;) {
+		const candidate = path.join(directory, "package.json")
+		if (existsSync(candidate)) {
+			try {
+				const manifest = JSON.parse(await readFile(candidate, "utf8")) as PackageManifest
+				if (manifest.name === name) return candidate
+			} catch {
+				// Keep walking: the public entry may sit below an unrelated nested package boundary.
+			}
+		}
+		const parent = path.dirname(directory)
+		if (parent === directory) return undefined
+		directory = parent
+	}
+}
+
+class MissingValidationPackageError extends Error {
+	constructor(name: string, packageRoot: string, manifestPath: string, cause?: unknown) {
+		super(
+			`workflow validation package ${packageRoot} is missing ${name} at ${manifestPath}` +
+				(cause === undefined ? "" : `: ${describe(cause)}`),
+		)
+		this.name = "MissingValidationPackageError"
+	}
+}
+
+function nearestPackageRoot(entryPath: string): string | undefined {
+	let directory = path.dirname(path.resolve(entryPath))
+	for (;;) {
+		if (existsSync(path.join(directory, "package.json"))) return directory
+		const parent = path.dirname(directory)
+		if (parent === directory) return undefined
+		directory = parent
+	}
+}
+
+function uniquePaths(paths: readonly string[]): string[] {
+	return [...new Set(paths.map((candidate) => path.resolve(candidate)))]
 }
 
 function declarationPaths(pkg: InstalledPackage): Record<string, readonly string[]> {
