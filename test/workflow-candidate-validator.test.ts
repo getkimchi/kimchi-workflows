@@ -3,7 +3,11 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { workflowsDir } from "../src/host/project-dir.ts"
-import { validateWorkflowCandidate, validateWorkflowFile } from "../src/host/workflow-candidate-validator.ts"
+import {
+	validateWorkflowCandidate,
+	validateWorkflowFile,
+	validateWorkflowTypeScript,
+} from "../src/host/workflow-candidate-validator.ts"
 import { prepareWorkflowPackageFixture } from "./workflow-package-fixture.ts"
 
 const VALID_SOURCE = `import { createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
@@ -141,6 +145,32 @@ describe("workflow candidate validation", () => {
 		expect(validationConfig?.compilerOptions.paths["@earendil-works/pi-coding-agent"]).toEqual([
 			path.join(packageRoot, "node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"),
 		])
+		expect(await validationArtifacts(target)).toEqual([])
+	})
+
+	it("preflights an existing workflow against its nearest prepared package", async () => {
+		const { root, target, packageRoot } = await project()
+		await writeFile(target, NODE_IMPORT_SOURCE, "utf8")
+		let validationConfig: { compilerOptions: { paths: Record<string, string[]>; typeRoots: string[] } } | undefined
+
+		await validateWorkflowTypeScript({
+			entryPath: target,
+			projectRoot: root,
+			runCommand: async (request) => {
+				const configPath = request.args[request.args.indexOf("--project") + 1]
+				if (!configPath) throw new Error("validation command omitted --project")
+				validationConfig = JSON.parse(await readFile(configPath, "utf8")) as typeof validationConfig
+				return { code: 0, stdout: "", stderr: "" }
+			},
+		})
+
+		expect(validationConfig?.compilerOptions.paths.typebox).toEqual([
+			path.join(packageRoot, "node_modules/typebox/build/index.d.mts"),
+		])
+		expect(validationConfig?.compilerOptions.paths["@kimchi-dev/kimchi-workflows"]?.[0]).toContain(
+			path.join(packageRoot, "node_modules/@kimchi-dev/kimchi-workflows"),
+		)
+		expect(validationConfig?.compilerOptions.typeRoots).toEqual([path.join(packageRoot, "node_modules/@types")])
 		expect(await validationArtifacts(target)).toEqual([])
 	})
 
@@ -310,5 +340,7 @@ export const greet = createStep({
 })
 
 async function validationArtifacts(target: string): Promise<string[]> {
-	return (await readdir(path.dirname(target))).filter((name) => name.startsWith(".pi-create-"))
+	return (await readdir(path.dirname(target))).filter(
+		(name) => name.startsWith(".pi-create-") || name.startsWith(".pi-run-"),
+	)
 }
