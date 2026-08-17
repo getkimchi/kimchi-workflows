@@ -28,8 +28,8 @@ import { render } from "../../progress/render.ts"
 import { missingWorkflowProvenance, recordedWorkflowLoadFailure, workflowFailureLine } from "../failure-messages.ts"
 import { runIdHash } from "../naming.ts"
 import type { ProgressCtx } from "../progress-sink.ts"
+import { loadRecordedWorkflow } from "../recorded-workflow.ts"
 import type { RunStore } from "../types.ts"
-import { loadValidatedWorkflow } from "../workflow-preflight.ts"
 import { type CommandCtx, resolveRunRef } from "./context.ts"
 
 /** What `handleStatus` needs beyond the store. Bound in extension.ts, faked in a test. */
@@ -64,7 +64,7 @@ export async function handleStatus(
 	// The DEFINITION is what supplies the shape — the log alone knows only what happened, not what was
 	// meant to (progress §3.4). A run whose file has since moved cannot be shown as a tree, and saying
 	// so plainly beats rendering a plausible-looking partial one.
-	const loaded = await loadValidatedWorkflow({ filePath: workflowFilePath, projectRoot: ctx.cwd })
+	const loaded = await loadRecordedWorkflow({ filePath: workflowFilePath, projectRoot: ctx.cwd })
 	if (!loaded.ok) {
 		ctx.ui.notify(
 			recordedWorkflowLoadFailure({

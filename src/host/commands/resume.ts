@@ -11,11 +11,11 @@ import { resumeWorkflow } from "../../engine/resume-workflow.ts"
 import { missingWorkflowProvenance, recordedWorkflowLoadFailure } from "../failure-messages.ts"
 import { createHostPort } from "../host-port.ts"
 import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
+import { loadRecordedWorkflow } from "../recorded-workflow.ts"
 import { resumeAction } from "../resume-router.ts"
 import type { RunLock } from "../run-lock.ts"
 import { summarizeRun } from "../summarize-run.ts"
 import type { RunStore } from "../types.ts"
-import { loadValidatedWorkflow } from "../workflow-preflight.ts"
 import { handleAttendedInput, humanInputOf, pendingHumanInput } from "./attended.ts"
 import {
 	type CommandCtx,
@@ -52,7 +52,7 @@ export async function handleResume(
 	const workflowFilePath = events.find((event) => event.type === "run-meta")?.workflowFilePath
 	if (!workflowFilePath) return void ctx.ui.notify(missingWorkflowProvenance(runId, "resumed"), "error")
 
-	const loaded = await loadValidatedWorkflow({ filePath: workflowFilePath, projectRoot: ctx.cwd })
+	const loaded = await loadRecordedWorkflow({ filePath: workflowFilePath, projectRoot: ctx.cwd })
 	if (!loaded.ok) {
 		ctx.ui.notify(
 			recordedWorkflowLoadFailure({

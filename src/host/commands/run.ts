@@ -6,15 +6,14 @@
  */
 import { readFile } from "node:fs/promises"
 import path from "node:path"
-import { fileURLToPath } from "node:url"
 import { runWorkflow } from "../../engine/run-workflow.ts"
 import type { WorkflowDefinition } from "../../flow/types.ts"
 import { describeSchemaViolations } from "../../flow/validation.ts"
-import createWorkflowWorkflow from "../builtin/create.workflow.ts"
 import { createHostPort } from "../host-port.ts"
 import { mintRunId } from "../naming.ts"
 import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
 import { workflowsDir } from "../project-dir.ts"
+import { BUILTIN_CREATE_WORKFLOW_FILE, createWorkflowWorkflow } from "../recorded-workflow.ts"
 import type { RunLock } from "../run-lock.ts"
 import type { RunStore } from "../types.ts"
 import { resolveWorkflow } from "../workflow-catalog.ts"
@@ -174,10 +173,18 @@ export async function handleCreate(
 
 	// The built-in ships with the extension, so it is imported directly rather than loaded from disk.
 	// `workflowFilePath` still points at its module so a resume can reload it like any other run.
-	const filePath = fileURLToPath(new URL("../builtin/create.workflow.ts", import.meta.url))
 	// `workflowsDir` rides the initial input: the built-in cannot derive it itself (createInputSchema).
 	const input = { projectRoot: ctx.cwd, workflowsDir: workflowsDir(ctx.cwd) }
-	await startRun(ctx, store, guard, startAgent, createWorkflowWorkflow, filePath, input, progressFor)
+	await startRun(
+		ctx,
+		store,
+		guard,
+		startAgent,
+		createWorkflowWorkflow,
+		BUILTIN_CREATE_WORKFLOW_FILE,
+		input,
+		progressFor,
+	)
 }
 
 /** Shared run lifecycle for `/workflow run` and `/workflow create` (spec §7, §8.9, §10.2). */
