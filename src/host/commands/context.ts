@@ -1,15 +1,15 @@
 /**
  * Shared plumbing for the `/workflow` command handlers: the narrowed context they run against, the
- * single-run guard lifecycle (spec §7), and the notification helpers they format results with.
+ * non-exclusive execution lifecycle, and the notification helpers they format results with.
  *
- * Everything here is UI- and guard-shaped. The handlers themselves live in sibling modules and
+ * Everything here is UI- and lifecycle-shaped. The handlers themselves live in sibling modules and
  * depend only on this one, which keeps the command layer a flat, acyclic tree.
  */
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
 import type { AgentRequest, AgentSession, RunResult } from "../../engine/types.ts"
+import type { ActiveRuns } from "../active-runs.ts"
 import { workflowCrashMessage } from "../failure-messages.ts"
 import { matchRunId } from "../naming.ts"
-import type { BeginResult, RunLock } from "../run-lock.ts"
 import type { RunStore } from "../types.ts"
 
 /** How a command opens an agent session (spec §2.2), bound to the invoking context's model registry. */
@@ -30,72 +30,31 @@ export interface NotifyCtx {
 export type Notify = CommandCtx["ui"]["notify"]
 
 /**
- * Own the project lock lifecycle for one execution (spec §7): acquire `begin(runId)`; if the lock is
- * held or contended, notify and return `undefined`; otherwise run with the run's abort signal and
- * release on every outcome (including `blocked` — blocked ≠ in_progress, spec §7.1). A successful
- * reclaim (spec §7.3) is announced too, since it silently rewrites another run's recorded status.
- * Returns the run result, or `undefined` when the lock could not be acquired.
+ * Track one execution without imposing exclusivity: register its abort controller, run, report its
+ * outcome to the optional telemetry observer, and unregister it on every exit. Registration never
+ * checks what else is active, so separate executions of the same or different workflows may overlap.
  *
  * `store.observeResult` — present only when the store is the telemetry-decorated one
  * (`host/telemetry-bridge.ts`) — is handed the outcome on the way out. This is the one run state with no
  * event behind it: BLOCKING is the absence of a terminal event, so a bridge listening to the log alone
  * cannot see it. It travels on the store rather than as a seventh parameter because the store is already
- * the single object every execution's bookkeeping goes through here (`guard.begin` takes it for the same
- * reason), and this is the only place every `RunResult` in the process passes.
+ * the single object every execution's bookkeeping goes through here, and this is the only place every
+ * `RunResult` in the process passes.
  */
-export async function runGuarded(
-	guard: RunLock,
+export async function runTracked(
+	activeRuns: ActiveRuns,
 	runId: string,
-	projectRoot: string,
 	store: Pick<RunStore, "appendEvent"> & { observeResult?: (result: RunResult) => void },
-	notify: Notify,
 	run: (signal: AbortSignal) => Promise<RunResult>,
-): Promise<RunResult | undefined> {
-	const result = await guard.begin(runId, projectRoot, store)
-	if (!result.ok) {
-		notify(busyMessage(result), "warning")
-		return undefined
-	}
-	if (result.reclaimed) {
-		notify(
-			`workflow: reclaimed the project lock from run ${result.reclaimed.runId} (its process is no longer alive); that run is now recorded crashed and resumable.`,
-			"info",
-		)
-	}
+): Promise<RunResult> {
+	const execution = activeRuns.start(runId)
 	try {
-		const outcome = await run(result.controller.signal)
+		const outcome = await run(execution.controller.signal)
 		store.observeResult?.(outcome)
 		return outcome
 	} finally {
-		await guard.end(runId, projectRoot)
+		activeRuns.finish(execution)
 	}
-}
-
-function busyMessage(result: Extract<BeginResult, { ok: false }>): string {
-	switch (result.reason) {
-		case "held":
-			return `workflow: run ${result.holder.runId} is already executing (pid ${result.holder.pid} on ${result.holder.host}); cancel it or wait before starting/resuming another.`
-		case "foreign-host":
-			return `workflow: run ${result.holder.runId} is executing on a different host (${result.holder.host}); refusing rather than guessing at its liveness.`
-		case "contended":
-			return "workflow: another run became active; try again."
-	}
-}
-
-/**
- * Reject a command that needs an idle process (spec §7.2). Returns true — and notifies — when THIS
- * process is already executing a run. A cheap same-process fast path only: the project lock (held
- * across sessions/processes, spec §7.2) is the actual gate, enforced by `runGuarded`'s `begin()` call;
- * this just avoids wasted work (e.g. resolving a workflow file) when the answer is already known here.
- * `verb` completes "…before <verb> another", so callers read as the user does.
- */
-export function rejectIfBusy(ctx: NotifyCtx, guard: RunLock, verb: string): boolean {
-	if (!guard.active) return false
-	ctx.ui.notify(
-		`workflow: run ${guard.active.runId} is already active; cancel it or wait before ${verb} another.`,
-		"warning",
-	)
-	return true
 }
 
 /**
@@ -161,11 +120,6 @@ export function notifyResult(ctx: NotifyCtx, workflowName: string, result: RunRe
 			"error",
 		)
 	}
-}
-
-/** A `this`-safe {@link Notify} bound to a context's UI, for passing into {@link runGuarded}. */
-export function notifier(ctx: NotifyCtx): Notify {
-	return (message, type) => ctx.ui.notify(message, type)
 }
 
 export function describe(err: unknown): string {

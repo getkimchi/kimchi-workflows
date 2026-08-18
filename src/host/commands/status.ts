@@ -34,8 +34,8 @@ import { type CommandCtx, resolveRunRef } from "./context.ts"
 
 /** What `handleStatus` needs beyond the store. Bound in extension.ts, faked in a test. */
 export interface StatusDeps {
-	/** The run to show when no argument is given: whatever is executing right now (spec §7). */
-	activeRunId(): string | undefined
+	/** Locally executing runs used to resolve an unambiguous bare command. */
+	activeRunIds(): readonly string[]
 	now?: () => Date
 	/** The width the tree is drawn to. A notification is plain text, so nothing else can know it. */
 	width?: number
@@ -47,7 +47,15 @@ export async function handleStatus(
 	deps: StatusDeps,
 	runRef: string | undefined,
 ): Promise<void> {
-	const runId = runRef ? await resolveRunRef(ctx, store, runRef, "show") : deps.activeRunId()
+	const activeRunIds = [...new Set(deps.activeRunIds())]
+	if (!runRef && activeRunIds.length > 1) {
+		ctx.ui.notify(
+			`workflow: ${activeRunIds.length} runs are executing (${activeRunIds.join(", ")}); pass a run-id to show one.`,
+			"warning",
+		)
+		return
+	}
+	const runId = runRef ? await resolveRunRef(ctx, store, runRef, "show") : activeRunIds[0]
 	if (!runId) {
 		if (runRef) return // unknown or ambiguous — already notified by resolveRunRef
 		return void ctx.ui.notify("workflow: no run is executing; pass a run-id to show a recorded one.", "info")

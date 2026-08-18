@@ -12,7 +12,7 @@ const numberOutput = Type.Object({ n: Type.Integer() })
  * the run". That wording is load-bearing once constructs NEST — a `.foreach` whose body fans out again.
  * If the slot were held by the enclosing construct instead of by the step, a foreach sitting at the
  * ceiling would occupy every slot while each of its items waited for a slot of its own, and the run
- * would hang forever with nothing to interrupt it (no timeout, and the project lock held throughout).
+ * would hang forever with nothing to interrupt it (there is no timeout on the construct itself).
  */
 describe("nested concurrent constructs (spec §3.6)", () => {
 	it("a .foreach at the ceiling whose body fans out with .parallel still completes", async () => {

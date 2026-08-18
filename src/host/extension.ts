@@ -13,6 +13,7 @@
  * by the harness itself (spec §6.10).
  */
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
+import { createActiveRuns } from "./active-runs.ts"
 import {
 	handleCancel,
 	handleCreate,
@@ -30,7 +31,6 @@ import { createFsStore } from "./fs-store.ts"
 import { createPiAgentBridge } from "./pi-agent.ts"
 import { bindProgress } from "./progress-sink.ts"
 import { runArtifactsDir } from "./project-dir.ts"
-import { createRunLock } from "./run-lock.ts"
 import { registerStepOutputToolsFromEnv } from "./step-output-tools.ts"
 import { withTelemetry } from "./telemetry-bridge.ts"
 
@@ -40,7 +40,7 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 	// nested run inside the run it belongs to.
 	if (registerStepOutputToolsFromEnv(pi)) return
 
-	const guard = createRunLock() // one execution slot per project, backed by the file lock (spec §7)
+	const activeRuns = createActiveRuns() // lifecycle visibility only; never limits concurrent executions
 	const bindAgentStarter = createPiAgentBridge(pi) // one shared listener set for the extension's lifetime
 	const completionSources = createCompletionSources()
 
@@ -61,8 +61,8 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 			// in this one directory (project-dir.ts).
 			const runDir = runArtifactsDir(ctx.cwd, ctx.sessionManager.getSessionDir())
 			// Telemetry (telemetry spec R1–R7) attaches HERE, at the one store every command path shares, so
-			// every event a run records — including the two terminals the engine never emits, the cold cancel
-			// and the stale-lock reclaim — is published without each write site having to remember to. It only
+			// every event a run records — including the cold-cancel terminal the engine never emits — is
+			// published without each write site having to remember to. It only
 			// publishes on the harness bus; whether anything ships is a subscriber's decision, and with no
 			// subscriber loaded (plain PI) the whole thing is inert.
 			const store = withTelemetry(createFsStore(runDir), (channel, data) => pi.events.emit(channel, data))
@@ -87,26 +87,30 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 							"usage: /workflow run <name|file.ts> [--input <json>|@<file>]  |  /workflow run list",
 							"warning",
 						)
-					return void (await handleRun(ctx, store, guard, startAgent, parsed.target, parsed.inputArg, progressFor))
+					return void (await handleRun(ctx, store, activeRuns, startAgent, parsed.target, parsed.inputArg, progressFor))
 				}
 
 				case "create":
-					return void (await handleCreate(ctx, store, guard, startAgent, progressFor))
+					return void (await handleCreate(ctx, store, activeRuns, startAgent, progressFor))
 
 				case "resume": {
 					const runId = rest[0]
 					if (!runId) return void ctx.ui.notify("usage: /workflow resume <run-id>", "warning")
-					return void (await handleResume(ctx, store, guard, startAgent, runId, progressFor))
+					return void (await handleResume(ctx, store, activeRuns, startAgent, runId, progressFor))
 				}
 
 				// `/workflow status [run-id]` (progress §11.4) — the fully expanded tree, for the executing run
-				// or any recorded one. With no argument it means "the one running right now", which the project
-				// lock (spec §7) is the authority on.
+				// or any recorded one. With no argument it works only when one local execution is unambiguous.
 				case "status":
-					return void (await handleStatus(ctx, store, { activeRunId: () => guard.active?.runId }, rest[0]))
+					return void (await handleStatus(
+						ctx,
+						store,
+						{ activeRunIds: () => activeRuns.active.map((run) => run.runId) },
+						rest[0],
+					))
 
 				case "cancel":
-					return void (await handleCancel(ctx, guard, store, rest[0]))
+					return void (await handleCancel(ctx, activeRuns, store, rest[0]))
 
 				case "delete": {
 					const runId = rest[0]

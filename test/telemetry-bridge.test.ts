@@ -4,27 +4,22 @@
  *
  * The integration half drives the ACTUAL engine through a bridged store rather than hand-feeding events,
  * because the claims worth testing are about the wiring: that a retry, a steering repair and a provider
- * failure each reach the bus from the code paths that produce them, and that the two terminals the engine
- * never emits — the cold cancel of a blocked run and the stale-lock reclaim of an abandoned one — reach it
- * as well (spec R6). Those two are the entire reason the bridge decorates the store instead of teeing
- * `HostPort.emit`.
+ * failure each reach the bus from the code paths that produce them, and that the terminal the engine
+ * never emits — the cold cancel of a blocked run — reaches it as well (spec R6). That path is why the
+ * bridge decorates the store instead of teeing `HostPort.emit`.
  */
-import { mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import path from "node:path"
 import { Type } from "typebox"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { describe, expect, it } from "vitest"
 import { runWorkflow } from "../src/engine/run-workflow.ts"
 import type { RunEvent } from "../src/engine/types.ts"
 import { createAgentStep, createQuestionnaireStep, createStep, createWorkflow } from "../src/flow/index.ts"
-import { runGuarded } from "../src/host/commands/context.ts"
+import { runTracked } from "../src/host/commands/context.ts"
 import { handleCancel } from "../src/host/commands/lifecycle.ts"
 import { createHostPort } from "../src/host/host-port.ts"
 import { createMemoryStore } from "../src/host/memory-store.ts"
-import { createRunLock, type ProcessEnv } from "../src/host/run-lock.ts"
 import { withTelemetry } from "../src/host/telemetry-bridge.ts"
 import { WORKFLOW_TELEMETRY_CHANNEL } from "../src/host/telemetry-events.ts"
-import { createFakeRunLock } from "./helpers.ts"
+import { createFakeActiveRuns } from "./helpers.ts"
 import { scriptedAgent } from "./scripted-agent.ts"
 
 const RUN_ID = "workflow-demo-1a2b3c4d"
@@ -329,31 +324,15 @@ describe("what a run publishes (spec R3)", () => {
 })
 
 describe("terminal-state completeness (spec R6)", () => {
-	let projectRoot: string
-
-	beforeEach(async () => {
-		projectRoot = await mkdtemp(path.join(tmpdir(), "pi-workflows-telemetry-"))
-	})
-
-	afterEach(async () => {
-		await rm(projectRoot, { recursive: true, force: true })
-	})
-
 	const blockingWorkflow = createWorkflow({ name: "demo" })
 		.then(createQuestionnaireStep({ name: "sign-off", output: Type.Object({ env: Type.String() }) }))
 		.commit()
 
 	it("a blocked run is reported, though no event records blocking", async () => {
 		const { sink, store, host } = bridged()
-		const notified: string[] = []
 
-		const result = await runGuarded(
-			createFakeRunLock(),
-			RUN_ID,
-			projectRoot,
-			store,
-			(message) => notified.push(message),
-			(signal) => runWorkflow(blockingWorkflow, undefined, host, { signal }),
+		const result = await runTracked(createFakeActiveRuns(), RUN_ID, store, (signal) =>
+			runWorkflow(blockingWorkflow, undefined, host, { signal }),
 		)
 
 		expect(result?.status).toBe("blocked")
@@ -370,37 +349,9 @@ describe("terminal-state completeness (spec R6)", () => {
 		await runWorkflow(blockingWorkflow, undefined, host, {})
 		const notified: string[] = []
 
-		await handleCancel({ ui: { notify: (message) => notified.push(message) } }, createFakeRunLock(), store, RUN_ID)
+		await handleCancel({ ui: { notify: (message) => notified.push(message) } }, createFakeActiveRuns(), store, RUN_ID)
 
 		expect(sink.events()).toContain("run_cancelled")
 		expect(sink.first("run_cancelled")).toMatchObject({ run_id: RUN_ID, workflow_name: "demo" })
-	})
-
-	it("the stale-lock reclaim that records ANOTHER session's run as crashed", async () => {
-		const sink = recording()
-		const store = withTelemetry(createMemoryStore(), sink.publish, { warn: sink.warn })
-		const env = (pid: number, isAlive: (pid: number) => boolean): ProcessEnv => ({ pid, hostname: "host-a", isAlive })
-
-		// A run whose process is gone still holds the project lock...
-		const abandoned = createRunLock(
-			env(111, () => true),
-			() => new Date(AT),
-		)
-		await abandoned.begin("workflow-demo-deadbeef", projectRoot, store)
-
-		// ...and the next session reclaims it, recording that run crashed through the store it was handed.
-		const reclaimer = createRunLock(
-			env(222, (pid) => pid !== 111),
-			() => new Date(AT),
-		)
-		await reclaimer.begin(RUN_ID, projectRoot, store)
-
-		expect(sink.first("run_failed")).toMatchObject({
-			run_id: "workflow-demo-deadbeef",
-			// Nothing in this invocation ever started or read that run's log, so its name is not in reach
-			// (spec R4): `run_id` is what joins this to the `run_started` the dead session published.
-			workflow_name: "",
-			error: { message: expect.stringContaining("no longer alive") },
-		})
 	})
 })

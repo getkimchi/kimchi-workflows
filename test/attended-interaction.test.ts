@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import type { CommandCtx, StartAgent } from "../src/host/commands/index.ts"
 import { handleRun } from "../src/host/commands/index.ts"
 import { createMemoryStore } from "../src/host/memory-store.ts"
-import { createFakeRunLock } from "./helpers.ts"
+import { createFakeActiveRuns } from "./helpers.ts"
 
 const flowImport = path.resolve(import.meta.dirname, "../src/flow/index.ts")
 const roots: string[] = []
@@ -36,7 +36,7 @@ function workflowSource(renderBody: string): string {
 }
 
 describe("attended workflow-defined interactions", () => {
-	it("renders after the project lock is released, then resumes the exact blocked path", async () => {
+	it("renders outside active execution tracking, then resumes the exact blocked path", async () => {
 		const root = await mkdtemp(path.join(tmpdir(), "workflow-attended-interaction-"))
 		roots.push(root)
 		const file = path.join(root, "demo.workflow.ts")
@@ -48,9 +48,9 @@ describe("attended workflow-defined interactions", () => {
 			"utf8",
 		)
 
-		const guard = createFakeRunLock()
+		const activeRuns = createFakeActiveRuns()
 		const select = vi.fn(async () => {
-			expect(guard.active).toBeUndefined()
+			expect(activeRuns.active).toEqual([])
 			return "Approve"
 		})
 		const notify = vi.fn()
@@ -63,7 +63,7 @@ describe("attended workflow-defined interactions", () => {
 		} as unknown as CommandCtx
 		const store = createMemoryStore()
 
-		await handleRun(ctx, store, guard, noAgent, file)
+		await handleRun(ctx, store, activeRuns, noAgent, file)
 
 		const summary = (await store.list())[0]
 		expect(summary?.status).toBe("completed")
@@ -74,7 +74,7 @@ describe("attended workflow-defined interactions", () => {
 			output: "yes",
 		})
 		expect(select).toHaveBeenCalledWith("# Exact persisted plan", ["Approve", "Revise"])
-		expect(guard.active).toBeUndefined()
+		expect(activeRuns.active).toEqual([])
 	})
 
 	it("leaves the run blocked when the renderer is dismissed", async () => {
@@ -82,7 +82,7 @@ describe("attended workflow-defined interactions", () => {
 		roots.push(root)
 		const file = path.join(root, "demo.workflow.ts")
 		await writeFile(file, workflowSource('await ui.select(request.markdown, ["Approve"]); return undefined;'), "utf8")
-		const guard = createFakeRunLock()
+		const activeRuns = createFakeActiveRuns()
 		const notify = vi.fn()
 		const ctx = {
 			cwd: root,
@@ -93,14 +93,14 @@ describe("attended workflow-defined interactions", () => {
 		} as unknown as CommandCtx
 		const store = createMemoryStore()
 
-		await handleRun(ctx, store, guard, noAgent, file)
+		await handleRun(ctx, store, activeRuns, noAgent, file)
 
 		const summary = (await store.list())[0]
 		expect(summary?.status).toBe("blocked")
 		const events = await store.loadEvents(summary?.runId ?? "")
 		expect(events.some((event) => event.type === "interaction-provided")).toBe(false)
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("is still blocked"), "info")
-		expect(guard.active).toBeUndefined()
+		expect(activeRuns.active).toEqual([])
 	})
 
 	it("reports renderer failure without writing a response or taking the lock again", async () => {
@@ -108,7 +108,7 @@ describe("attended workflow-defined interactions", () => {
 		roots.push(root)
 		const file = path.join(root, "demo.workflow.ts")
 		await writeFile(file, workflowSource('throw new Error("renderer exploded");'), "utf8")
-		const guard = createFakeRunLock()
+		const activeRuns = createFakeActiveRuns()
 		const notify = vi.fn()
 		const ctx = {
 			cwd: root,
@@ -119,13 +119,13 @@ describe("attended workflow-defined interactions", () => {
 		} as unknown as CommandCtx
 		const store = createMemoryStore()
 
-		await handleRun(ctx, store, guard, noAgent, file)
+		await handleRun(ctx, store, activeRuns, noAgent, file)
 
 		const summary = (await store.list())[0]
 		expect(summary?.status).toBe("blocked")
 		const events = await store.loadEvents(summary?.runId ?? "")
 		expect(events.some((event) => event.type === "interaction-provided")).toBe(false)
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("renderer exploded"), "warning")
-		expect(guard.active).toBeUndefined()
+		expect(activeRuns.active).toEqual([])
 	})
 })

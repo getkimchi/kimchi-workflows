@@ -1,7 +1,7 @@
 /**
  * Starting runs: `/workflow run <name|file.ts>` (spec §6.1) and `/workflow create` (spec §6.6).
  *
- * Both go through the same {@link startRun} lifecycle — guard, run-id, provenance, attended Q&A — so
+ * Both go through the same {@link startRun} lifecycle — run-id, provenance, attended Q&A — so
  * `create` gets nothing bespoke beyond the initial input its steps need.
  */
 import { readFile } from "node:fs/promises"
@@ -10,24 +10,16 @@ import { runWorkflow } from "../../engine/run-workflow.ts"
 import type { WorkflowSource } from "../../engine/types.ts"
 import type { WorkflowDefinition } from "../../flow/types.ts"
 import { describeSchemaViolations } from "../../flow/validation.ts"
+import type { ActiveRuns } from "../active-runs.ts"
 import { createHostPort } from "../host-port.ts"
 import { mintRunId } from "../naming.ts"
 import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
 import { workflowsDir } from "../project-dir.ts"
 import { BUILTIN_CREATE_WORKFLOW, workflowSourceLabel } from "../recorded-workflow.ts"
-import type { RunLock } from "../run-lock.ts"
 import type { RunStore } from "../types.ts"
 import { resolveWorkflow } from "../workflow-catalog.ts"
 import { handleAttendedInput, humanInputOf } from "./attended.ts"
-import {
-	type CommandCtx,
-	describe,
-	notifier,
-	rejectIfBusy,
-	reportResult,
-	runGuarded,
-	type StartAgent,
-} from "./context.ts"
+import { type CommandCtx, describe, reportResult, runTracked, type StartAgent } from "./context.ts"
 
 /** A parsed `/workflow run` argument line (spec §6.1): the target, plus `--input`'s raw, unparsed payload. */
 export interface ParsedRunArgs {
@@ -78,9 +70,9 @@ export type InitialInputResolution =
  *
  * Validation reuses {@link describeSchemaViolations} — the SAME TypeBox check the engine itself runs
  * on a workflow's declared input schema (`engine/run-workflow.ts`) — rather than hand-rolling a second
- * one that could drift from it. Doing it here, before `startRun` mints a run-id or touches the project
- * lock, is what makes a malformed payload cost nothing: no run-id is burned, no lock is acquired, and
- * no `run-meta`/`run-crashed` pair lands in the store. Letting the engine's own (still-present, §orig.)
+ * one that could drift from it. Doing it here, before `startRun` mints a run-id, is what makes a
+ * malformed payload cost nothing: no run-id is burned and no `run-meta`/`run-crashed` pair lands in
+ * the store. Letting the engine's own (still-present, §orig.)
  * check catch it would technically be correct too, but only after paying for all three.
  */
 export async function resolveInitialInput(
@@ -131,14 +123,12 @@ export async function resolveInitialInput(
 export async function handleRun(
 	ctx: CommandCtx,
 	store: RunStore,
-	guard: RunLock,
+	activeRuns: ActiveRuns,
 	startAgent: StartAgent,
 	target: string,
 	inputArg?: string,
 	progressFor: ProgressFor = noProgressFor,
 ): Promise<void> {
-	if (rejectIfBusy(ctx, guard, "starting")) return
-
 	const resolution = await resolveWorkflow(ctx.cwd, target)
 	if (!resolution.ok) {
 		ctx.ui.notify(resolution.error, "error")
@@ -158,7 +148,7 @@ export async function handleRun(
 	await startRun(
 		ctx,
 		store,
-		guard,
+		activeRuns,
 		startAgent,
 		resolution.workflow,
 		{ kind: "file", path: resolution.filePath },
@@ -175,19 +165,17 @@ export async function handleRun(
 export async function handleCreate(
 	ctx: CommandCtx,
 	store: RunStore,
-	guard: RunLock,
+	activeRuns: ActiveRuns,
 	startAgent: StartAgent,
 	progressFor: ProgressFor = noProgressFor,
 ): Promise<void> {
-	if (rejectIfBusy(ctx, guard, "starting")) return
-
 	// The built-in ships with the extension, so it is imported directly and recorded by registry ID.
 	// `workflowsDir` rides the initial input: the built-in cannot derive it itself (createInputSchema).
 	const input = { projectRoot: ctx.cwd, workflowsDir: workflowsDir(ctx.cwd) }
 	await startRun(
 		ctx,
 		store,
-		guard,
+		activeRuns,
 		startAgent,
 		BUILTIN_CREATE_WORKFLOW.workflow,
 		BUILTIN_CREATE_WORKFLOW.source,
@@ -200,7 +188,7 @@ export async function handleCreate(
 async function startRun(
 	ctx: CommandCtx,
 	store: RunStore,
-	guard: RunLock,
+	activeRuns: ActiveRuns,
 	startAgent: StartAgent,
 	workflow: WorkflowDefinition,
 	workflowSource: WorkflowSource,
@@ -225,7 +213,7 @@ async function startRun(
 	const sourceLabel = workflowSourceLabel(workflowSource)
 	const progress = progressFor(workflow, runId, sourceLabel)
 	try {
-		const result = await runGuarded(guard, runId, ctx.cwd, store, notifier(ctx), async (signal) => {
+		const result = await runTracked(activeRuns, runId, store, async (signal) => {
 			// The adapter's own event (spec §8.9), not the engine's: `run-started` is emitted by the engine,
 			// which is deliberately unaware of provenance, so where this run came FROM is recorded separately —
 			// before the first engine event, so a crash mid-run still leaves a resumable log.
@@ -237,14 +225,12 @@ async function startRun(
 			})
 			return runWorkflow(workflow, initialInput, host, { signal })
 		})
-		if (!result) return // guard was busy (race) — already notified
-
 		// Attended flow: if the run blocked, render the questionnaire inline and loop until it settles.
 		if (result.status === "blocked") {
 			await handleAttendedInput(
 				ctx,
 				store,
-				guard,
+				activeRuns,
 				workflow.name,
 				workflowSource,
 				startAgent,

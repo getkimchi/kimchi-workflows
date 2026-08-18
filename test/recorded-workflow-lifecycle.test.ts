@@ -6,7 +6,7 @@ import type { CommandCtx, StartAgent } from "../src/host/commands/index.ts"
 import { handleResume, handleRun, handleStatus } from "../src/host/commands/index.ts"
 import { createMemoryStore } from "../src/host/memory-store.ts"
 import type { ProgressCtx } from "../src/host/progress-sink.ts"
-import { createFakeRunLock } from "./helpers.ts"
+import { createFakeActiveRuns } from "./helpers.ts"
 
 const flowImport = path.resolve(import.meta.dirname, "../src/flow/index.ts")
 
@@ -39,7 +39,7 @@ describe("project-authored recorded workflow lifecycle", () => {
 		await writeFile(workflowFile, projectWorkflowSource(), "utf8")
 
 		const store = createMemoryStore()
-		const guard = createFakeRunLock()
+		const activeRuns = createFakeActiveRuns()
 		const notify = vi.fn()
 		const inputs: (string | undefined)[] = [undefined]
 		const ctx = {
@@ -58,12 +58,12 @@ describe("project-authored recorded workflow lifecycle", () => {
 			},
 		} as unknown as CommandCtx & ProgressCtx
 
-		await handleRun(ctx, store, guard, noAgent, workflowFile)
+		await handleRun(ctx, store, activeRuns, noAgent, workflowFile)
 		const runId = (await store.list())[0]?.runId ?? ""
 		expect((await store.list())[0]).toMatchObject({ runId, status: "blocked", currentStep: "ask" })
 
 		inputs.push("Mateusz")
-		await handleResume(ctx, store, guard, noAgent, runId)
+		await handleResume(ctx, store, activeRuns, noAgent, runId)
 		expect((await store.list())[0]).toMatchObject({ runId, status: "completed" })
 		const events = await store.loadEvents(runId)
 		expect(events[0]).toMatchObject({
@@ -75,7 +75,7 @@ describe("project-authored recorded workflow lifecycle", () => {
 		)
 
 		notify.mockClear()
-		await handleStatus(ctx, store, { activeRunId: () => undefined, width: 76 }, runId)
+		await handleStatus(ctx, store, { activeRunIds: () => [], width: 76 }, runId)
 		expect(notify).toHaveBeenCalledTimes(1)
 		const [message, type] = notify.mock.calls[0] as [string, string]
 		expect(message).toContain(workflowFile)

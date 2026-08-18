@@ -10,7 +10,7 @@ import { createFsStore } from "../src/host/fs-store.ts"
 import { createMemoryStore } from "../src/host/memory-store.ts"
 import { workflowsDir } from "../src/host/project-dir.ts"
 import type { RunStore } from "../src/host/types.ts"
-import { createFakeRunLock } from "./helpers.ts"
+import { createFakeActiveRuns } from "./helpers.ts"
 
 type NoteType = "info" | "warning" | "error" | undefined
 
@@ -86,7 +86,7 @@ describe("run identity through the command handlers", () => {
 		const file = await writeFlaky()
 		const spy = notifySpy()
 
-		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, file)
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeActiveRuns(), noAgent, file)
 
 		const runs = await store.list()
 		expect(runs).toHaveLength(1)
@@ -115,12 +115,12 @@ describe("run identity through the command handlers", () => {
 		const spy = notifySpy()
 		const ctx = fakeCtx(projectRoot, spy.notify)
 
-		await handleRun(ctx, store, createFakeRunLock(), noAgent, file)
+		await handleRun(ctx, store, createFakeActiveRuns(), noAgent, file)
 		const runId = (await store.list())[0]?.runId ?? ""
 		expect((await store.list())[0]?.status).toBe("crashed")
 
 		// Typed the way a user would after reading `/workflow run list`: just the tail.
-		await handleResume(ctx, store, createFakeRunLock(), noAgent, runId.slice(-8))
+		await handleResume(ctx, store, createFakeActiveRuns(), noAgent, runId.slice(-8))
 
 		expect((await store.list())[0]).toMatchObject({ runId, status: "completed" })
 	})
@@ -130,13 +130,13 @@ describe("run identity through the command handlers", () => {
 		const spy = notifySpy()
 		const ctx = fakeCtx(projectRoot, spy.notify)
 
-		await handleRun(ctx, store, createFakeRunLock(), noAgent, file)
+		await handleRun(ctx, store, createFakeActiveRuns(), noAgent, file)
 		const run = (await store.list())[0]
 		expect(run?.status).toBe("crashed")
 		spy.notes.length = 0
 		await rm(file)
 
-		await handleResume(ctx, store, createFakeRunLock(), noAgent, run?.runId ?? "")
+		await handleResume(ctx, store, createFakeActiveRuns(), noAgent, run?.runId ?? "")
 
 		expect(spy.notes).toHaveLength(1)
 		expect(spy.notes[0]?.[0]).toContain(`workflow "flaky-demo" cannot resume (run ${run?.runId})`)
@@ -151,12 +151,12 @@ describe("run identity through the command handlers", () => {
 		const spy = notifySpy()
 		const ctx = fakeCtx(projectRoot, spy.notify)
 
-		await handleRun(ctx, store, createFakeRunLock(), noAgent, file)
+		await handleRun(ctx, store, createFakeActiveRuns(), noAgent, file)
 		const run = (await store.list())[0]
 		spy.notes.length = 0
 		await writeFile(file, "export default const invalid = ;", "utf8")
 
-		await handleResume(ctx, store, createFakeRunLock(), noAgent, run?.runId ?? "")
+		await handleResume(ctx, store, createFakeActiveRuns(), noAgent, run?.runId ?? "")
 
 		expect(spy.notes).toHaveLength(1)
 		expect(spy.notes[0]?.[0]).toContain(`workflow "flaky-demo" cannot resume (run ${run?.runId})`)
@@ -171,7 +171,7 @@ describe("run identity through the command handlers", () => {
 		const spy = notifySpy()
 		const ctx = fakeCtx(projectRoot, spy.notify)
 
-		await handleRun(ctx, store, createFakeRunLock(), noAgent, file)
+		await handleRun(ctx, store, createFakeActiveRuns(), noAgent, file)
 		const run = (await store.list())[0]
 		spy.notes.length = 0
 		await writeFile(
@@ -187,7 +187,7 @@ describe("run identity through the command handlers", () => {
 			"utf8",
 		)
 
-		await handleResume(ctx, store, createFakeRunLock(), noAgent, run?.runId ?? "")
+		await handleResume(ctx, store, createFakeActiveRuns(), noAgent, run?.runId ?? "")
 
 		expect(spy.notes).toHaveLength(1)
 		expect(spy.notes[0]?.[0]).toContain(`workflow "flaky-demo" cannot resume (run ${run?.runId})`)
@@ -205,7 +205,7 @@ describe("run identity through the command handlers", () => {
 		]
 		for (const event of legacy) await store.appendEvent(event)
 
-		await handleResume(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, "3f2a1c4b-old")
+		await handleResume(fakeCtx(projectRoot, spy.notify), store, createFakeActiveRuns(), noAgent, "3f2a1c4b-old")
 
 		expect(spy.notes[0]?.[0]).toContain("workflow run 3f2a1c4b-old cannot be resumed")
 		expect(spy.notes[0]?.[0]).toContain("does not record the workflow source it came from")
@@ -260,13 +260,13 @@ describe("resolving a run reference in delete", () => {
 	// aborts it rather than trying to cold-cancel a run that is very much alive (spec §6.4).
 	it("cancel aborts the executing run when a prefix resolves to it", async () => {
 		const store = await storeWith("workflow-deploy-1a2b3c4d")
-		const guard = createFakeRunLock()
-		const begun = await guard.begin("workflow-deploy-1a2b3c4d", "/fake/project", store)
+		const activeRuns = createFakeActiveRuns()
+		const execution = activeRuns.start("workflow-deploy-1a2b3c4d")
 		const spy = notifySpy()
 
-		await handleCancel({ ui: { notify: spy.notify } }, guard, store, "workflow-dep")
+		await handleCancel({ ui: { notify: spy.notify } }, activeRuns, store, "workflow-dep")
 
-		expect(begun.ok && begun.controller.signal.aborted).toBe(true)
+		expect(execution.controller.signal.aborted).toBe(true)
 		expect(spy.notes[0]?.[0]).toMatch(/cancelling run workflow-deploy-1a2b3c4d at the next step boundary/)
 	})
 })

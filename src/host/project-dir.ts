@@ -74,7 +74,7 @@ export function projectDir(projectRoot: string, app: string = appName()): string
 	return path.join(projectRoot, `.${app}`)
 }
 
-/** The directory a project's authored workflows live in — and the one the run lock sits in (spec §7.2). */
+/** The directory containing a project's authored workflows (spec §6.8). */
 export function workflowsDir(projectRoot: string, app: string = appName()): string {
 	return path.join(projectDir(projectRoot, app), "workflows")
 }

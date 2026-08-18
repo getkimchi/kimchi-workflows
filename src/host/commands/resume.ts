@@ -8,35 +8,25 @@
  * loop.
  */
 import { resumeWorkflow } from "../../engine/resume-workflow.ts"
+import type { ActiveRuns } from "../active-runs.ts"
 import { missingWorkflowProvenance, recordedWorkflowLoadFailure } from "../failure-messages.ts"
 import { createHostPort } from "../host-port.ts"
 import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
 import { loadRecordedWorkflow, workflowSourceLabel, workflowSourceOf } from "../recorded-workflow.ts"
 import { resumeAction } from "../resume-router.ts"
-import type { RunLock } from "../run-lock.ts"
 import { summarizeRun } from "../summarize-run.ts"
 import type { RunStore } from "../types.ts"
 import { handleAttendedInput, humanInputOf, pendingHumanInput } from "./attended.ts"
-import {
-	type CommandCtx,
-	notifier,
-	rejectIfBusy,
-	reportResult,
-	resolveRunRef,
-	runGuarded,
-	type StartAgent,
-} from "./context.ts"
+import { type CommandCtx, reportResult, resolveRunRef, runTracked, type StartAgent } from "./context.ts"
 
 export async function handleResume(
 	ctx: CommandCtx,
 	store: RunStore,
-	guard: RunLock,
+	activeRuns: ActiveRuns,
 	startAgent: StartAgent,
 	runRef: string,
 	progressFor: ProgressFor = noProgressFor,
 ): Promise<void> {
-	if (rejectIfBusy(ctx, guard, "resuming")) return
-
 	const runId = await resolveRunRef(ctx, store, runRef, "resume")
 	if (!runId) return // unknown or ambiguous — already notified
 
@@ -84,7 +74,7 @@ export async function handleResume(
 			await handleAttendedInput(
 				ctx,
 				store,
-				guard,
+				activeRuns,
 				workflow.name,
 				workflowSource,
 				startAgent,
@@ -96,17 +86,15 @@ export async function handleResume(
 		}
 
 		// rerun: node-atomic re-run (3a/5a). A re-run may itself reach a Q&A step and block → attend it.
-		const result = await runGuarded(guard, runId, ctx.cwd, store, notifier(ctx), (signal) => {
+		const result = await runTracked(activeRuns, runId, store, (signal) => {
 			const host = createHostPort(store, { startAgent, ...progressCallbacks(progress) })
 			return resumeWorkflow(workflow, events, host, { signal })
 		})
-		if (!result) return // guard was busy (race) — already notified
-
 		if (result.status === "blocked") {
 			await handleAttendedInput(
 				ctx,
 				store,
-				guard,
+				activeRuns,
 				workflow.name,
 				workflowSource,
 				startAgent,

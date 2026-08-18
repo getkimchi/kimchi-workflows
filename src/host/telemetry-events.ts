@@ -106,8 +106,8 @@ export interface WorkflowError {
  *
  * `workflow_name` is the author-declared name, unique within a project by convention and not globally
  * namespaced: two projects may each run a `deploy`. It is `""` in exactly one case — a terminal event
- * written for a run whose log this invocation never started or read, which today means the stale-lock
- * reclaim of another session's abandoned run (spec R6). Such an event still carries `run_id`, and the
+ * written for a run whose log this invocation never started or read, such as an event supplied by an
+ * external recovery tool. Such an event still carries `run_id`, and the
  * run's own `run_started` record — published by the session that started it — is what names it.
  *
  * `at` is the event's own ISO timestamp as recorded in the run log, not the moment of publication: the

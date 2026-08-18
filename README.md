@@ -59,6 +59,7 @@ Because the engine owns every transition — and every branch/loop condition is 
 - **Five composable node/step types.** *Function* (a TypeScript function), *Agent* (runs the harness agent tool loop), *Questionnaire* (schema-derived forms), *Interactive* (a workflow-defined, resumable Kimchi UI), and *Nested workflow* (compose a committed workflow).
 - **Deterministic, harness-driven execution.** The engine — not the model — decides transitions. No steering messages or tool calls influence control flow, so runs are reproducible and always reach a terminal state.
 - **Fan-out with a ceiling.** `.parallel([a, b])` runs independent steps at once; `.foreach(body, { concurrency })` iterates a list, sequential by default. A workflow-wide `maxConcurrency` (default 4) caps the whole run, so a wide fan-out can't open twenty model sessions at once.
+- **Unrestricted run concurrency.** Different runs—including multiple instances of the same workflow—may execute concurrently. The host does not lock the project or infer side-effect conflicts from user-authored TypeScript; authors coordinate shared files, branches, resumable sessions, and external resources when needed.
 - **Stop and resume.** Runs are recorded as an append-only JSONL event log alongside the harness's own sessions. `blocked`, `crashed`, and `cancelled` runs all resume from the last checkpoint; `foreach` resumes at the next unprocessed item; a step blocked deep inside a loop resumes back into that iteration with its conversation intact.
 - **Human-in-the-loop when needed, unattended when not.** A workflow with no Q&A steps runs to completion with zero human interaction. A Q&A-capable step *blocks* the run and surfaces its question inline; answering resumes the same agent loop with context intact. Dismissing a question does **not** cancel — the run stays blocked until answered or explicitly cancelled.
 - **Background subagents.** An agent step marked `background: true` runs as a Kimchi subagent — its own context window and tool loop, returning only its structured output.
@@ -132,7 +133,7 @@ Once the extension is registered, these are available in any Kimchi session:
 | --- | --- |
 | `/workflow list` | List the project's workflows: name, file, and description. |
 | `/workflow create` | Turn your goal into an approved behavioral plan, a runnable workflow, and a happy-path test. |
-| `/workflow run <name\|file.ts>` | Start a run, by declared name or by path. Rejected if a run is already executing in this project. |
+| `/workflow run <name\|file.ts>` | Start a run, by declared name or by path. Other runs may execute concurrently. |
 | `/workflow run list` | List runs: id, workflow name, status, current step, pending questions, started/completed times. |
 | `/workflow resume [run-id]` | Continue a `blocked` / `crashed` / `cancelled` run from its last checkpoint. |
 | `/workflow cancel [run-id]` | Stop a run: abort an executing one at the next step boundary, or cancel a blocked one outright. Resumable either way. |

@@ -1,7 +1,7 @@
 /**
  * The `/workflow` command handlers (spec §6), one module per concern:
  *
- *   context    shared types, the single-run guard lifecycle, notification helpers
+ *   context    shared types, non-exclusive execution lifecycle, notification helpers
  *   attended   the inline Q&A loop every blocking command converges on (§10.2)
  *   run        starting runs: `run` and `create` (§6.1, §6.6)
  *   resume     continuing a blocked/stopped run (§6.2)
@@ -20,7 +20,7 @@ export {
 	pendingHumanInput,
 } from "./attended.ts"
 export type { CommandCtx, Notify, NotifyCtx, StartAgent } from "./context.ts"
-export { describe, notifier, notifyResult, rejectIfBusy, reportResult, runGuarded } from "./context.ts"
+export { describe, notifyResult, reportResult, runTracked } from "./context.ts"
 export { handleCancel, handleDelete } from "./lifecycle.ts"
 export { handleListRuns, handleListWorkflows } from "./list.ts"
 export { handleResume } from "./resume.ts"

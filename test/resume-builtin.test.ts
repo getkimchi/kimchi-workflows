@@ -7,7 +7,7 @@ import { handleResume } from "../src/host/commands/index.ts"
 import { createHostPort } from "../src/host/host-port.ts"
 import { createMemoryStore } from "../src/host/memory-store.ts"
 import { BUILTIN_CREATE_WORKFLOW } from "../src/host/recorded-workflow.ts"
-import { createFakeRunLock } from "./helpers.ts"
+import { createFakeActiveRuns } from "./helpers.ts"
 import { scriptedAgent } from "./scripted-agent.ts"
 
 const { loadValidatedWorkflow } = vi.hoisted(() => ({
@@ -76,7 +76,7 @@ describe("built-in create workflow resume", () => {
 			},
 		} as unknown as CommandCtx
 
-		await handleResume(ctx, store, createFakeRunLock(), agent.startAgent as StartAgent, RUN_ID)
+		await handleResume(ctx, store, createFakeActiveRuns(), agent.startAgent as StartAgent, RUN_ID)
 
 		expect(loadValidatedWorkflow).not.toHaveBeenCalled()
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("is still blocked"), "info")
@@ -116,7 +116,7 @@ describe("built-in create workflow resume", () => {
 			},
 		} as unknown as CommandCtx
 
-		await handleResume(ctx, store, createFakeRunLock(), noAgent, RUN_ID)
+		await handleResume(ctx, store, createFakeActiveRuns(), noAgent, RUN_ID)
 
 		expect(loadValidatedWorkflow).not.toHaveBeenCalled()
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("is still blocked"), "info")

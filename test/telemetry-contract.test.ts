@@ -243,7 +243,7 @@ describe("correlation attributes (spec R4)", () => {
 	})
 
 	it("reports an unnamed workflow rather than guessing, for a run this invocation never saw start", () => {
-		// The stale-lock reclaim (spec R6): another session's run recorded crashed from here. `run_id` still
+		// Another session's run recorded crashed from here. `run_id` still
 		// joins it to the `run_started` that session published.
 		const mapped = createTelemetryMapper().observe(SAMPLES["run-crashed"])
 

@@ -57,13 +57,11 @@ describe("discoverWorkflows", () => {
 		expect(entries[0]?.filePath).toBe(path.join(workflowsDir(root), "alpha.workflow.ts"))
 	})
 
-	// The directory is a SOURCE directory now — run logs and step sessions live with the harness's
-	// sessions (project-dir.ts) — but discovery still filters, so the lock and an author's own helpers
-	// and notes are never imported.
-	it("ignores the run lock and anything without the .workflow.ts suffix", async () => {
+	// The directory is a SOURCE directory — run logs and step sessions live with the harness's sessions
+	// (project-dir.ts) — but discovery still filters, so an author's helpers and notes are never imported.
+	it("ignores anything without the .workflow.ts suffix", async () => {
 		const root = await project({
 			"real.workflow.ts": workflowSource("real"),
-			".run.lock": '{"runId":"workflow-real-1a2b3c4d"}',
 			"helper.ts": "export const notAWorkflow = 1;",
 			"notes.md": "# scratch",
 		})

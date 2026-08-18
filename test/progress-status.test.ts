@@ -66,7 +66,7 @@ function fakeCtx(mode: ProgressMode, sessionDir = "/tmp/session") {
 		},
 		sessionManager: { getSessionDir: () => sessionDir },
 	} as unknown as CommandCtx & ProgressCtx
-	return { ctx, notes, deps: { activeRunId: () => undefined, width: 76 } }
+	return { ctx, notes, deps: { activeRunIds: () => [], width: 76 } }
 }
 
 /** Run the real workflow off a real file, and return the store its log landed in. */
@@ -203,12 +203,29 @@ describe("handleStatus (progress §11.4)", () => {
 		expect(h.notes[0]?.[0]).toContain("no run is executing")
 	})
 
-	it("with no argument, shows whatever the project lock says is executing (spec §7)", async () => {
+	it("with no argument, shows the sole local execution", async () => {
 		const { store } = await recordedRun()
 		const h = fakeCtx("tui")
-		await handleStatus(h.ctx, store, { ...h.deps, activeRunId: () => "workflow-audit-1a2b3c4d" }, undefined)
+		await handleStatus(h.ctx, store, { ...h.deps, activeRunIds: () => ["workflow-audit-1a2b3c4d"] }, undefined)
 		expect(h.notes).toHaveLength(1)
 		expect(h.notes[0]?.[0]).toContain("✓ collect")
+	})
+
+	it("with no argument, requires a run id when several local executions are active", async () => {
+		const { store } = await recordedRun()
+		const h = fakeCtx("tui")
+		await handleStatus(
+			h.ctx,
+			store,
+			{ ...h.deps, activeRunIds: () => ["workflow-audit-1a2b3c4d", "workflow-other-deadbeef"] },
+			undefined,
+		)
+		expect(h.notes).toEqual([
+			[
+				"workflow: 2 runs are executing (workflow-audit-1a2b3c4d, workflow-other-deadbeef); pass a run-id to show one.",
+				"warning",
+			],
+		])
 	})
 
 	it("refuses a log with no run-meta rather than rendering a tree it cannot verify", async () => {
