@@ -39,6 +39,13 @@ const sourceReferenceSchema = Type.Object({
 	explanation: Type.String(),
 })
 
+const experimentSchema = Type.Object({
+	question: Type.String(),
+	method: Type.String(),
+	result: Type.String(),
+	conclusion: Type.String(),
+})
+
 export const codeAssessmentSchema = Type.Object({
 	repositoryPath: Type.String(),
 	outcome: Type.Union([
@@ -48,6 +55,14 @@ export const codeAssessmentSchema = Type.Object({
 		Type.Literal("inconclusive"),
 	]),
 	summary: Type.String(),
+	method: Type.Array(Type.String()),
+	reproduction: Type.Optional(Type.String()),
+	measurements: Type.Array(Type.String()),
+	executionPath: Type.Array(Type.String()),
+	experiments: Type.Array(experimentSchema),
+	rootCause: Type.Optional(Type.String()),
+	secondaryFindings: Type.Array(Type.String()),
+	suggestedFixes: Type.Array(Type.String()),
 	references: Type.Array(sourceReferenceSchema),
 	limitations: Type.Array(Type.String()),
 })
@@ -55,9 +70,13 @@ export const codeAssessmentSchema = Type.Object({
 export const reportDraftSchema = Type.Object({
 	classification: Type.Union([Type.Literal("bug"), Type.Literal("support"), Type.Literal("inconclusive")]),
 	title: Type.String({ minLength: 1, maxLength: 120 }),
-	what: Type.String({ minLength: 1, maxLength: 1200 }),
-	description: Type.Optional(Type.String({ minLength: 1, maxLength: 2000 })),
-	codeFinding: Type.String({ minLength: 1, maxLength: 800 }),
+	what: Type.String({ minLength: 1, maxLength: 2_000 }),
+	description: Type.String({
+		minLength: 1,
+		maxLength: 30_000,
+		description:
+			"Detailed Markdown investigation; structure it according to the evidence rather than a fixed template.",
+	}),
 })
 
 const writtenReportSchema = Type.Object({
@@ -138,14 +157,14 @@ questions. Otherwise, submit a factual evidence brief. Do not classify the case 
 
 const verifyAgainstCode = createAgentStep({
 	name: "verify-against-code",
-	description: "Trace the reported behavior through the relevant Kimchi implementation",
+	description: "Reproduce, measure, and trace the reported behavior to its root cause",
 	input: evidenceInvestigationSchema,
 	output: codeAssessmentSchema,
 	asks: true,
 	prompt: ({ input, ctx }) => {
 		const located = ctx.getStepResult<Static<typeof evidenceDirectorySchema>>("locate-evidence-directory")
 		if (!located) throw new Error("verify-against-code: evidence directory was not resolved")
-		return `Verify the evidence below against the Kimchi codebase.
+		return `Investigate the root cause of the reported Kimchi behavior.
 
 EVIDENCE BRIEF:
 ${JSON.stringify(input, null, 2)}
@@ -156,29 +175,50 @@ ${located.evidenceDirectory}
 Locate the local repository whose identity and source show that it is the getkimchi/kimchi codebase. Check the current
 working directory, the evidence directory's ancestors and siblings, and other clearly relevant nearby paths. If no
 repository can be identified reliably, or several candidates are materially ambiguous, ask the user for its path.
-Do not clone, fetch, switch branches, edit files, or run commands that mutate the repository.
+Do not clone, fetch, switch branches, install dependencies, implement a fix, or alter the user's working tree. Prefer
+read-only diagnostics. You may run the product and existing diagnostics or tests. If a build, generated artifact, or
+temporary source instrumentation is needed, use an isolated temporary directory or worktree and leave the original
+repository and all user changes untouched. Never clean, reset, stash, or revert the user's repository. Keep any
+requests to report-implicated services read-only and low-volume, and never print credentials or secrets.
 
-Read applicable repository instructions first. Trace the specific reported behavior through source, tests,
-configuration, and documentation. Prefer a concrete control/data path over keyword similarity. Account for version or
-revision mismatches when the evidence identifies a different Kimchi version.
+Read applicable repository instructions first. The supplied artifacts are the starting point, not the limit of the
+investigation. Do not conclude that evidence is insufficient merely because the reporter supplied no logs, timings, or
+reproduction. Whenever safe and technically possible, create the missing evidence yourself:
+- reproduce the symptom from the user-visible boundary and define a measurable success or failure signal;
+- run multiple samples and compare relevant conditions instead of relying on one observation;
+- trace the complete control and data path through source, tests, configuration, and documentation;
+- instrument suspected phases when static inspection cannot isolate the behavior;
+- form competing hypotheses and actively try to falsify the leading explanation;
+- distinguish direct observations, measurements, source-backed facts, inferences, and remaining speculation; and
+- record the relevant commands, environment, versions, sample sizes, results, and limitations.
 
-Use "confirms-bug" only when the implementation contains a concrete mechanism that accounts for the observed symptom
-and the behavior is inconsistent with the intended contract. Use "explains-expected-behavior" when the code or docs
-show that the report is expected or answerable as support. Use "does-not-confirm-bug" when the available source does
-not substantiate a suspected defect, and "inconclusive" when access, version, or evidence limitations prevent a sound
-decision. Cite concise repository-relative paths and line numbers where possible.`
+For latency or resource-usage reports, measure the end-to-end user-visible cost and the individual phases. Compare cold
+and warm state, enabled and disabled components, network and local work, and installed and source builds when relevant.
+Identify the dominant cause before investigating secondary contributors. Do not mistake correlation, a matching source
+path, or an intentional timeout for a demonstrated root cause. Account for version or revision mismatches when the
+evidence identifies a different Kimchi version.
+
+Use "confirms-bug" only when the investigation establishes the observed symptom and a concrete unintended mechanism
+that accounts for it. Use "explains-expected-behavior" when the implementation or documentation shows that the report
+is expected or answerable as support. Use "does-not-confirm-bug" only after a reasonable reproduction attempt and
+source trace do not substantiate the suspected defect. Use "inconclusive" only after documenting the experiments
+attempted and the concrete blocker to a sound decision.
+
+Return a detailed investigation record. Preserve measurements, the execution path, experiments including disproved
+hypotheses, the root cause or best-supported diagnosis, secondary findings, suggested fixes, limitations, and concise
+repository-relative source references with line numbers where possible.`
 	},
 })
 
 const draftReport = createAgentStep({
 	name: "draft-report",
-	description: "Classify the case and draft only the concise report content the evidence supports",
+	description: "Turn the evidence and root-cause investigation into an actionable engineering report",
 	input: codeAssessmentSchema,
 	output: reportDraftSchema,
 	prompt: ({ input, ctx }) => {
 		const evidence = ctx.getStepResult<Static<typeof evidenceInvestigationSchema>>("investigate-evidence")
 		if (!evidence) throw new Error("draft-report: evidence investigation produced no result")
-		return `Classify this Kimchi investigation and draft a restrained Markdown report.
+		return `Classify this Kimchi investigation and write an actionable, standalone engineering report.
 
 EVIDENCE:
 ${JSON.stringify(evidence, null, 2)}
@@ -192,14 +232,27 @@ Classify as:
   confirm its mechanism; or
 - "inconclusive" when neither conclusion is responsibly supported.
 
-For every classification, truthfully summarize the source result in codeFinding without turning an inconclusive or
-negative assessment into a confirmation claim. The deterministic renderer, not this draft, derives whether code
-inspection confirmed a bug directly from the code assessment outcome.
+Return a concise title, a short standalone "what" summary, and a detailed Markdown description. Do not repeat the title
+or "what" inside the description. Optimize for helping an engineer reproduce, understand, and fix the problem, not for
+brevity. Preserve concrete measurements, causal reasoning, source references, unsuccessful experiments, and
+uncertainty. Never turn an inconclusive or negative assessment into a confirmation claim.
 
-Write a concise title and a short "what" explanation. Add description only when context beyond "what" is genuinely
-useful. Do not create headings, evidence inventories, confidence tables, investigation sections, recommendations, or
-boilerplate inside these fields. Do not put the required code-confirmation sentence into them: the deterministic
-renderer adds it exactly once for bug reports.`
+Include when applicable:
+- a summary and user impact;
+- environment and relevant versions;
+- steps to reproduce, or the reproduction attempts and their outcome;
+- expected and actual behavior;
+- the investigation method and measured timeline or observations;
+- the execution path and root cause, or the best-supported diagnosis with its confidence;
+- alternative hypotheses tested or ruled out;
+- secondary contributors;
+- suggested fixes and workarounds; and
+- limitations, remaining questions, and the next evidence needed.
+
+The description has no required internal template. Use Markdown subheadings and tables only where they improve clarity.
+Include exact values and representative samples rather than vague adjectives. Omit topics that truly do not apply, but
+do not discard useful detail merely to keep the report short. For an inconclusive result, make the completed
+investigation and concrete blocker explicit.`
 	},
 })
 
@@ -216,7 +269,7 @@ const writeReport = createStep({
 		if (!assessment) throw new Error("write-report: code assessment was not found")
 		const directory = await canonicalDirectory(located.evidenceDirectory)
 
-		const markdown = renderInvestigationReport(input, assessment.outcome)
+		const markdown = renderInvestigationReport(input)
 		const { reportPath, reused } = await writeInvestigationReport(directory, input.title, markdown)
 		logger.info(
 			reused
@@ -235,24 +288,11 @@ const announceReport = createAgentStep({
 Kimchi investigation report written to: ${input.reportPath}`,
 })
 
-export function renderInvestigationReport(draft: ReportDraft, codeOutcome: CodeAssessment["outcome"]): string {
+export function renderInvestigationReport(draft: ReportDraft): string {
 	const title = singleLine(draft.title) || "Kimchi investigation"
 	const what = withoutHeadings(draft.what)
-	const sections = [`# ${title}`, "", "## What", "", what]
-
-	if (draft.classification === "bug") {
-		const finding = singleParagraph(draft.codeFinding)
-		sections.push(
-			"",
-			codeOutcome === "confirms-bug"
-				? `Code inspection confirms this bug. ${finding}`
-				: `Code inspection did not confirm this bug, which weakens the evidence that it is a product bug. ${finding}`,
-		)
-	}
-
-	const description = draft.description ? withoutHeadings(draft.description) : ""
-	if (description) sections.push("", "## Description", "", description)
-	return `${sections.join("\n").trim()}\n`
+	const description = withoutLeadingTitle(draft.description)
+	return `# ${title}\n\n## What\n\n${what}\n\n## Description\n\n${description}\n`
 }
 
 async function canonicalDirectory(value: string): Promise<string> {
@@ -315,8 +355,11 @@ function singleLine(value: string): string {
 		.trim()
 }
 
-function singleParagraph(value: string): string {
-	return value.replace(/\s+/g, " ").trim()
+function withoutLeadingTitle(value: string): string {
+	return value
+		.trim()
+		.replace(/^#\s+[^\r\n]+(?:\r?\n)+/, "")
+		.trim()
 }
 
 function withoutHeadings(value: string): string {
