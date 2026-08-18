@@ -141,7 +141,7 @@ Once the extension is registered, these are available in any Kimchi session:
 
 > **Listing imports every workflow.** `/workflow list` reads each file's declared name by importing it, which executes project code — the same trust boundary `.kimchi/extensions/` sits behind. Keep workflow modules free of import-time side effects: define the workflow, export it, do nothing else.
 
-An executing run can be cancelled only by the process that owns its live lease. A command from another process is refused with the owner host and PID; it is not forwarded through a mailbox. If a same-host owner is provably dead, the next workflow command reconciles the run as `crashed` rather than pretending it was cancelled. Cross-host ownership remains conservative because local code cannot verify the remote process.
+An executing run can be cancelled only by the process that owns its live lease. A command from another process is refused with the owner host and PID; it is not forwarded through a mailbox. Read-only `run list` and `status` commands project a same-host owner that is provably dead as `crashed` without changing the JSONL. A later `resume`, `cancel`, or `delete` of that run persists the crash and retires its stale lease before continuing. Cross-host ownership remains conservative because local code cannot verify the remote process.
 
 ---
 

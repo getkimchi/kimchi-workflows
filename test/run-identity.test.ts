@@ -10,7 +10,7 @@ import { createFsStore } from "../src/host/fs-store.ts"
 import { createMemoryStore } from "../src/host/memory-store.ts"
 import { workflowsDir } from "../src/host/project-dir.ts"
 import type { RunStore } from "../src/host/types.ts"
-import { createFakeActiveRuns } from "./helpers.ts"
+import { createFakeActiveRuns, fakeRunLease } from "./helpers.ts"
 
 type NoteType = "info" | "warning" | "error" | undefined
 
@@ -267,7 +267,7 @@ describe("resolving a run reference in delete", () => {
 	it("cancel aborts the executing run when a prefix resolves to it", async () => {
 		const store = await storeWith("workflow-deploy-1a2b3c4d")
 		const activeRuns = createFakeActiveRuns()
-		const execution = activeRuns.start("workflow-deploy-1a2b3c4d")
+		const execution = activeRuns.start(fakeRunLease("workflow-deploy-1a2b3c4d"))
 		const spy = notifySpy()
 
 		await handleCancel({ ui: { notify: spy.notify } }, activeRuns, store, "workflow-dep")

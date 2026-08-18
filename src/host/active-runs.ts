@@ -2,7 +2,6 @@
  * Process-local half of execution ownership. Different run ids may overlap; one run id may have only
  * one execution in this process. The durable store lease enforces that same rule across processes.
  */
-import { createProcessExecutionOwner, createRunExecutionLease } from "./run-lease.ts"
 import type { RunExecutionLease } from "./types.ts"
 
 export interface ActiveRun {
@@ -22,7 +21,7 @@ export interface ActiveRuns {
 	/** Every execution currently owned by this process, in start order. */
 	readonly active: readonly ActiveRun[]
 	/** Register an acquired execution. Rejects a duplicate execution of the same run id. */
-	start(lease: RunExecutionLease | string): ActiveRun
+	start(lease: RunExecutionLease): ActiveRun
 	/** Remove this exact execution. */
 	finish(run: ActiveRun): void
 	/** The local execution of `runId` (an array for compatibility with existing resolution code). */
@@ -36,8 +35,7 @@ export function createActiveRuns(): ActiveRuns {
 		get active() {
 			return [...active]
 		},
-		start(candidate) {
-			const lease = typeof candidate === "string" ? createRunExecutionLease(candidate, fallbackOwner) : candidate
+		start(lease) {
 			if ([...active].some((run) => run.runId === lease.runId)) {
 				throw new Error(`run ${lease.runId} already has an execution in this process`)
 			}
@@ -96,5 +94,3 @@ export function createActiveRuns(): ActiveRuns {
 		},
 	}
 }
-
-const fallbackOwner = createProcessExecutionOwner()

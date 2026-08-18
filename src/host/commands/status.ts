@@ -28,6 +28,7 @@ import { render } from "../../progress/render.ts"
 import { missingWorkflowProvenance, recordedWorkflowLoadFailure, workflowFailureLine } from "../failure-messages.ts"
 import { runIdHash } from "../naming.ts"
 import type { ProgressCtx } from "../progress-sink.ts"
+import { projectRunEvents } from "../reconcile-runs.ts"
 import { loadRecordedWorkflow, workflowSourceLabel, workflowSourceOf } from "../recorded-workflow.ts"
 import type { RunStore } from "../types.ts"
 import { type CommandCtx, resolveRunRef } from "./context.ts"
@@ -61,7 +62,11 @@ export async function handleStatus(
 		return void ctx.ui.notify("workflow: no run is executing; pass a run-id to show a recorded one.", "info")
 	}
 
-	const events = await store.loadEvents(runId)
+	const active = new Set(activeRunIds)
+	const events = await projectRunEvents(store, runId, {
+		isActive: (candidate) => active.has(candidate),
+		now: deps.now,
+	})
 	if (events.length === 0) return void ctx.ui.notify(`workflow: run "${runId}" has no recorded events.`, "error")
 
 	const workflowSource = workflowSourceOf(events)

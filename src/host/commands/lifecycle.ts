@@ -6,7 +6,7 @@
  */
 
 import type { ActiveRun, ActiveRuns } from "../active-runs.ts"
-import { reconcileAbandonedRuns } from "../reconcile-runs.ts"
+import { reconcileAbandonedRun } from "../reconcile-runs.ts"
 import type { RunStatus } from "../resume-router.ts"
 import { summarizeRun } from "../summarize-run.ts"
 import type { RunStore } from "../types.ts"
@@ -85,8 +85,6 @@ export async function handleCancel(
 		}
 	}
 
-	await reconcileAbandonedRuns(store, activeRuns)
-
 	const runId = runRef ? await resolveRunRef(ctx, store, runRef, "cancel") : await soleBlockedRun(store)
 	if (runRef && !runId) return // unknown or ambiguous — already notified
 	// A hash/prefix that resolves to locally executing work means the same thing as its full id.
@@ -102,6 +100,10 @@ export async function handleCancel(
 		)
 		return
 	}
+
+	await reconcileAbandonedRun(store, runId, (candidate) => activeRuns.find(candidate).length > 0)
+	const activeAfterRecovery = activeRuns.find(runId)
+	if (activeAfterRecovery.length > 0) return cancelActive(activeAfterRecovery, runId)
 
 	const events = await store.loadEvents(runId)
 	const status = summarizeRun(events)?.status
@@ -149,6 +151,7 @@ async function soleBlockedRun(store: Pick<RunStore, "list">): Promise<string | u
 export async function handleDelete(ctx: NotifyCtx, store: RunStore, runRef: string): Promise<void> {
 	const runId = await resolveRunRef(ctx, store, runRef, "delete")
 	if (!runId) return // unknown or ambiguous — already notified
+	await reconcileAbandonedRun(store, runId)
 
 	const status = summarizeRun(await store.loadEvents(runId))?.status
 	if (!status) return void ctx.ui.notify(`workflow: no run "${runId}" to delete.`, "error")

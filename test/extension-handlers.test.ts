@@ -17,7 +17,7 @@ import {
 import { workflowsDir } from "../src/host/project-dir.ts"
 import { summarizeRun } from "../src/host/summarize-run.ts"
 import type { RunStore, RunSummary } from "../src/host/types.ts"
-import { createFakeActiveRuns, createTestHost } from "./helpers.ts"
+import { createFakeActiveRuns, createTestHost, fakeRunLease } from "./helpers.ts"
 
 type NoteType = "info" | "warning" | "error" | undefined
 function notifySpy() {
@@ -220,7 +220,7 @@ async function storeWithRun(kind: "blocked" | "completed"): Promise<{ store: Run
 describe("handleCancel", () => {
 	it("aborts the executing run", async () => {
 		const activeRuns = createFakeActiveRuns()
-		const execution = activeRuns.start("live")
+		const execution = activeRuns.start(fakeRunLease("live"))
 		const spy = notifySpy()
 		const { store } = await storeWithRun("blocked")
 
@@ -232,8 +232,8 @@ describe("handleCancel", () => {
 
 	it("requires a run id when several local runs are executing", async () => {
 		const activeRuns = createFakeActiveRuns()
-		const first = activeRuns.start("first")
-		const second = activeRuns.start("second")
+		const first = activeRuns.start(fakeRunLease("first"))
+		const second = activeRuns.start(fakeRunLease("second"))
 		const spy = notifySpy()
 		const { store } = await storeWithRun("blocked")
 

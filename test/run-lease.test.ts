@@ -7,7 +7,7 @@ import { createActiveRuns } from "../src/host/active-runs.ts"
 import { handleCancel, handleDelete, runTracked } from "../src/host/commands/index.ts"
 import { createFsStore, RunExecutionAlreadyOwnedError } from "../src/host/fs-store.ts"
 import { createHostPort } from "../src/host/host-port.ts"
-import { reconcileAbandonedRuns } from "../src/host/reconcile-runs.ts"
+import { projectRunEvents, projectRunSummaries, reconcileAbandonedRun } from "../src/host/reconcile-runs.ts"
 import type { RunExecutionOwner } from "../src/host/types.ts"
 
 const AT = "2026-08-18T12:00:00.000Z"
@@ -85,15 +85,46 @@ describe("durable workflow execution leases", () => {
 			executionOwner: owner("new-owner"),
 			isProcessAlive: () => false,
 		})
-		const reconciled = await reconcileAbandonedRuns(reader, createActiveRuns())
+		const reconciled = await reconcileAbandonedRun(reader, "run-1")
 
-		expect(reconciled).toEqual([{ runId: "run-1", executionId: lease?.executionId }])
+		expect(reconciled).toEqual({ runId: "run-1", executionId: lease?.executionId })
 		expect((await reader.list())[0]?.status).toBe("crashed")
 		expect((await reader.loadEvents("run-1")).at(-1)).toMatchObject({
 			type: "run-crashed",
 			executionId: lease?.executionId,
 		})
 		expect(await reader.executions?.inspect("run-1")).toBeUndefined()
+	})
+
+	it("projects an abandoned run as crashed for reads without repairing its JSONL or lease", async () => {
+		const dir = await tempDir()
+		const writer = createFsStore(dir, { executionOwner: owner("dead-owner", hostname(), 405) })
+		const lease = await writer.executions?.acquire("run-1")
+		await writer.appendEvent({
+			type: "run-execution-started",
+			runId: "run-1",
+			executionId: lease!.executionId,
+			owner: { host: hostname(), pid: 405, processStartedAt: AT },
+			at: AT,
+		})
+		await writer.appendEvent({ type: "run-started", runId: "run-1", workflowName: "demo", input: null, at: AT })
+		await writer.appendEvent({ type: "step-started", runId: "run-1", path: "work", input: null, at: AT })
+
+		const reader = createFsStore(dir, {
+			executionOwner: owner("new-owner"),
+			isProcessAlive: () => false,
+		})
+		const before = await reader.loadEvents("run-1")
+		const projectedEvents = await projectRunEvents(reader, "run-1", { now: () => new Date(AT) })
+		const projectedSummaries = await projectRunSummaries(reader, { now: () => new Date(AT) })
+
+		expect(projectedEvents.at(-1)).toMatchObject({
+			type: "run-crashed",
+			executionId: lease?.executionId,
+		})
+		expect(projectedSummaries[0]?.status).toBe("crashed")
+		expect(await reader.loadEvents("run-1")).toEqual(before)
+		expect(await reader.executions?.inspect("run-1")).toMatchObject({ state: "dead" })
 	})
 
 	it("refuses cancellation from a different live runner and identifies its owner", async () => {

@@ -12,6 +12,7 @@ import type { ActiveRuns } from "../active-runs.ts"
 import { missingWorkflowProvenance, recordedWorkflowLoadFailure } from "../failure-messages.ts"
 import { createHostPort } from "../host-port.ts"
 import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
+import { reconcileAbandonedRun } from "../reconcile-runs.ts"
 import { loadRecordedWorkflow, workflowSourceLabel, workflowSourceOf } from "../recorded-workflow.ts"
 import { resumeAction } from "../resume-router.ts"
 import { summarizeRun } from "../summarize-run.ts"
@@ -29,6 +30,7 @@ export async function handleResume(
 ): Promise<void> {
 	const runId = await resolveRunRef(ctx, store, runRef, "resume")
 	if (!runId) return // unknown or ambiguous — already notified
+	await reconcileAbandonedRun(store, runId, (candidate) => activeRuns.find(candidate).length > 0)
 
 	// The log FIRST, and the workflow source out of it: provenance is a `run-meta` event now (spec §8.9),
 	// not a sidecar, so there is nothing else to consult. A log with no `run-meta` is one this build

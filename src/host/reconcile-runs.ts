@@ -1,65 +1,122 @@
 import type { RunEvent } from "../engine/types.ts"
-import type { ActiveRuns } from "./active-runs.ts"
-import type { RunStore } from "./types.ts"
+import { summarizeRun } from "./summarize-run.ts"
+import type { InspectedRunExecution, RunStore, RunSummary } from "./types.ts"
 
 export interface ReconciledRun {
 	readonly runId: string
 	readonly executionId?: string
 }
 
+type CrashEvent = Extract<RunEvent, { type: "run-crashed" }>
+type IsRunActive = (runId: string) => boolean
+
+interface ProjectableRunStore extends Pick<RunStore, "list"> {
+	readonly executions?: RunStore["executions"]
+	readonly loadEvents?: RunStore["loadEvents"]
+}
+
+interface Abandonment {
+	readonly crash: CrashEvent
+	readonly inspected?: InspectedRunExecution
+}
+
 /**
- * Turn unverifiable `in_progress` history into an explicit crash.
+ * Build the read-only view of one run's history.
+ *
+ * A provably dead/missing local executor is projected as `crashed`, but the synthetic terminal is not
+ * appended. `/workflow run list` and `/workflow status` can therefore stop displaying ghost
+ * `in_progress` runs without making observation a state-changing operation.
+ */
+export async function projectRunEvents(
+	store: Pick<RunStore, "loadEvents" | "executions">,
+	runId: string,
+	options: { readonly isActive?: IsRunActive; readonly now?: () => Date } = {},
+): Promise<RunEvent[]> {
+	const events = await store.loadEvents(runId)
+	const abandonment = await inspectAbandonment(store, runId, events, options.isActive, options.now)
+	return abandonment ? [...events, abandonment.crash] : events
+}
+
+/** Read-only summaries with the same abandoned-run projection used by `/workflow status`. */
+export async function projectRunSummaries(
+	store: ProjectableRunStore,
+	options: { readonly isActive?: IsRunActive; readonly now?: () => Date } = {},
+): Promise<RunSummary[]> {
+	const summaries = await store.list()
+	const { executions, loadEvents } = store
+	if (!executions || !loadEvents) return summaries
+
+	return Promise.all(
+		summaries.map(async (summary) => {
+			if (summary.status !== "in_progress") return summary
+			const events = await projectRunEvents({ executions, loadEvents }, summary.runId, options)
+			return summarizeRun(events) ?? summary
+		}),
+	)
+}
+
+/**
+ * Durably reconcile one run immediately before a lifecycle mutation acts on it.
  *
  * Only a locally provable dead owner is reclaimed. A live PID and every foreign-host lease remain
- * authoritative; cross-host liveness is intentionally outside this package's contract. Logs written
- * before execution leases existed are reconciled when no execution in this process owns their run id.
+ * authoritative; cross-host liveness is intentionally outside this package's contract. A legacy
+ * `in_progress` log with no lease is also abandoned when this store supports execution inspection.
  */
-export async function reconcileAbandonedRuns(store: RunStore, activeRuns: ActiveRuns): Promise<ReconciledRun[]> {
+export async function reconcileAbandonedRun(
+	store: RunStore,
+	runId: string,
+	isActive: IsRunActive = () => false,
+): Promise<ReconciledRun | undefined> {
 	const executions = store.executions
-	if (!executions) return []
+	if (!executions || isActive(runId)) return undefined
 
-	const summaries = await store.list()
-	const leases = new Map((await executions.list()).map((execution) => [execution.lease.runId, execution]))
-	const reconciled: ReconciledRun[] = []
+	const events = await store.loadEvents(runId)
+	const summary = summarizeRun(events)
+	const inspected = await executions.inspect(runId)
 
-	for (const summary of summaries) {
-		if (activeRuns.find(summary.runId).length > 0) continue
-		const inspected = leases.get(summary.runId)
-
-		if (summary.status === "in_progress") {
-			if (inspected && inspected.state !== "dead") continue
-			const events = await store.loadEvents(summary.runId)
-			const executionId = inspected?.lease.executionId ?? latestExecutionId(events)
-			const owner = inspected?.lease.owner
-			const recordCrash = () =>
-				store.appendEvent({
-					type: "run-crashed",
-					runId: summary.runId,
-					executionId,
-					error: owner
-						? `workflow executor PID ${owner.pid} on ${owner.host} exited without recording a terminal event`
-						: "workflow executor disappeared without an execution lease or terminal event",
-					at: new Date().toISOString(),
-				})
-			let recorded = true
-			if (inspected) recorded = await executions.retire(inspected.lease, recordCrash)
-			else await recordCrash()
-			if (recorded) reconciled.push({ runId: summary.runId, executionId })
-			continue
-		}
-
-		// A process may die after its terminal event was flushed but before the finally block removed the
-		// lease. The terminal history already says what happened; only the stale coordination state goes.
-		if (inspected?.state === "dead") await executions.release(inspected.lease)
+	if (summary?.status === "in_progress") {
+		const abandonment = await inspectAbandonment(store, runId, events, isActive, () => new Date(), inspected)
+		if (!abandonment) return undefined
+		const recordCrash = () => store.appendEvent(abandonment.crash)
+		let recorded = true
+		if (abandonment.inspected) recorded = await executions.retire(abandonment.inspected.lease, recordCrash)
+		else await recordCrash()
+		return recorded ? { runId, executionId: abandonment.crash.executionId } : undefined
 	}
 
-	// Clean dead leases whose owner failed before `run-started` made the partial log listable.
-	const known = new Set(summaries.map((summary) => summary.runId))
-	for (const inspected of leases.values()) {
-		if (!known.has(inspected.lease.runId) && inspected.state === "dead") await executions.release(inspected.lease)
-	}
+	// A process may die after its terminal event was flushed but before its finally block removed the
+	// lease. The terminal history already says what happened; only stale coordination state remains.
+	if (inspected?.state === "dead") await executions.release(inspected.lease)
+	return undefined
+}
 
-	return reconciled
+async function inspectAbandonment(
+	store: Pick<RunStore, "executions">,
+	runId: string,
+	events: readonly RunEvent[],
+	isActive: IsRunActive = () => false,
+	now: () => Date = () => new Date(),
+	knownInspection?: InspectedRunExecution,
+): Promise<Abandonment | undefined> {
+	const executions = store.executions
+	if (!executions || isActive(runId) || summarizeRun(events)?.status !== "in_progress") return undefined
+
+	const inspected = knownInspection ?? (await executions.inspect(runId))
+	if (inspected && inspected.state !== "dead") return undefined
+	const executionId = inspected?.lease.executionId ?? latestExecutionId(events)
+	const owner = inspected?.lease.owner
+	return {
+		inspected,
+		crash: {
+			type: "run-crashed",
+			runId,
+			executionId,
+			error: owner
+				? `workflow executor PID ${owner.pid} on ${owner.host} exited without recording a terminal event`
+				: "workflow executor disappeared without an execution lease or terminal event",
+			at: now().toISOString(),
+		},
+	}
 }
 
 export function latestExecutionId(events: readonly RunEvent[]): string | undefined {

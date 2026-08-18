@@ -38,6 +38,7 @@ export interface FsStoreOptions {
 // invocations. Queue by absolute file path at module scope so their appends still have one in-process
 // order: cancellation can flush behind every already-accepted event before it aborts the executor.
 const fileTails = new Map<string, Promise<void>>()
+const MAX_LEASE_RACE_RETRIES = 3
 
 function serialize(filePath: string, work: () => Promise<void>): Promise<void> {
 	const previous = fileTails.get(filePath) ?? Promise.resolve()
@@ -103,105 +104,104 @@ export function createFsStore(dir: string, options: FsStoreOptions = {}): RunSto
 		return events
 	}
 
-	const executions: RunExecutionStore | undefined = options.executionOwner
-		? {
-				async acquire(runId: string): Promise<RunExecutionLease> {
-					await ensureDir()
-					const lease = createRunExecutionLease(
-						runId,
-						options.executionOwner as RunExecutionOwner,
-						options.now,
-						options.generateExecutionId,
-					)
-					try {
-						await writeFile(leaseFilePath(runId), `${JSON.stringify(lease)}\n`, { encoding: "utf8", flag: "wx" })
-						return lease
-					} catch (error) {
-						if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
-						const existing = await executions?.inspect(runId)
-						if (existing) throw new RunExecutionAlreadyOwnedError(existing)
-						// The owner released between our exclusive-create failure and inspection. Retry once;
-						// another winner still produces the same precise ownership error.
-						return executions?.acquire(runId) as Promise<RunExecutionLease>
-					}
-				},
-				async inspect(runId: string): Promise<InspectedRunExecution | undefined> {
-					let lease: RunExecutionLease
-					try {
-						lease = JSON.parse(await readFile(leaseFilePath(runId), "utf8")) as RunExecutionLease
-					} catch (error) {
-						if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
-						throw error
-					}
-					if (
-						lease.version !== 1 ||
-						lease.runId !== runId ||
-						typeof lease.executionId !== "string" ||
-						typeof lease.acquiredAt !== "string" ||
-						typeof lease.owner?.ownerId !== "string" ||
-						typeof lease.owner.host !== "string" ||
-						!Number.isInteger(lease.owner.pid) ||
-						lease.owner.pid <= 0 ||
-						typeof lease.owner.processStartedAt !== "string"
-					) {
-						throw new Error(`invalid workflow execution lease ${leaseFilePath(runId)}`)
-					}
-					if (lease.owner.ownerId === options.executionOwner?.ownerId) return { lease, state: "owned" }
-					if (lease.owner.host !== hostname()) return { lease, state: "foreign" }
-					const alive = await (options.isProcessAlive ?? isLocalProcessAlive)(lease.owner)
-					return { lease, state: alive ? "live" : "dead" }
-				},
-				async list(): Promise<InspectedRunExecution[]> {
-					const entries = await readdir(dir).catch(() => [] as string[])
-					const found: InspectedRunExecution[] = []
-					for (const entry of entries) {
-						if (!entry.endsWith(RUN_LEASE_SUFFIX)) continue
-						const runId = entry.slice(0, -RUN_LEASE_SUFFIX.length)
-						const inspected = await executions?.inspect(runId)
-						if (inspected) found.push(inspected)
-					}
-					return found
-				},
-				async release(lease: RunExecutionLease): Promise<boolean> {
-					return executions?.retire(lease, async () => {}) ?? false
-				},
-				async retire(lease: RunExecutionLease, beforeRelease: () => Promise<void>): Promise<boolean> {
-					const markerPath = retirementFilePath(lease.runId)
-					const marker = {
-						lease,
-						owner: options.executionOwner,
-						at: (options.now ?? (() => new Date()))().toISOString(),
-					}
-					try {
-						await writeFile(markerPath, `${JSON.stringify(marker)}\n`, { encoding: "utf8", flag: "wx" })
-					} catch (error) {
-						if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
-						// A reclaimer can itself crash. Reclaim its marker only when that local process is
-						// provably dead; foreign-host markers remain conservative, like their leases.
-						let existing: { owner?: RunExecutionOwner }
-						try {
-							existing = JSON.parse(await readFile(markerPath, "utf8")) as { owner?: RunExecutionOwner }
-						} catch {
-							return false
-						}
-						if (!existing.owner || existing.owner.host !== hostname()) return false
-						if (await (options.isProcessAlive ?? isLocalProcessAlive)(existing.owner)) return false
-						await rm(markerPath, { force: true })
-						return executions?.retire(lease, beforeRelease) ?? false
-					}
+	let executions: RunExecutionStore | undefined
+	if (options.executionOwner) {
+		const executionOwner = options.executionOwner
+		const processAlive = options.isProcessAlive ?? isLocalProcessAlive
 
-					try {
-						const current = await executions?.inspect(lease.runId)
-						if (!current || !sameLease(current.lease, lease)) return false
-						await beforeRelease()
-						await rm(leaseFilePath(lease.runId), { force: true })
-						return true
-					} finally {
-						await rm(markerPath, { force: true })
-					}
-				},
+		const inspect = async (runId: string): Promise<InspectedRunExecution | undefined> => {
+			let lease: RunExecutionLease
+			try {
+				lease = JSON.parse(await readFile(leaseFilePath(runId), "utf8")) as RunExecutionLease
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+				throw error
 			}
-		: undefined
+			if (
+				lease.version !== 1 ||
+				lease.runId !== runId ||
+				typeof lease.executionId !== "string" ||
+				typeof lease.acquiredAt !== "string" ||
+				typeof lease.owner?.ownerId !== "string" ||
+				typeof lease.owner.host !== "string" ||
+				!Number.isInteger(lease.owner.pid) ||
+				lease.owner.pid <= 0 ||
+				typeof lease.owner.processStartedAt !== "string"
+			) {
+				throw new Error(`invalid workflow execution lease ${leaseFilePath(runId)}`)
+			}
+			if (lease.owner.ownerId === executionOwner.ownerId) return { lease, state: "owned" }
+			if (lease.owner.host !== hostname()) return { lease, state: "foreign" }
+			return { lease, state: (await processAlive(lease.owner)) ? "live" : "dead" }
+		}
+
+		const acquire = async (runId: string): Promise<RunExecutionLease> => {
+			await ensureDir()
+			const lease = createRunExecutionLease(runId, executionOwner, options.now, options.generateExecutionId)
+			for (let retry = 0; retry <= MAX_LEASE_RACE_RETRIES; retry += 1) {
+				try {
+					await writeFile(leaseFilePath(runId), `${JSON.stringify(lease)}\n`, { encoding: "utf8", flag: "wx" })
+					return lease
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+					const existing = await inspect(runId)
+					if (existing) throw new RunExecutionAlreadyOwnedError(existing)
+					if (retry === MAX_LEASE_RACE_RETRIES) {
+						throw new Error(`run ${runId} execution lease changed repeatedly during acquisition; retry the command`)
+					}
+					// The owner released between exclusive-create and inspection. Retry the same execution
+					// identity; another winner still produces the precise ownership error above.
+				}
+			}
+			throw new Error(`run ${runId} execution lease acquisition exhausted unexpectedly`)
+		}
+
+		const retire = async (lease: RunExecutionLease, beforeRelease: () => Promise<void>): Promise<boolean> => {
+			const markerPath = retirementFilePath(lease.runId)
+			const marker = {
+				lease,
+				owner: executionOwner,
+				at: (options.now ?? (() => new Date()))().toISOString(),
+			}
+			for (let retry = 0; retry <= MAX_LEASE_RACE_RETRIES; retry += 1) {
+				try {
+					await writeFile(markerPath, `${JSON.stringify(marker)}\n`, { encoding: "utf8", flag: "wx" })
+					break
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+					// A reclaimer can itself crash. Reclaim its marker only when that local process is
+					// provably dead; foreign-host markers remain conservative, like their leases.
+					let existing: { owner?: RunExecutionOwner }
+					try {
+						existing = JSON.parse(await readFile(markerPath, "utf8")) as { owner?: RunExecutionOwner }
+					} catch {
+						return false
+					}
+					if (!existing.owner || existing.owner.host !== hostname()) return false
+					if (await processAlive(existing.owner)) return false
+					await rm(markerPath, { force: true })
+					if (retry === MAX_LEASE_RACE_RETRIES) return false
+				}
+			}
+
+			try {
+				const current = await inspect(lease.runId)
+				if (!current || !sameLease(current.lease, lease)) return false
+				await beforeRelease()
+				await rm(leaseFilePath(lease.runId), { force: true })
+				return true
+			} finally {
+				await rm(markerPath, { force: true })
+			}
+		}
+
+		executions = {
+			acquire,
+			inspect,
+			retire,
+			release: (lease) => retire(lease, async () => {}),
+		}
+	}
 
 	return {
 		executions,

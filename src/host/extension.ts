@@ -31,7 +31,6 @@ import { createFsStore } from "./fs-store.ts"
 import { createPiAgentBridge } from "./pi-agent.ts"
 import { bindProgress } from "./progress-sink.ts"
 import { runArtifactsDir } from "./project-dir.ts"
-import { reconcileAbandonedRuns } from "./reconcile-runs.ts"
 import { createProcessExecutionOwner } from "./run-lease.ts"
 import { registerStepOutputToolsFromEnv } from "./step-output-tools.ts"
 import { withTelemetry } from "./telemetry-bridge.ts"
@@ -71,7 +70,6 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 			const store = withTelemetry(createFsStore(runDir, { executionOwner }), (channel, data) =>
 				pi.events.emit(channel, data),
 			)
-			await reconcileAbandonedRuns(store, activeRuns)
 			const startAgent = bindAgentStarter(ctx.modelRegistry, runDir, ctx)
 			// The live surface, chosen per invocation from `ctx.mode` (progress §7.2) — the context is what
 			// knows whether there is a terminal to draw in, and it does not exist until a command runs.
@@ -80,7 +78,8 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 			switch (sub) {
 				case "run": {
 					// `list` is reserved as the first argument to `run`, so it can never name a workflow (spec §6.3).
-					if (rest[0] === "list") return void (await handleListRuns(ctx, store))
+					if (rest[0] === "list")
+						return void (await handleListRuns(ctx, store, (runId) => activeRuns.find(runId).length > 0))
 
 					// Re-sliced from the RAW (not `\s+`-collapsed) remainder: `--input`'s own payload is very
 					// often a JSON object containing spaces (spec §6.1), and `rest` above has already thrown that

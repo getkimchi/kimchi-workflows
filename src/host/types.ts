@@ -46,7 +46,6 @@ export interface InspectedRunExecution {
 export interface RunExecutionStore {
 	acquire(runId: string): Promise<RunExecutionLease>
 	inspect(runId: string): Promise<InspectedRunExecution | undefined>
-	list(): Promise<InspectedRunExecution[]>
 	/**
 	 * Exclusively retire this exact lease, running `beforeRelease` while acquisition is still excluded.
 	 * Used by reconciliation so a new execution cannot start between the crash event and stale cleanup.

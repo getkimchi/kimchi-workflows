@@ -7,13 +7,18 @@
  */
 import path from "node:path"
 import { workflowsDir } from "../project-dir.ts"
+import { projectRunSummaries } from "../reconcile-runs.ts"
 import type { RunStore } from "../types.ts"
 import { discoverWorkflows } from "../workflow-catalog.ts"
 import type { NotifyCtx } from "./context.ts"
 
 /** `/workflow run list` — the recorded runs (spec §6.3). */
-export async function handleListRuns(ctx: NotifyCtx, store: Pick<RunStore, "list">): Promise<void> {
-	const runs = await store.list()
+export async function handleListRuns(
+	ctx: NotifyCtx,
+	store: Pick<RunStore, "list"> & Partial<Pick<RunStore, "executions" | "loadEvents">>,
+	isActive: (runId: string) => boolean = () => false,
+): Promise<void> {
+	const runs = await projectRunSummaries(store, { isActive })
 	if (runs.length === 0) return void ctx.ui.notify("No workflow runs recorded.", "info")
 	const lines = runs.map((run) => {
 		// Pending-input count is not decoration (spec §6.3): a run reads `in_progress` while any step
