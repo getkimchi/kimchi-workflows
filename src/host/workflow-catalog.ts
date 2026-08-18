@@ -3,9 +3,8 @@
  *
  * Authored workflows live in `<projectRoot>/.<app>/workflows/` as `*.workflow.ts` (project-dir.ts
  * derives `<app>`), following the harness convention for project resources (`extensions/`, `skills/`,
- * `prompts/` under the same directory). This is now a SOURCE directory and nothing else: run logs and
- * step sessions moved to the harness's session directory (project-dir.ts's `runArtifactsDir`), and the
- * only non-source file left here is the dot-prefixed run lock.
+ * `prompts/` under the same directory). This is a SOURCE directory: run logs and step sessions live in
+ * the harness's session directory (project-dir.ts's `runArtifactsDir`).
  *
  * Listing imports every candidate to read its declared name, which executes trusted project code.
  * Run resolution uses a validated loader instead: semantic TypeScript must pass before any candidate

@@ -1,6 +1,6 @@
 /**
  * The attended human-input loop. Questionnaire collection and workflow-defined interactions converge
- * here, outside the engine and outside the project run lock.
+ * here, outside the engine.
  */
 
 import { parsePath } from "../../engine/node-path.ts"
@@ -13,13 +13,13 @@ import {
 import type { RunEvent, RunResult, WorkflowSource } from "../../engine/types.ts"
 import type { Questionnaire } from "../../flow/questionnaire.ts"
 import type { InteractiveStep, WorkflowDefinition } from "../../flow/types.ts"
+import type { ActiveRuns } from "../active-runs.ts"
 import { createHostPort } from "../host-port.ts"
 import { inertProgress, type ProgressSink, progressCallbacks } from "../progress-sink.ts"
 import { collectAnswers } from "../questionnaire-render.ts"
 import { reloadRecordedWorkflow, workflowSourceLabel } from "../recorded-workflow.ts"
-import type { RunLock } from "../run-lock.ts"
 import type { RunStore } from "../types.ts"
-import { type CommandCtx, describe, notifier, reportResult, runGuarded, type StartAgent } from "./context.ts"
+import { type CommandCtx, describe, reportResult, runTracked, type StartAgent } from "./context.ts"
 
 export interface PendingAsk {
 	readonly kind: "questionnaire"
@@ -39,14 +39,14 @@ export type PendingHumanInput = PendingAsk | PendingInteraction
 /**
  * Render and resolve human-input blocks until the run settles or the user dismisses one.
  *
- * Rendering is intentionally before `runGuarded`: a blocked run owns neither the project lock nor a
- * concurrency slot while a dialog/editor is open. Responses always target the exact path whose input
+ * Rendering is intentionally outside `runTracked`: a blocked run owns no active execution while a
+ * dialog/editor is open. Responses always target the exact path whose input
  * was displayed, including when several concurrent steps are blocked.
  */
 export async function handleAttendedInput(
 	ctx: CommandCtx,
 	store: RunStore,
-	guard: RunLock,
+	activeRuns: ActiveRuns,
 	workflowName: string,
 	workflowSource: WorkflowSource,
 	startAgent: StartAgent,
@@ -102,9 +102,9 @@ export async function handleAttendedInput(
 			return
 		}
 
-		let result: Awaited<ReturnType<typeof runGuarded>>
+		let result: Awaited<ReturnType<typeof runTracked>>
 		try {
-			result = await runGuarded(guard, runId, ctx.cwd, store, notifier(ctx), async (signal) => {
+			result = await runTracked(activeRuns, runId, store, async (signal) => {
 				const workflow = await reloadRecordedWorkflow(workflowSource)
 				const events = await store.loadEvents(runId)
 				const host = createHostPort(store, { startAgent, ...progressCallbacks(progress) })
@@ -119,8 +119,6 @@ export async function handleAttendedInput(
 			ctx.ui.notify(`workflow: ${describe(error)}`, "warning")
 			return
 		}
-		if (!result) return
-
 		if (result.status === "blocked") {
 			pending = humanInputOf(result)
 			continue

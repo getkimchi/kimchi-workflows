@@ -17,9 +17,9 @@ with deterministic, harness-driven transitions and durable, resumable state.
   (§5.2), and an event log.
 - **Session** — the PI session. Runs are recorded in the per-project run store;
   the event log is the source of truth for state, resume, and listing.
-- **Executing run** — at most one run **executes** per project at a time (§7);
-  other runs may coexist blocked or stopped. A run with no Q&A steps runs to
-  completion without human interaction (§10.3).
+- **Executing run** — a run currently doing work. Any number of runs, including
+  instances of the same workflow, may execute concurrently (§7). A run with no Q&A
+  steps runs to completion without human interaction (§10.3).
 - **Engine** — the harness-side executor that drives transitions between steps
   deterministically (§4).
 - **Node path** — the address of a step within a run: enclosing node names, the
@@ -307,8 +307,8 @@ starting a **new** run (fresh run-id), never a transition back. *(decision)*
 6.1. `/workflow run <name|file.ts> [--input <json>|@<file>]` — start a run. The
 argument is resolved as a filesystem path when it ends in `.ts`, otherwise as a
 workflow **name** from the catalog (§6.7). Paths resolve relative to the project
-root. Rejected if another run is executing in this project (§7). *(orig. R3; name
-resolution: decision)*
+root. Other executing runs do not prevent it from starting (§7). *(orig. R3; name
+resolution and unrestricted run concurrency: decision)*
 
   **`--input`** supplies the run's initial input (§3.11): `--input <json>` parses its
   argument as JSON directly; `--input @<path>` reads the file at `<path>` (a relative
@@ -318,8 +318,8 @@ resolution: decision)*
   engine runs on it at the top of `runWorkflow` (§4) — not a second, hand-rolled one
   that could drift from it. Every failure — malformed JSON, an unreadable file, a
   schema violation — is reported and the run is **never started**: no run-id is
-  minted, the project lock (§7.2) is never acquired, and nothing is appended to any
-  run's log. This is deliberately stricter than leaving it to the engine's own check
+  minted and nothing is appended to any run's log. This is deliberately stricter
+  than leaving it to the engine's own check
   alone, which would still catch a bad payload correctly but only after paying for
   all three. Omitting `--input` is `undefined`, exactly as before the flag existed.
   Until this, only `/workflow create` (§6.6) supplied an initial input — its own
@@ -327,8 +327,8 @@ resolution: decision)*
   could not be started from the command surface at all. *(decision)*
 
 6.2. `/workflow resume [run-id]` — recover a `blocked` (with an answer), `crashed`,
-or `cancelled` run, continuing from the last checkpoint (§5.5/§8). Requires that no
-run is executing. A run-id selects among coexisting or earlier-session runs;
+or `cancelled` run, continuing from the last checkpoint (§5.5/§8). Other runs may
+continue executing concurrently. A run-id selects among coexisting or earlier-session runs;
 omittable when exactly one recoverable run exists. *(orig. R7)*
 
 6.3. `/workflow run list` — list runs: run-id, workflow name, started-at,
@@ -345,9 +345,10 @@ not executing (§7.1) and so has no signal to interrupt:
     event log (§5.6, §8.1), which is what makes §10.2's "stopping a blocked run
     requires explicit `/workflow cancel`" actually hold.
 
-  Bare targets the executing run, or — when none is executing — the sole `blocked`
-  run; with several blocked, a run-id is required. Only an executing or `blocked` run
-  can be cancelled; a stopped run is rejected. Cancelled runs stay recoverable via
+  Bare targets the sole execution local to this process, or — when none is executing
+  locally — the sole `blocked` run; with several local executions or blocked runs, a
+  run-id is required. Only an executing or `blocked` run can be cancelled; a stopped
+  run is rejected. Cancelled runs stay recoverable via
   `resume` (§5.5). *(orig. R6; blocked cancel: decision)*
 
 6.5. `/workflow delete <run-id>` — permanently remove a **stopped** run
@@ -358,7 +359,7 @@ removal is always a deliberate second act. *(decision)*
 
 6.6. `/workflow create` — interview the user and generate a new workflow file.
 Implemented as a **meta-workflow** (an ordinary `WorkflowDefinition` shipped with
-the adapter), so it runs through the same guard, event log, and attended Q&A loop
+the adapter), so it runs through the same event log and attended Q&A loop
 as any other run. It receives the project root as its initial input. Shape: a
 questionnaire step gathers the goal and target file name; a Q&A agent step (§10.1)
 asks clarifying batches; a `.dountil` loop presents the plan for Approve/Revise
@@ -377,8 +378,8 @@ Both are settled **immediately after the opening form**, before the interview ru
 because both are knowable as soon as the filename is given. Deferring them to the
 write would spend an interview and a generation round first, and could not be
 recovered: the form is already a completed step, so a resume re-runs the write with
-the same name (§8.2). The guard is re-applied at the write against the filesystem
-as it is then.
+the same name (§8.2). The path and existence checks are repeated immediately before
+the filesystem write.
 
 Validation loads the candidate **from its destination directory**, since imports
 resolve relative to the importing file (§1.4); validating elsewhere rejects every
@@ -395,8 +396,8 @@ rather than omitted. *(decision)*
 6.8. **Workflow catalog.** A project's workflows live in
 `<project>/.<app>/workflows/` as `*.workflow.ts`, where `<app>` is the running
 harness's own name (§8.9); discovery filters on the suffix. The directory holds
-authored sources and the execution lock (§7.2) — never a run's own records, which
-live with the harness's sessions (§8.9).
+authored sources, never a run's own records, which live with the harness's sessions
+(§8.9).
 
 Discovery imports every candidate to read its declared name, so workflow modules
 must have no import-time side effects. Because that executes project code,
@@ -420,40 +421,31 @@ re-parsing `/workflow` lines is therefore unreachable code, not a headless fallb
 this note exists so that fact is not re-derived, and the dead handler is not
 re-added, the next time headless dispatch looks like a gap. *(decision)*
 
-## 7. One executing run per project
+## 7. Concurrent workflow runs
 
-7.1. At most one run is **executing** per project at any time. Runs in other states
-— `blocked`, `crashed`, `cancelled`, `completed` — may coexist and remain listable
-until deleted (§6.5). A `blocked` run does **not** block new work. Concurrency
-*within* a run (§3.4/§3.5) is unaffected by this rule: it bounds runs, not steps.
-*(decision)*
+7.1. The host imposes **no execution exclusivity** by project, workflow definition,
+or run id. `/workflow run` and `/workflow resume` never inspect other executions
+before starting. Runs in every state coexist and remain listable until deleted
+(§6.5); concurrency within each run (§3.4/§3.5) is independent of concurrency between
+runs. *(decision)*
 
-7.2. **The guard is a lock in the project**, not a status read — a status can be
-stale, a lock cannot lie about who holds it. An executing run holds
-`<project>/.<app>/workflows/.run.lock` recording `{ runId, pid, host, startedAt }`.
-It sits with the authored sources (§6.8) rather than with a run's own records
-(§8.9), because "one executing run" is a fact about the *project* and must hold
-whatever session directory a given invocation happens to write to; it is
-dot-prefixed so the authoring directory still lists only workflow sources. `/workflow run`
-and `/workflow resume` acquire it and are rejected while it is held, naming the run
-that holds it. Acquisition is **atomic** (exclusive create), so two contenders racing
-for a free or reclaimable lock cannot both win. This is what makes the rule hold across concurrent PI sessions on the
-same project — sessions that would otherwise each execute steps against the same
-working tree. Separate projects, and separate git worktrees, have separate stores and
-run independently. *(decision)*
+7.2. There is no project lock, workflow lock, database lease, or cross-process
+liveness check. Each run writes its own `<run-id>.events.jsonl` log (§8.9). The host
+keeps only a non-exclusive in-process set of abort controllers so locally executing
+runs can be cancelled; registration always succeeds and is not coordination between
+sessions. A process killed before it emits a terminal event may therefore leave a run
+recorded `in_progress`; starting unrelated work never rewrites that history. *(decision)*
 
-7.3. **Stale locks are reclaimed, not waited out.** A contender checks the holder's
-liveness: a dead pid on the same host means the process died mid-run, so the lock is
-taken and the abandoned run is recorded `crashed` (an explicit event, §8.1) and stays
-resumable. That `crashed` event is written **under the acquired lock**, by whichever
-process won it — the one moment a session appends to a run other than its own. A lock held by a live pid, or by a different host, is refused rather than
-guessed at. Pid liveness is meaningless across container boundaries, so a store shared
-between namespaces needs the lock cleared deliberately. *(decision)*
+7.3. **Concurrency safety is an author contract.** Runs may touch the same working
+tree, branches, files, resumable agent sessions, or external resources. The framework
+cannot infer those effects from user-authored TypeScript and does not attempt to
+serialize them. Authors must use separate worktrees/resources or encode sequencing in
+their workflows when overlap would be unsafe. *(decision)*
 
-7.4. Bare `/workflow cancel` targets the executing run; when nothing is executing or
-the target is ambiguous, a run-id is required. `resume` takes a run-id to pick among
-coexisting runs (omittable when exactly one is recoverable); `delete` always requires
-one (§6.5). *(decision)*
+7.4. Bare `/workflow cancel` or `/workflow status` targets a local execution only
+when exactly one run id is active; otherwise a run-id is required. `resume` takes a
+run-id to pick among coexisting runs (omittable when exactly one is recoverable);
+`delete` always requires one (§6.5). *(decision)*
 
 ## 8. Persistence, durability & resume
 
@@ -481,8 +473,8 @@ completed step(s) and the last completed item(s). *(orig. R8)*
   > workflow author must uphold. Side-effecting functions (appends, external POST,
   > non-deterministic reads) can double-apply on rerun; author accordingly.
   >
-  > SECOND author contract — **non-overlapping side effects.** Steps that can run
-  > concurrently (§3.4/§3.5) must not touch the same files, branches, or external
+  > SECOND author contract — **non-overlapping side effects.** Steps or runs that execute
+  > concurrently (§3.4/§3.5/§7) must not touch the same files, branches, or external
   > resources. This matters more here than in a general workflow engine: the steps are
   > agents editing a working tree, so two overlapping steps are two models rewriting
   > one file. The engine does **not** enforce this — it cannot know what a step or its
@@ -521,10 +513,9 @@ answer is matched to the path it was asked from. *(decision)*
 
   **Settle, then ask.** A fan-out round runs to quiescence before the run reports
   `blocked`: siblings finish or block in turn, and only then does the run surface its
-  queue. At that moment nothing is executing and the lock is released (§7.2), so any
-  session answers through the ordinary resume path. This is what keeps §7.2 and this
-  clause from deadlocking — not a special case exempting answers from the guard, but
-  the absence of any moment where a question is pending *while* the run executes.
+  queue. At that moment this run has no executing steps, so any session answers through
+  the ordinary resume path. There is no special mid-flight answer path: a question is
+  surfaced only after the fan-out round settles.
 
   The cost, stated plainly: a question raised early in a wide fan-out is not shown
   until its siblings finish, so one slow sibling delays the prompt. At concurrency 1 —

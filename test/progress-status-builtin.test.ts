@@ -54,7 +54,7 @@ describe("built-in create workflow status", () => {
 			sessionManager: { getSessionDir: () => "/tmp/session" },
 		} as unknown as CommandCtx & ProgressCtx
 
-		await handleStatus(ctx, store, { activeRunId: () => undefined, width: 76 }, RUN_ID)
+		await handleStatus(ctx, store, { activeRunIds: () => [], width: 76 }, RUN_ID)
 
 		expect(loadValidatedWorkflow).not.toHaveBeenCalled()
 		expect(notes).toHaveLength(1)
@@ -91,7 +91,7 @@ describe("built-in create workflow status", () => {
 				sessionManager: { getSessionDir: () => "/tmp/session" },
 			} as unknown as CommandCtx & ProgressCtx
 
-			await handleStatus(ctx, store, { activeRunId: () => undefined, width: 76 }, RUN_ID)
+			await handleStatus(ctx, store, { activeRunIds: () => [], width: 76 }, RUN_ID)
 
 			expect(loadValidatedWorkflow).not.toHaveBeenCalled()
 			expect(notes[0]?.[0]).toContain("builtin:create")
@@ -128,7 +128,7 @@ describe("built-in create workflow status", () => {
 			sessionManager: { getSessionDir: () => "/tmp/session" },
 		} as unknown as CommandCtx & ProgressCtx
 
-		await handleStatus(ctx, store, { activeRunId: () => undefined, width: 76 }, RUN_ID)
+		await handleStatus(ctx, store, { activeRunIds: () => [], width: 76 }, RUN_ID)
 
 		expect(loadValidatedWorkflow).toHaveBeenCalledWith({
 			filePath: PROJECT_CREATE_WORKFLOW_FILE,
@@ -165,7 +165,7 @@ describe("built-in create workflow status", () => {
 			sessionManager: { getSessionDir: () => "/tmp/session" },
 		} as unknown as CommandCtx & ProgressCtx
 
-		await handleStatus(ctx, store, { activeRunId: () => undefined, width: 76 }, RUN_ID)
+		await handleStatus(ctx, store, { activeRunIds: () => [], width: 76 }, RUN_ID)
 
 		expect(loadValidatedWorkflow).not.toHaveBeenCalled()
 		expect(notes[0]?.[0]).toContain("Built-in: builtin:missing")

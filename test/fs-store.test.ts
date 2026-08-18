@@ -141,7 +141,7 @@ describe("filesystem run store (spec §8.9)", () => {
 		expect(messages).toEqual(Array.from({ length: count }, (_, i) => `m${i}`))
 	})
 
-	// A process killed mid-append (spec §7.3's stale-lock case) leaves a half-written last line. That
+	// A process killed mid-append can leave a half-written last line. That
 	// append never completed, so the run must still load — and `run list`, which reads every log, must
 	// not be taken down by one of them.
 	it("loads a log whose last line was truncated by a killed process", async () => {

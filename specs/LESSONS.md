@@ -13,7 +13,7 @@ places I was wrong.
 
 The run-wide concurrency slot used to be held by the enclosing construct. That deadlocks the moment
 constructs nest: a `.foreach` at the ceiling occupied every slot while each of its items waited for a
-slot of its own. The run hung forever — no timeout, project lock held. The log signature was stark:
+slot of its own. The run hung forever with no construct timeout. The log signature was stark:
 
 ```
 4 foreach items started, 0 steps ever started, 0 completed

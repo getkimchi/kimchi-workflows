@@ -6,10 +6,9 @@
  * Three decisions carry this module:
  *
  *  - **It decorates the STORE, not the engine's event tee.** Every event a run produces reaches its log
- *    through the one `RunStore` an invocation is built with — including the two terminals the engine
- *    never emits: the cold cancel of a blocked run (`commands/lifecycle.ts`) and the stale-lock reclaim
- *    that records another session's abandoned run as crashed (`run-lock.ts`). A bridge attached to
- *    `HostPort.emit` would see neither, and terminal-state completeness (spec R6) would be a thing to
+ *    through the one `RunStore` an invocation is built with — including the terminal the engine never
+ *    emits: the cold cancel of a blocked run (`commands/lifecycle.ts`). A bridge attached to
+ *    `HostPort.emit` would not see it, and terminal-state completeness (spec R6) would be a thing to
  *    remember at each new write site rather than a property of the wiring.
  *  - **Persist first, publish second, and never throw.** `appendEvent` is awaited by the engine, so an
  *    exception here would fail a step whose work already succeeded. It adopts the progress sink's
@@ -102,7 +101,7 @@ export interface TelemetryMapper {
 /** A `RunStore` that also publishes what passes through it. */
 export interface TelemetryStore extends RunStore {
 	/**
-	 * Report one execution's outcome (`runGuarded`'s return). Only a `blocked` one publishes anything —
+	 * Report one execution's outcome (`runTracked`'s return). Only a `blocked` one publishes anything —
 	 * every terminal status already arrived as an event through {@link RunStore.appendEvent}.
 	 */
 	observeResult(result: RunResult): void

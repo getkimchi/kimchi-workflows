@@ -12,12 +12,12 @@ import {
 	handleDelete,
 	handleListRuns,
 	handleListWorkflows,
-	runGuarded,
+	runTracked,
 } from "../src/host/commands/index.ts"
 import { workflowsDir } from "../src/host/project-dir.ts"
 import { summarizeRun } from "../src/host/summarize-run.ts"
 import type { RunStore, RunSummary } from "../src/host/types.ts"
-import { createFakeRunLock, createTestHost } from "./helpers.ts"
+import { createFakeActiveRuns, createTestHost } from "./helpers.ts"
 
 type NoteType = "info" | "warning" | "error" | undefined
 function notifySpy() {
@@ -25,54 +25,60 @@ function notifySpy() {
 	return { notes, notify: (message: string, type?: Exclude<NoteType, undefined>) => void notes.push([message, type]) }
 }
 
-// -- runGuarded (extracted guard lifecycle, spec §7) ------------------------------------------------
+// -- runTracked (non-exclusive execution lifecycle, spec §7) ----------------------------------------
 
-describe("runGuarded", () => {
+describe("runTracked", () => {
 	const completed: RunResult = { runId: "r1", status: "completed" }
 	const fakeStore = { appendEvent: async () => {} }
 
-	it("runs with the run's abort signal and releases the guard on success", async () => {
-		const guard = createFakeRunLock()
-		const spy = notifySpy()
+	it("runs with an abort signal and unregisters the execution on success", async () => {
+		const activeRuns = createFakeActiveRuns()
 		let sawSignal: AbortSignal | undefined
-		const result = await runGuarded(guard, "r1", "/fake/project", fakeStore, spy.notify, (signal) => {
+		const result = await runTracked(activeRuns, "r1", fakeStore, (signal) => {
 			sawSignal = signal
-			expect(guard.active?.runId).toBe("r1") // held during the run
+			expect(activeRuns.active.map((run) => run.runId)).toEqual(["r1"])
 			return Promise.resolve(completed)
 		})
 		expect(result).toBe(completed)
 		expect(sawSignal).toBeInstanceOf(AbortSignal)
-		expect(guard.active).toBeUndefined() // released
-		expect(spy.notes).toEqual([])
+		expect(activeRuns.active).toEqual([])
 	})
 
-	it("releases the guard even when the run throws", async () => {
-		const guard = createFakeRunLock()
-		const spy = notifySpy()
-		await expect(
-			runGuarded(guard, "r1", "/fake/project", fakeStore, spy.notify, () => Promise.reject(new Error("boom"))),
-		).rejects.toThrow("boom")
-		expect(guard.active).toBeUndefined()
+	it("unregisters the execution even when the run throws", async () => {
+		const activeRuns = createFakeActiveRuns()
+		await expect(runTracked(activeRuns, "r1", fakeStore, () => Promise.reject(new Error("boom")))).rejects.toThrow(
+			"boom",
+		)
+		expect(activeRuns.active).toEqual([])
 	})
 
-	it("notifies naming the holder and skips the run when the guard is busy", async () => {
-		const guard = createFakeRunLock()
-		await guard.begin("other", "/fake/project", fakeStore) // occupy the guard
-		const spy = notifySpy()
-		let ran = false
-		const result = await runGuarded(guard, "r1", "/fake/project", fakeStore, spy.notify, () => {
-			ran = true
+	it("allows two executions of the same run id to overlap", async () => {
+		const activeRuns = createFakeActiveRuns()
+		let entered!: () => void
+		const started = new Promise<void>((resolve) => {
+			entered = resolve
+		})
+		let release!: () => void
+		const blocked = new Promise<void>((resolve) => {
+			release = resolve
+		})
+		const first = runTracked(activeRuns, "r1", fakeStore, async () => {
+			entered()
+			await blocked
+			return completed
+		})
+		await started
+
+		const second = await runTracked(activeRuns, "r1", fakeStore, () => {
+			expect(activeRuns.find("r1")).toHaveLength(2)
 			return Promise.resolve(completed)
 		})
-		expect(result).toBeUndefined()
-		expect(ran).toBe(false)
-		expect(spy.notes).toEqual([
-			[
-				"workflow: run other is already executing (pid -1 on fake-host); cancel it or wait before starting/resuming another.",
-				"warning",
-			],
-		])
-		expect(guard.active?.runId).toBe("other") // the busy run is untouched
+
+		expect(second).toBe(completed)
+		expect(activeRuns.find("r1")).toHaveLength(1)
+		release()
+		await first
+		expect(activeRuns.active).toEqual([])
 	})
 })
 
@@ -216,23 +222,37 @@ async function storeWithRun(kind: "blocked" | "completed"): Promise<{ store: Run
 
 describe("handleCancel", () => {
 	it("aborts the executing run", async () => {
-		const guard = createFakeRunLock()
-		const begun = await guard.begin("live", "/fake/project", { appendEvent: async () => {} })
+		const activeRuns = createFakeActiveRuns()
+		const execution = activeRuns.start("live")
 		const spy = notifySpy()
 		const { store } = await storeWithRun("blocked")
 
-		await handleCancel({ ui: { notify: spy.notify } }, guard, store, undefined)
+		await handleCancel({ ui: { notify: spy.notify } }, activeRuns, store, undefined)
 
-		expect(begun.ok && begun.controller.signal.aborted).toBe(true)
+		expect(execution.controller.signal.aborted).toBe(true)
 		expect(spy.notes[0]?.[0]).toMatch(/cancelling run live at the next step boundary/)
+	})
+
+	it("requires a run id when several local runs are executing", async () => {
+		const activeRuns = createFakeActiveRuns()
+		const first = activeRuns.start("first")
+		const second = activeRuns.start("second")
+		const spy = notifySpy()
+		const { store } = await storeWithRun("blocked")
+
+		await handleCancel({ ui: { notify: spy.notify } }, activeRuns, store, undefined)
+
+		expect(first.controller.signal.aborted).toBe(false)
+		expect(second.controller.signal.aborted).toBe(false)
+		expect(spy.notes[0]?.[0]).toMatch(/2 runs are executing \(first, second\); pass a run-id/)
 	})
 
 	it("cold-cancels a blocked run, which no signal can reach (spec §10.2)", async () => {
 		const { store, runId } = await storeWithRun("blocked")
 		const spy = notifySpy()
 
-		// No guard entry: a blocked run is not executing (spec §7.1), so there is nothing to abort.
-		await handleCancel({ ui: { notify: spy.notify } }, createFakeRunLock(), store, runId)
+		// No registry entry: a blocked run is not executing, so there is nothing to abort.
+		await handleCancel({ ui: { notify: spy.notify } }, createFakeActiveRuns(), store, runId)
 
 		expect(summarizeRun(await store.loadEvents(runId))?.status).toBe("cancelled")
 		expect(spy.notes[0]?.[0]).toMatch(/cancelled blocked run/)
@@ -242,7 +262,7 @@ describe("handleCancel", () => {
 		const { store, runId } = await storeWithRun("blocked")
 		const spy = notifySpy()
 
-		await handleCancel({ ui: { notify: spy.notify } }, createFakeRunLock(), store, undefined)
+		await handleCancel({ ui: { notify: spy.notify } }, createFakeActiveRuns(), store, undefined)
 
 		expect(summarizeRun(await store.loadEvents(runId))?.status).toBe("cancelled")
 	})
@@ -251,7 +271,7 @@ describe("handleCancel", () => {
 		const { store, runId } = await storeWithRun("completed")
 		const spy = notifySpy()
 
-		await handleCancel({ ui: { notify: spy.notify } }, createFakeRunLock(), store, runId)
+		await handleCancel({ ui: { notify: spy.notify } }, createFakeActiveRuns(), store, runId)
 
 		expect(spy.notes[0]?.[0]).toMatch(/is completed; only an executing or blocked run can be cancelled/)
 		expect(summarizeRun(await store.loadEvents(runId))?.status).toBe("completed") // untouched
@@ -261,7 +281,7 @@ describe("handleCancel", () => {
 		const { store } = await storeWithRun("completed")
 		const spy = notifySpy()
 
-		await handleCancel({ ui: { notify: spy.notify } }, createFakeRunLock(), store, undefined)
+		await handleCancel({ ui: { notify: spy.notify } }, createFakeActiveRuns(), store, undefined)
 
 		expect(spy.notes[0]?.[0]).toMatch(/nothing to cancel/)
 	})
@@ -293,7 +313,7 @@ describe("handleDelete", () => {
 		const { store, runId } = await storeWithRun("blocked")
 		const spy = notifySpy()
 
-		await handleCancel({ ui: { notify: spy.notify } }, createFakeRunLock(), store, runId)
+		await handleCancel({ ui: { notify: spy.notify } }, createFakeActiveRuns(), store, runId)
 		await handleDelete({ ui: { notify: spy.notify } }, store, runId)
 
 		expect(await store.loadEvents(runId)).toEqual([])
@@ -316,7 +336,7 @@ describe("a cancelled run cannot be resurrected by a late answer (adversarial re
 		const { host, store } = createTestHost()
 
 		const blocked = await runWorkflow(workflow, undefined, host)
-		await handleCancel({ ui: { notify: notifySpy().notify } }, createFakeRunLock(), store, blocked.runId)
+		await handleCancel({ ui: { notify: notifySpy().notify } }, createFakeActiveRuns(), store, blocked.runId)
 
 		// An answer captured before the cancel (an open prompt, or another session) must not undo it.
 		await expect(
@@ -350,7 +370,7 @@ describe("a cancelled run is still resumable — only stale answers are refused 
 		const { host, store } = createTestHost()
 
 		const blocked = await runWorkflow(workflow, undefined, host)
-		await handleCancel({ ui: { notify: notifySpy().notify } }, createFakeRunLock(), store, blocked.runId)
+		await handleCancel({ ui: { notify: notifySpy().notify } }, createFakeActiveRuns(), store, blocked.runId)
 		expect(summarizeRun(await store.loadEvents(blocked.runId))?.status).toBe("cancelled")
 
 		// §5.2: cancelled is recoverable. The re-run path (§8.2) re-runs the interrupted step, so the

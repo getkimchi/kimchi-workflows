@@ -1,3 +1,5 @@
+export type { ActiveRun, ActiveRuns } from "./active-runs.ts"
+export { createActiveRuns } from "./active-runs.ts"
 export type { RawSelection } from "./answer-assembly.ts"
 export {
 	assembleAnswers,
@@ -17,7 +19,7 @@ export {
 	handleListWorkflows,
 	handleResume,
 	handleRun,
-	runGuarded,
+	runTracked,
 } from "./commands/index.ts"
 export { default as piWorkflowsExtension } from "./extension.ts"
 export { createFsStore, RUN_LOG_SUFFIX } from "./fs-store.ts"
@@ -46,8 +48,6 @@ export { collectViaDialogs } from "./questionnaire-fallback.ts"
 export { collectAnswers } from "./questionnaire-render.ts"
 export type { ResumeAction, RunStatus } from "./resume-router.ts"
 export { resumeAction } from "./resume-router.ts"
-export type { AcquireResult, ActiveRun, BeginResult, LockInfo, ProcessEnv, RunLock } from "./run-lock.ts"
-export { createProcessEnv, createRunLock } from "./run-lock.ts"
 export { summarizeRun } from "./summarize-run.ts"
 export type { PublishTelemetry, TelemetryMapper, TelemetryOptions, TelemetryStore } from "./telemetry-bridge.ts"
 export { createTelemetryMapper, withTelemetry } from "./telemetry-bridge.ts"

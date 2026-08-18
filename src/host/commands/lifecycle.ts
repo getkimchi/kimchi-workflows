@@ -4,8 +4,9 @@
  * The two are deliberately sequential — a live run must be cancelled before it can be deleted — so
  * removal is always a second, deliberate act.
  */
+
+import type { ActiveRun, ActiveRuns } from "../active-runs.ts"
 import type { RunStatus } from "../resume-router.ts"
-import type { ActiveRun, RunLock } from "../run-lock.ts"
 import { summarizeRun } from "../summarize-run.ts"
 import type { RunStore } from "../types.ts"
 import { type NotifyCtx, resolveRunRef } from "./context.ts"
@@ -23,38 +24,56 @@ export function isLiveRun(status: RunStatus): boolean {
  * `/workflow cancel [run-id]` (spec §6.4, §10.2). Two distinct cases:
  *
  *  - **Executing run** — abort its signal; the engine stops at the next step boundary (spec §8.6).
- *  - **Blocked run** — there is nothing executing to abort (the guard is released while blocked, spec
- *    §7.1), so cancel it *cold*: append `run-cancelled` to its log. Spec §10.2 requires that stopping
+ *  - **Blocked run** — there is nothing executing to abort, so cancel it *cold*: append
+ *    `run-cancelled` to its log. Spec §10.2 requires that stopping
  *    a blocked run works, and the dismissal hint points users straight here.
  *
- * Bare targets the executing run, or the sole blocked run when none is executing; with several blocked
- * a run-id is required — in full, by its hash, or by any unique prefix ({@link resolveRunRef}).
+ * Bare targets the sole local execution, or the sole blocked run when none is executing. With several
+ * local executions or blocked runs a run-id is required — in full, by its hash, or by any unique prefix
+ * ({@link resolveRunRef}).
  */
 export async function handleCancel(
 	ctx: NotifyCtx,
-	guard: RunLock,
+	activeRuns: ActiveRuns,
 	store: Pick<RunStore, "loadEvents" | "appendEvent" | "list">,
 	runRef: string | undefined,
 ): Promise<void> {
-	const active = guard.active
-	const abortActive = (run: ActiveRun): void => {
-		run.controller.abort()
-		ctx.ui.notify(`workflow: cancelling run ${run.runId} at the next step boundary...`, "info")
+	const abortActive = (runs: readonly ActiveRun[], runId: string): void => {
+		for (const run of runs) run.controller.abort()
+		ctx.ui.notify(`workflow: cancelling run ${runId} at the next step boundary...`, "info")
 	}
 
-	// The exact id is checked BEFORE the store is consulted, so the executing run stays cancellable even
-	// if its log cannot be read back right now.
-	if (active && (!runRef || runRef === active.runId)) return abortActive(active)
+	// An exact id is checked BEFORE the store is consulted, so newly-started local work stays cancellable
+	// even if its first event has not landed yet.
+	if (runRef) {
+		const exact = activeRuns.find(runRef)
+		if (exact.length > 0) return abortActive(exact, runRef)
+	} else {
+		const activeIds = [...new Set(activeRuns.active.map((run) => run.runId))]
+		if (activeIds.length === 1) {
+			const runId = activeIds[0] as string
+			return abortActive(activeRuns.find(runId), runId)
+		}
+		if (activeIds.length > 1) {
+			ctx.ui.notify(
+				`workflow: ${activeIds.length} runs are executing (${activeIds.join(", ")}); pass a run-id to cancel one.`,
+				"warning",
+			)
+			return
+		}
+	}
 
 	const runId = runRef ? await resolveRunRef(ctx, store, runRef, "cancel") : await soleBlockedRun(store)
 	if (runRef && !runId) return // unknown or ambiguous — already notified
-	// A hash/prefix that resolved to the run this process is executing means the same thing as its full id.
-	if (active && runId === active.runId) return abortActive(active)
+	// A hash/prefix that resolves to locally executing work means the same thing as its full id.
+	if (runId) {
+		const local = activeRuns.find(runId)
+		if (local.length > 0) return abortActive(local, runId)
+	}
 
 	if (!runId) {
-		const hint = active ? ` The executing run is ${active.runId}.` : ""
 		ctx.ui.notify(
-			`workflow: nothing to cancel — no run is executing and no single blocked run to target.${hint} Pass a run-id.`,
+			"workflow: nothing to cancel — no local run is executing and no single blocked run is available. Pass a run-id.",
 			"info",
 		)
 		return

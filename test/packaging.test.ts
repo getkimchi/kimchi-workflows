@@ -6,7 +6,7 @@ import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { promisify } from "node:util"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
-import { createFakeRunLock } from "./helpers.ts"
+import { createFakeActiveRuns } from "./helpers.ts"
 import { scriptedAgent } from "./scripted-agent.ts"
 
 const exec = promisify(execFile)
@@ -109,7 +109,7 @@ console.log(JSON.stringify(results))
 			import(storeModule),
 		])
 		const store = createMemoryStore()
-		const guard = createFakeRunLock()
+		const activeRuns = createFakeActiveRuns()
 		const notes: [string, string | undefined][] = []
 		const inputs: (string | undefined)[] = [undefined]
 		const ctx = {
@@ -144,12 +144,12 @@ console.log(JSON.stringify(results))
 			],
 		])
 
-		await handleCreate(ctx, store, guard, agent.startAgent)
+		await handleCreate(ctx, store, activeRuns, agent.startAgent)
 		const runId = (await store.list())[0]?.runId as string
 		expect((await store.list())[0]?.status).toBe("blocked")
 
 		inputs.push("Build a release-notes workflow", undefined)
-		await handleResume(ctx, store, guard, agent.startAgent, runId)
+		await handleResume(ctx, store, activeRuns, agent.startAgent, runId)
 
 		const events = await store.loadEvents(runId)
 		const provenance = events.find((event: { type: string }) => event.type === "run-meta") as
@@ -162,7 +162,7 @@ console.log(JSON.stringify(results))
 		expect(agent.opened).toBe(1)
 
 		notes.length = 0
-		await handleStatus(ctx, store, { activeRunId: () => undefined, width: 76 }, runId)
+		await handleStatus(ctx, store, { activeRunIds: () => [], width: 76 }, runId)
 		expect(notes).toHaveLength(1)
 		expect(notes[0]?.[0]).toContain("builtin:create")
 		expect(notes[0]?.[0]).toContain("goal")

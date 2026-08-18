@@ -41,8 +41,8 @@ export function createFsStore(dir: string): RunStore {
 	/**
 	 * Read a run's log, tolerating one truncated line at the END and nothing else.
 	 *
-	 * A process killed mid-append (the very case the lock's stale-reclaim exists for, spec §7.3) can
-	 * leave a half-written final line. That append never completed, so the event it carried never
+	 * A process killed mid-append can leave a half-written final line. That append never completed, so
+	 * the event it carried never
 	 * happened, and dropping it is exactly right. A malformed line anywhere EARLIER is genuine
 	 * corruption and throws naming the file and line: skipping those would silently rewrite history —
 	 * lose a `run-cancelled` and a run the user stopped comes back to life (spec §8.4).

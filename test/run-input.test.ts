@@ -8,7 +8,7 @@ import { handleRun, parseRunArgs } from "../src/host/commands/index.ts"
 import { createFsStore } from "../src/host/fs-store.ts"
 import { workflowsDir } from "../src/host/project-dir.ts"
 import type { RunStore } from "../src/host/types.ts"
-import { createFakeRunLock } from "./helpers.ts"
+import { createFakeActiveRuns } from "./helpers.ts"
 
 type NoteType = "info" | "warning" | "error" | undefined
 
@@ -95,7 +95,7 @@ describe("/workflow run --input", () => {
 
 	it("parses inline JSON and feeds it to the run as initial input", async () => {
 		const spy = notifySpy()
-		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, file, '{"name": "Ada"}')
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeActiveRuns(), noAgent, file, '{"name": "Ada"}')
 
 		const runs = await store.list()
 		expect(runs).toHaveLength(1)
@@ -108,7 +108,7 @@ describe("/workflow run --input", () => {
 	it("reads @file, resolving a relative path against ctx.cwd, and feeds its contents to the run", async () => {
 		await writeFile(path.join(projectRoot, "payload.json"), JSON.stringify({ name: "Grace" }), "utf8")
 		const spy = notifySpy()
-		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, file, "@payload.json")
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeActiveRuns(), noAgent, file, "@payload.json")
 
 		const runs = await store.list()
 		expect(runs).toHaveLength(1)
@@ -119,7 +119,7 @@ describe("/workflow run --input", () => {
 
 	it("rejects bad inline JSON through ctx.ui.notify and starts no run", async () => {
 		const spy = notifySpy()
-		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, file, "{not valid json")
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeActiveRuns(), noAgent, file, "{not valid json")
 
 		expect(await store.list()).toHaveLength(0)
 		expect(spy.notes).toHaveLength(1)
@@ -129,7 +129,14 @@ describe("/workflow run --input", () => {
 
 	it("rejects a --input file that does not exist and starts no run", async () => {
 		const spy = notifySpy()
-		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, file, "@does-not-exist.json")
+		await handleRun(
+			fakeCtx(projectRoot, spy.notify),
+			store,
+			createFakeActiveRuns(),
+			noAgent,
+			file,
+			"@does-not-exist.json",
+		)
 
 		expect(await store.list()).toHaveLength(0)
 		expect(spy.notes).toHaveLength(1)
@@ -140,7 +147,7 @@ describe("/workflow run --input", () => {
 	it("rejects a payload that fails the workflow's declared input schema, before the run starts", async () => {
 		const spy = notifySpy()
 		// `name` must be a string; this satisfies the JSON parser but not the schema.
-		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, file, '{"name": 42}')
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeActiveRuns(), noAgent, file, '{"name": 42}')
 
 		expect(await store.list()).toHaveLength(0)
 		expect(spy.notes).toHaveLength(1)
@@ -153,7 +160,7 @@ describe("/workflow run --input", () => {
 		await writeFile(bareFile, bareWorkflowSource(), "utf8")
 
 		const spy = notifySpy()
-		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, bareFile)
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeActiveRuns(), noAgent, bareFile)
 
 		const runs = await store.list()
 		expect(runs).toHaveLength(1)
@@ -171,7 +178,7 @@ describe("/workflow run --input", () => {
 		await writeFile(invalidFile, semanticErrorWorkflowSource("semantic-error", evaluated), "utf8")
 		const spy = notifySpy()
 
-		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, invalidFile)
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeActiveRuns(), noAgent, invalidFile)
 
 		expect(await store.list()).toHaveLength(0)
 		expect(spy.notes).toHaveLength(1)
@@ -192,7 +199,7 @@ describe("/workflow run --input", () => {
 		await writeFile(invalidFile, semanticErrorWorkflowSource("semantic-error", evaluated), "utf8")
 		const spy = notifySpy()
 
-		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, "semantic-error")
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeActiveRuns(), noAgent, "semantic-error")
 
 		expect(await store.list()).toHaveLength(0)
 		expect(spy.notes).toHaveLength(1)
@@ -208,7 +215,7 @@ describe("/workflow run --input", () => {
 		await writeFile(invalidFile, semanticErrorWorkflowSource("release", evaluated), "utf8")
 		const spy = notifySpy()
 
-		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, "release")
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeActiveRuns(), noAgent, "release")
 
 		expect(await store.list()).toHaveLength(0)
 		expect(spy.notes).toHaveLength(1)
