@@ -231,7 +231,7 @@ const announceReport = createAgentStep({
 	name: "announce-report",
 	description: "Tell the user exactly where the report was written",
 	input: writtenReportSchema,
-	prompt: ({ input }) => `Tell the user, in one sentence and without quoting or summarizing the report:
+	prompt: ({ input }) => `Reply with this exact sentence and nothing else:
 Kimchi investigation report written to: ${input.reportPath}`,
 })
 

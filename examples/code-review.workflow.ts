@@ -1,10 +1,11 @@
 /**
  * A pragmatic, review-only workflow: resolve a committed Git change, infer its intent, fan it out to
  * four isolated reviewers, adjudicate their findings in the main session, and present one actionable
- * report. It deliberately does not run tests or modify the reviewed code.
+ * report. It deliberately does not run tests or modify reviewed source files; its only repository
+ * output is a Markdown report under .kimchi/reports.
  */
 import { execFile } from "node:child_process"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
@@ -14,6 +15,7 @@ import { createAgentStep, createStep, createWorkflow } from "../src/flow/index.t
 const execFileAsync = promisify(execFile)
 const MAX_GIT_OUTPUT = 32 * 1024 * 1024
 const TEMP_PREFIX = "kimchi-code-review-"
+const REVIEW_REPORT_DIRECTORY = path.join(".kimchi", "reports")
 
 const confidenceSchema = Type.Union([Type.Literal("high"), Type.Literal("medium"), Type.Literal("low")])
 const severitySchema = Type.Union([Type.Literal("P0"), Type.Literal("P1"), Type.Literal("P2"), Type.Literal("P3")])
@@ -115,6 +117,7 @@ export const reviewReportSchema = Type.Object({
 })
 
 const renderedReportSchema = Type.Object({ markdown: Type.String() })
+const savedReportSchema = Type.Object({ markdown: Type.String(), reportPath: Type.String() })
 
 type ReviewRequest = Static<typeof reviewRequestSchema>
 type ReviewSnapshot = Static<typeof reviewSnapshotSchema>
@@ -291,12 +294,36 @@ const cleanupReview = createStep({
 	},
 })
 
+const saveReport = createStep({
+	name: "save-report",
+	description: "Write the finalized code review to a Markdown file in the repository's Kimchi reports directory",
+	input: renderedReportSchema,
+	output: savedReportSchema,
+	run: async ({ input, ctx, abortSignal, logger }) => {
+		if (abortSignal.aborted) throw abortSignal.reason
+		const snapshot = requiredStepResult<ReviewSnapshot>(ctx.getStepResult("prepare-review"), "prepare-review")
+		const reportDirectory = path.join(snapshot.repositoryRoot, REVIEW_REPORT_DIRECTORY)
+		await mkdir(reportDirectory, { recursive: true })
+		const basename = `code-review-${shortSha(snapshot.headSha)}-against-${shortSha(snapshot.mergeBaseSha)}.md`
+		const { reportPath, reused } = await writeMarkdownReport(reportDirectory, basename, input.markdown)
+		logger.info(
+			reused
+				? `Existing identical code review report reused: ${reportPath}`
+				: `Code review report written to: ${reportPath}`,
+		)
+		return { markdown: input.markdown, reportPath }
+	},
+})
+
 const presentReport = createAgentStep({
 	name: "present-report",
-	description: "Present the finalized report in the main conversation",
-	input: renderedReportSchema,
-	prompt: ({ input }) => `Present the finalized code review below as the user-facing response. Preserve its Markdown
-structure and content. Do not perform more analysis, inspect files, run commands, edit code, or add new findings.
+	description: "State the saved report path and present the finalized review in the main conversation",
+	input: savedReportSchema,
+	prompt: ({ input }) => `Begin with this exact sentence:
+Code review report written to: ${input.reportPath}
+
+Then present the finalized code review below as the user-facing response. Preserve its Markdown structure and content.
+Do not perform more analysis, inspect files, run commands, edit code, or add new findings.
 
 ${input.markdown}`,
 })
@@ -322,6 +349,7 @@ const codeReviewWorkflow = createWorkflow({
 	.then(synthesizeReview)
 	.then(renderReport)
 	.then(cleanupReview)
+	.then(saveReport)
 	.then(presentReport)
 	.commit()
 
@@ -460,6 +488,30 @@ export function renderReviewReport(report: ReviewReport, snapshot: ReviewSnapsho
 	)
 
 	return lines.join("\n")
+}
+
+async function writeMarkdownReport(
+	directory: string,
+	basename: string,
+	markdown: string,
+): Promise<{ reportPath: string; reused: boolean }> {
+	const parsed = path.parse(basename)
+	for (let copy = 1; copy <= 10_000; copy += 1) {
+		const filename = copy === 1 ? basename : `${parsed.name}-${copy}${parsed.ext}`
+		const reportPath = path.join(directory, filename)
+		try {
+			await writeFile(reportPath, markdown, { encoding: "utf8", flag: "wx" })
+			return { reportPath, reused: false }
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+			try {
+				if ((await readFile(reportPath, "utf8")) === markdown) return { reportPath, reused: true }
+			} catch (readError) {
+				if ((readError as NodeJS.ErrnoException).code !== "ENOENT") throw readError
+			}
+		}
+	}
+	throw new Error(`could not allocate a code review report filename for: ${basename}`)
 }
 
 function reviewOnlyRules(snapshot: ReviewSnapshot): string {
