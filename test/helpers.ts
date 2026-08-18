@@ -54,7 +54,7 @@ export function tempSessionsDir(): string {
 	return mkdtempSync(path.join(tmpdir(), "pi-workflows-sessions-"))
 }
 
-/** The real non-exclusive registry is already deterministic and side-effect free, so tests use it directly. */
+/** The real per-run registry is deterministic and side-effect free, so tests use it directly. */
 export function createFakeActiveRuns(): ActiveRuns {
 	return createActiveRuns()
 }

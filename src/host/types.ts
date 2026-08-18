@@ -16,15 +16,55 @@ export interface RunSummary {
 	readonly pendingQuestions: number
 }
 
+/** The process identity recorded for one execution owner. It deliberately contains no PI session id. */
+export interface RunExecutionOwner {
+	/** Private token used only to prove ownership when releasing a lease. */
+	readonly ownerId: string
+	readonly host: string
+	readonly pid: number
+	readonly processStartedAt: string
+}
+
+/** One attempt to execute (or resume) a run. A resume receives a fresh execution id. */
+export interface RunExecutionLease {
+	readonly version: 1
+	readonly runId: string
+	readonly executionId: string
+	readonly owner: RunExecutionOwner
+	readonly acquiredAt: string
+}
+
+export type RunExecutionLeaseState = "owned" | "live" | "dead" | "foreign"
+
+export interface InspectedRunExecution {
+	readonly lease: RunExecutionLease
+	/** `foreign` means the owner is on another host and cannot be verified locally. */
+	readonly state: RunExecutionLeaseState
+}
+
+/** Atomic, per-run execution exclusion supplied by durable stores. */
+export interface RunExecutionStore {
+	acquire(runId: string): Promise<RunExecutionLease>
+	inspect(runId: string): Promise<InspectedRunExecution | undefined>
+	list(): Promise<InspectedRunExecution[]>
+	/**
+	 * Exclusively retire this exact lease, running `beforeRelease` while acquisition is still excluded.
+	 * Used by reconciliation so a new execution cannot start between the crash event and stale cleanup.
+	 */
+	retire(lease: RunExecutionLease, beforeRelease: () => Promise<void>): Promise<boolean>
+	/** Remove this exact lease. Returns false if it no longer owns the lease path. */
+	release(lease: RunExecutionLease): Promise<boolean>
+}
+
 /**
  * Per-run store (spec §8.9): an append-only event log keyed by run-id, plus listing.
  *
- * There is no metadata sidecar. The one fact the host needed one for — which workflow source a run was
- * launched from, so `/workflow resume` can recover it (spec §8.5) — is now a `run-meta` event in the log itself
- * (engine/types.ts), which makes a run exactly one file: nothing to keep in sync, nothing to leave
- * behind on delete, and a log that is self-describing wherever it is read.
+ * Workflow provenance stays in the JSONL as `run-meta`. Durable stores may additionally expose an
+ * execution lease sidecar. The lease is coordination state, not run history: ownership is also written
+ * to the JSONL as `run-execution-started`, while the sidecar exists only to make acquisition atomic.
  */
 export interface RunStore {
+	readonly executions?: RunExecutionStore
 	/** Append one lifecycle event to the run's log. */
 	appendEvent(event: RunEvent): Promise<void>
 	/** Read a run's full ordered event log (empty if the run is unknown). Used to rebuild state on resume. */

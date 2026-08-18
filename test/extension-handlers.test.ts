@@ -25,7 +25,7 @@ function notifySpy() {
 	return { notes, notify: (message: string, type?: Exclude<NoteType, undefined>) => void notes.push([message, type]) }
 }
 
-// -- runTracked (non-exclusive execution lifecycle, spec §7) ----------------------------------------
+// -- runTracked (per-run exclusive execution lifecycle, spec §7) ------------------------------------
 
 describe("runTracked", () => {
 	const completed: RunResult = { runId: "r1", status: "completed" }
@@ -52,7 +52,7 @@ describe("runTracked", () => {
 		expect(activeRuns.active).toEqual([])
 	})
 
-	it("allows two executions of the same run id to overlap", async () => {
+	it("rejects a second execution of the same run id while the first is active", async () => {
 		const activeRuns = createFakeActiveRuns()
 		let entered!: () => void
 		const started = new Promise<void>((resolve) => {
@@ -69,12 +69,9 @@ describe("runTracked", () => {
 		})
 		await started
 
-		const second = await runTracked(activeRuns, "r1", fakeStore, () => {
-			expect(activeRuns.find("r1")).toHaveLength(2)
-			return Promise.resolve(completed)
-		})
-
-		expect(second).toBe(completed)
+		await expect(runTracked(activeRuns, "r1", fakeStore, () => Promise.resolve(completed))).rejects.toThrow(
+			/already has an execution/,
+		)
 		expect(activeRuns.find("r1")).toHaveLength(1)
 		release()
 		await first
@@ -230,7 +227,7 @@ describe("handleCancel", () => {
 		await handleCancel({ ui: { notify: spy.notify } }, activeRuns, store, undefined)
 
 		expect(execution.controller.signal.aborted).toBe(true)
-		expect(spy.notes[0]?.[0]).toMatch(/cancelling run live at the next step boundary/)
+		expect(spy.notes[0]?.[0]).toMatch(/cancelled run live; stopping the active execution/)
 	})
 
 	it("requires a run id when several local runs are executing", async () => {
@@ -273,7 +270,7 @@ describe("handleCancel", () => {
 
 		await handleCancel({ ui: { notify: spy.notify } }, createFakeActiveRuns(), store, runId)
 
-		expect(spy.notes[0]?.[0]).toMatch(/is completed; only an executing or blocked run can be cancelled/)
+		expect(spy.notes[0]?.[0]).toMatch(/is completed; only its executing runner or a blocked run can cancel it/)
 		expect(summarizeRun(await store.loadEvents(runId))?.status).toBe("completed") // untouched
 	})
 

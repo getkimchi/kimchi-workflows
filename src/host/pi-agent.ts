@@ -93,6 +93,7 @@ import {
 	lastAssistantError,
 	lastAssistantText,
 	lastAssistantUsage,
+	lastAssistantWasAborted,
 	lastSubmittedOutput,
 	type ModelRegistry,
 	resolveModel,
@@ -300,11 +301,15 @@ export function createPiAgentBridge(
 		if (!turn) return // no in-session turn was awaiting this event (only background/isolated steps ran)
 		inFlight = undefined
 		turn.cleanup()
+		const submitted = lastSubmittedOutput(event.messages)
+		const error = lastAssistantError(event.messages)
+		const cancelled = lastAssistantWasAborted(event.messages)
 		turn.resolve({
 			text: lastAssistantText(event.messages),
 			usage: lastAssistantUsage(event.messages),
-			submitted: lastSubmittedOutput(event.messages),
-			error: lastAssistantError(event.messages),
+			...(cancelled ? { cancelled: true } : {}),
+			...(submitted ? { submitted } : {}),
+			...(error ? { error } : {}),
 		})
 	})
 

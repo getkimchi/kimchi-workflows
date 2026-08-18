@@ -213,7 +213,7 @@ async function startRun(
 	const sourceLabel = workflowSourceLabel(workflowSource)
 	const progress = progressFor(workflow, runId, sourceLabel)
 	try {
-		const result = await runTracked(activeRuns, runId, store, async (signal) => {
+		const result = await runTracked(activeRuns, runId, store, async (signal, execution) => {
 			// The adapter's own event (spec §8.9), not the engine's: `run-started` is emitted by the engine,
 			// which is deliberately unaware of provenance, so where this run came FROM is recorded separately —
 			// before the first engine event, so a crash mid-run still leaves a resumable log.
@@ -221,6 +221,8 @@ async function startRun(
 			const host = createHostPort(store, {
 				generateRunId: () => runId,
 				startAgent,
+				executionId: execution.lease.executionId,
+				acceptEvent: () => execution.acceptsEvents(),
 				...progressCallbacks(progress),
 			})
 			return runWorkflow(workflow, initialInput, host, { signal })

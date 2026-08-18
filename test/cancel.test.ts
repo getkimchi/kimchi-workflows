@@ -2,7 +2,7 @@ import { Type } from "typebox"
 import { describe, expect, it } from "vitest"
 import { resumeWorkflow } from "../src/engine/resume-workflow.ts"
 import { runWorkflow } from "../src/engine/run-workflow.ts"
-import { createStep, createWorkflow } from "../src/flow/index.ts"
+import { createAgentStep, createStep, createWorkflow } from "../src/flow/index.ts"
 import type { WorkflowDefinition } from "../src/flow/types.ts"
 import { createTestHost } from "./helpers.ts"
 
@@ -51,6 +51,27 @@ function buildCancelWorkflow(hooks: { onS1Run?: () => void; s2Body?: () => { b: 
 }
 
 describe("cancellation (spec §5, §8.6)", () => {
+	it("turns an Escape-aborted in-session agent turn into run cancellation", async () => {
+		const workflow = createWorkflow({ name: "escape" })
+			.then(createAgentStep({ name: "work", prompt: () => "work" }))
+			.commit()
+		const { host, store } = createTestHost({
+			startAgent: () => ({
+				sendAndAwaitEnd: async () => ({ text: "partial", cancelled: true }),
+				getConversation: () => [],
+				dispose: () => {},
+			}),
+		})
+
+		const result = await runWorkflow(workflow, undefined, host)
+
+		expect(result.status).toBe("cancelled")
+		expect((await store.loadEvents(result.runId)).at(-1)).toMatchObject({
+			type: "run-cancelled",
+			source: "escape",
+		})
+	})
+
 	it("aborts at the step boundary before step 2: cancelled, run-cancelled emitted, steps 2/3 never start", async () => {
 		const controller = new AbortController()
 		const { workflow, calls } = buildCancelWorkflow({ onS1Run: () => controller.abort() })

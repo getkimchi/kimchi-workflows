@@ -38,6 +38,14 @@ export async function handleResume(
 	const summary = summarizeRun(events)
 	if (!summary) return void ctx.ui.notify(`workflow: run "${runId}" has no recorded events.`, "error")
 	const status = summary.status
+	const inspected = await store.executions?.inspect(runId)
+	if (inspected) {
+		const { host, pid } = inspected.lease.owner
+		return void ctx.ui.notify(
+			`workflow: run ${runId} is still owned by PID ${pid} on ${host}; wait for that execution to settle before resuming it.`,
+			"warning",
+		)
+	}
 
 	const workflowSource = workflowSourceOf(events)
 	if (!workflowSource) return void ctx.ui.notify(missingWorkflowProvenance(runId, "resumed"), "error")
@@ -86,8 +94,13 @@ export async function handleResume(
 		}
 
 		// rerun: node-atomic re-run (3a/5a). A re-run may itself reach a Q&A step and block → attend it.
-		const result = await runTracked(activeRuns, runId, store, (signal) => {
-			const host = createHostPort(store, { startAgent, ...progressCallbacks(progress) })
+		const result = await runTracked(activeRuns, runId, store, (signal, execution) => {
+			const host = createHostPort(store, {
+				startAgent,
+				executionId: execution.lease.executionId,
+				acceptEvent: () => execution.acceptsEvents(),
+				...progressCallbacks(progress),
+			})
 			return resumeWorkflow(workflow, events, host, { signal })
 		})
 		if (result.status === "blocked") {

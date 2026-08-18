@@ -4,6 +4,7 @@ import {
 	createAssistantTurnReader,
 	lastAssistantText,
 	lastAssistantUsage,
+	lastAssistantWasAborted,
 	type ModelRegistry,
 	parseNdjsonMessages,
 	resolveModel,
@@ -94,6 +95,17 @@ describe("lastAssistantUsage", () => {
 	it("returns undefined when there is no assistant message", () => {
 		expect(lastAssistantUsage(asMessages([]))).toBeUndefined()
 		expect(lastAssistantUsage(asMessages([{ role: "user", content: [{ type: "text", text: "hi" }] }]))).toBeUndefined()
+	})
+})
+
+describe("lastAssistantWasAborted", () => {
+	it("recognizes PI's Escape/interrupt stop reason on the last assistant message", () => {
+		expect(
+			lastAssistantWasAborted(
+				asMessages([{ role: "assistant", content: [], stopReason: "aborted", errorMessage: "Request was aborted" }]),
+			),
+		).toBe(true)
+		expect(lastAssistantWasAborted(asMessages([{ role: "assistant", content: [], stopReason: "stop" }]))).toBe(false)
 	})
 })
 

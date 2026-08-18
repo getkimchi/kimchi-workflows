@@ -129,7 +129,7 @@ type AttemptResult =
 			elapsedMs?: number
 			tokensUsed?: number
 	  }
-	| { kind: "cancelled" }
+	| { kind: "cancelled"; source?: "escape" }
 
 /** Run a function step under its retry + time budget (spec §9). Emits `step-retry`; the caller emits step lifecycle. */
 export async function runFunctionStep(
@@ -234,7 +234,7 @@ async function retryLoop(
 			(sig) => attempt(sig, n),
 			n === 1 ? carryOverMs : 0,
 		)
-		if (result.kind === "cancelled") return { kind: "cancelled" }
+		if (result.kind === "cancelled") return { kind: "cancelled", source: result.source }
 		if (result.kind === "ok") return { kind: "ok", output: result.output }
 		if (result.kind === "fatal") return { kind: "crashed", error: result.error }
 		if (result.kind === "blocked") {
@@ -472,6 +472,10 @@ async function runAgentSession(
 			if (signal.aborted) {
 				clearUsagePreview()
 				return { kind: "cancelled" }
+			}
+			if (turn.cancelled) {
+				clearUsagePreview()
+				return { kind: "cancelled", source: "escape" }
 			}
 
 			// A turn that failed at the provider is not a reply, so nothing below it applies: there is no

@@ -34,6 +34,13 @@ const questionnaire = {
 /** One sample per `RunEvent` variant. The mapped-over union is what makes this table exhaustive. */
 const SAMPLES: { [K in RunEvent["type"]]: Extract<RunEvent, { type: K }> } = {
 	"run-meta": { type: "run-meta", runId: RUN_ID, workflowFilePath: `/home/${SENTINEL}/deploy.workflow.ts`, at: AT },
+	"run-execution-started": {
+		type: "run-execution-started",
+		runId: RUN_ID,
+		executionId: "execution-1",
+		owner: { host: "worker-1", pid: 123, processStartedAt: AT },
+		at: AT,
+	},
 	"run-started": { type: "run-started", runId: RUN_ID, workflowName: "demo", input: { secret: SENTINEL }, at: AT },
 	"run-resumed": { type: "run-resumed", runId: RUN_ID, fromPath: "review", at: AT },
 	"step-started": { type: "step-started", runId: RUN_ID, path: "batch@2/review", input: { secret: SENTINEL }, at: AT },
@@ -156,6 +163,7 @@ const EXPECTED_EVENTS: { [K in RunEvent["type"]]: WorkflowEventType | undefined 
 	"agent-error": undefined,
 	"agent-steer": undefined,
 	"run-meta": undefined,
+	"run-execution-started": undefined,
 	"agent-usage": undefined,
 	"step-log": undefined,
 	"node-started": undefined,

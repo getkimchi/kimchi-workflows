@@ -152,7 +152,13 @@ export async function execute(
 					violation: outcome.violation,
 				}
 	}
-	await host.emit({ type: "run-cancelled", runId: state.runId, path: outcome.path, at: iso(host) })
+	await host.emit({
+		type: "run-cancelled",
+		runId: state.runId,
+		path: outcome.path,
+		source: outcome.source ?? "engine",
+		at: iso(host),
+	})
 	return { runId: state.runId, status: "cancelled", path: outcome.path }
 }
 
@@ -528,7 +534,7 @@ async function finishStep(
 			}
 			return { kind: "crashed", error: outcome.error, path }
 		case "cancelled":
-			return { kind: "cancelled", path }
+			return { kind: "cancelled", path, source: outcome.source }
 	}
 }
 

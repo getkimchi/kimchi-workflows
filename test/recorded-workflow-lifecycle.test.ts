@@ -66,7 +66,8 @@ describe("project-authored recorded workflow lifecycle", () => {
 		await handleResume(ctx, store, activeRuns, noAgent, runId)
 		expect((await store.list())[0]).toMatchObject({ runId, status: "completed" })
 		const events = await store.loadEvents(runId)
-		expect(events[0]).toMatchObject({
+		expect(events[0]).toMatchObject({ type: "run-execution-started" })
+		expect(events[1]).toMatchObject({
 			type: "run-meta",
 			workflowSource: { kind: "file", path: workflowFile },
 		})
