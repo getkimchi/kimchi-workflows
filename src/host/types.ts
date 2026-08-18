@@ -19,8 +19,8 @@ export interface RunSummary {
 /**
  * Per-run store (spec §8.9): an append-only event log keyed by run-id, plus listing.
  *
- * There is no metadata sidecar. The one fact the host needed one for — which file a run was launched
- * from, so `/workflow resume` can reload it (spec §8.5) — is now a `run-meta` event in the log itself
+ * There is no metadata sidecar. The one fact the host needed one for — which workflow source a run was
+ * launched from, so `/workflow resume` can recover it (spec §8.5) — is now a `run-meta` event in the log itself
  * (engine/types.ts), which makes a run exactly one file: nothing to keep in sync, nothing to leave
  * behind on delete, and a log that is self-describing wherever it is read.
  */

@@ -11,11 +11,11 @@ import { resumeWorkflow } from "../../engine/resume-workflow.ts"
 import { missingWorkflowProvenance, recordedWorkflowLoadFailure } from "../failure-messages.ts"
 import { createHostPort } from "../host-port.ts"
 import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
+import { loadRecordedWorkflow, workflowSourceLabel, workflowSourceOf } from "../recorded-workflow.ts"
 import { resumeAction } from "../resume-router.ts"
 import type { RunLock } from "../run-lock.ts"
 import { summarizeRun } from "../summarize-run.ts"
 import type { RunStore } from "../types.ts"
-import { loadValidatedWorkflow } from "../workflow-preflight.ts"
 import { handleAttendedInput, humanInputOf, pendingHumanInput } from "./attended.ts"
 import {
 	type CommandCtx,
@@ -40,7 +40,7 @@ export async function handleResume(
 	const runId = await resolveRunRef(ctx, store, runRef, "resume")
 	if (!runId) return // unknown or ambiguous — already notified
 
-	// The log FIRST, and the workflow file out of it: provenance is a `run-meta` event now (spec §8.9),
+	// The log FIRST, and the workflow source out of it: provenance is a `run-meta` event now (spec §8.9),
 	// not a sidecar, so there is nothing else to consult. A log with no `run-meta` is one this build
 	// cannot resume — pre-slug runs are inert by design (no migration), and saying so plainly beats
 	// guessing at a path.
@@ -49,16 +49,17 @@ export async function handleResume(
 	if (!summary) return void ctx.ui.notify(`workflow: run "${runId}" has no recorded events.`, "error")
 	const status = summary.status
 
-	const workflowFilePath = events.find((event) => event.type === "run-meta")?.workflowFilePath
-	if (!workflowFilePath) return void ctx.ui.notify(missingWorkflowProvenance(runId, "resumed"), "error")
+	const workflowSource = workflowSourceOf(events)
+	if (!workflowSource) return void ctx.ui.notify(missingWorkflowProvenance(runId, "resumed"), "error")
+	const sourceLabel = workflowSourceLabel(workflowSource)
 
-	const loaded = await loadValidatedWorkflow({ filePath: workflowFilePath, projectRoot: ctx.cwd })
+	const loaded = await loadRecordedWorkflow({ source: workflowSource, projectRoot: ctx.cwd })
 	if (!loaded.ok) {
 		ctx.ui.notify(
 			recordedWorkflowLoadFailure({
 				workflowName: summary.workflowName,
 				runId,
-				workflowFilePath,
+				workflowSource,
 				action: "resume",
 				cause: loaded.cause,
 			}),
@@ -76,7 +77,7 @@ export async function handleResume(
 	// Seed the panel from the log BEFORE the first new event (progress §9.1), so the widget opens showing
 	// everything already done — collapsed per §6.1 — rather than an empty tree that fills in backwards.
 	// This falls out of §2.4: the projection does not care whether events arrived live or from disk.
-	const progress = progressFor(workflow, runId, workflowFilePath)
+	const progress = progressFor(workflow, runId, sourceLabel)
 	progress.seed(events)
 	try {
 		if (action.kind === "answer") {
@@ -85,7 +86,7 @@ export async function handleResume(
 				store,
 				guard,
 				workflow.name,
-				workflowFilePath,
+				workflowSource,
 				startAgent,
 				runId,
 				pendingHumanInput(events),
@@ -107,7 +108,7 @@ export async function handleResume(
 				store,
 				guard,
 				workflow.name,
-				workflowFilePath,
+				workflowSource,
 				startAgent,
 				runId,
 				humanInputOf(result),

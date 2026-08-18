@@ -94,9 +94,13 @@ describe("run identity through the command handlers", () => {
 		expect(runId).toMatch(/^workflow-flaky-demo-[0-9a-f]{8}$/)
 
 		// `run-meta` is the adapter's own event and comes FIRST — a crash mid-run still leaves a log that
-		// knows which file it came from (spec §8.5's reload-to-resume).
+		// knows which workflow source it came from (spec §8.5's reload-to-resume).
 		const events = await store.loadEvents(runId)
-		expect(events[0]).toMatchObject({ type: "run-meta", runId, workflowFilePath: file })
+		expect(events[0]).toMatchObject({
+			type: "run-meta",
+			runId,
+			workflowSource: { kind: "file", path: file },
+		})
 		expect(events[1]?.type).toBe("run-started")
 		expect(existsSync(path.join(runDir, `${runId}.events.jsonl`))).toBe(true)
 		const failure = spy.notes.find(([, type]) => type === "error")?.[0] ?? ""
@@ -204,7 +208,7 @@ describe("run identity through the command handlers", () => {
 		await handleResume(fakeCtx(projectRoot, spy.notify), store, createFakeRunLock(), noAgent, "3f2a1c4b-old")
 
 		expect(spy.notes[0]?.[0]).toContain("workflow run 3f2a1c4b-old cannot be resumed")
-		expect(spy.notes[0]?.[0]).toContain("does not record the workflow file it came from")
+		expect(spy.notes[0]?.[0]).toContain("does not record the workflow source it came from")
 		expect(spy.notes[0]?.[0]).toContain("The recorded run has been preserved")
 		expect(spy.notes[0]?.[1]).toBe("error")
 	})

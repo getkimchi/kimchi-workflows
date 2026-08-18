@@ -50,8 +50,8 @@ export interface ProgressSinkOptions {
 	readonly outline: Outline
 	/** The run's short form for the panel header (`runIdHash`, naming.ts) — this layer owns that shape. */
 	readonly runLabel: string
-	/** `run-meta`'s path (spec §8.9), for the card's provenance line. */
-	readonly workflowFilePath?: string
+	/** `run-meta`'s display label (spec §8.9), for the card's provenance line. */
+	readonly workflowSourceLabel?: string
 	/** Injected so a test can freeze it; the pure layer takes `now` as a parameter for the same reason. */
 	readonly now?: () => Date
 	/** Monotonic frame clock. Separate from wall time so system-clock changes cannot move a live duration. */
@@ -203,7 +203,7 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
  * never reach here — they have already written their own last line (§8.1).
  */
 function announce(options: ProgressSinkOptions, view: ProgressView): boolean {
-	const { message, level } = runSummaryText(view, options.runLabel, options.workflowFilePath)
+	const { message, level } = runSummaryText(view, options.runLabel, options.workflowSourceLabel)
 	options.ctx.ui.notify(message, level)
 	return true
 }
@@ -229,19 +229,19 @@ function inertSink(): ProgressSink {
  * narrowest context they can (see commands/context.ts's `CommandCtx`). A bound factory keeps that where
  * it belongs, and makes a test's substitute one line.
  */
-export type ProgressFor = (workflow: WorkflowDefinition, runId: string, workflowFilePath?: string) => ProgressSink
+export type ProgressFor = (workflow: WorkflowDefinition, runId: string, workflowSourceLabel?: string) => ProgressSink
 
 /** Bind a factory to one invocation's context. Called once per `/workflow` command, in extension.ts. */
 export function bindProgress(
 	ctx: ProgressCtx,
 	overrides: Pick<ProgressSinkOptions, "now" | "monotonicNow" | "write" | "env"> = {},
 ): ProgressFor {
-	return (workflow, runId, workflowFilePath) =>
+	return (workflow, runId, workflowSourceLabel) =>
 		createProgressSink({
 			ctx,
 			outline: buildOutline(workflow),
 			runLabel: runIdHash(runId),
-			workflowFilePath,
+			workflowSourceLabel,
 			...overrides,
 		})
 }

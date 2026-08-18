@@ -81,7 +81,7 @@ function harness(mode: ProgressMode, sessionDir = "/tmp/session") {
 		ctx,
 		outline,
 		runLabel: "3f9a2c1d",
-		workflowFilePath: "/abs/demo.workflow.ts",
+		workflowSourceLabel: "/abs/demo.workflow.ts",
 		now: () => new Date(wallNow),
 		monotonicNow: () => monotonicNow,
 		write: (line: string) => void lines.push(line),

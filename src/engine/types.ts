@@ -7,6 +7,20 @@
 import type { TSchema } from "typebox"
 import type { Questionnaire } from "../flow/questionnaire.ts"
 
+/** Host-owned provenance used to recover a workflow definition for status, resume, and attended input. */
+export type WorkflowSource =
+	| { readonly kind: "builtin"; readonly id: string }
+	| { readonly kind: "file"; readonly path: string }
+
+/**
+ * Host-written run provenance. The `workflowFilePath` arm keeps logs written before explicit workflow
+ * sources readable; new runs always write `workflowSource`.
+ */
+export type RunMetaEvent = { readonly type: "run-meta"; readonly runId: string; readonly at: string } & (
+	| { readonly workflowSource: WorkflowSource; readonly workflowFilePath?: never }
+	| { readonly workflowSource?: never; readonly workflowFilePath: string }
+)
+
 /** Why a step is being retried (spec §9.2/§9.3). Input-schema violations are never retried. */
 export type RetryReason = "thrown-error" | "invalid-output" | "budget-exceeded" | "agent-error"
 
@@ -40,14 +54,14 @@ export type AgentOutputViolationKind =
  */
 export type RunEvent =
 	// Host-written provenance (spec §8.9), appended by the ADAPTER at run start — never by the engine,
-	// which stays file-unaware and could not name a `workflowFilePath` if it wanted to. It replaces the
+	// which stays provenance-unaware. It replaces the
 	// `<run-id>.meta.json` sidecar: one file per run, self-describing wherever it is read, and a
 	// `/workflow resume` that needs nothing but the log to reload the definition (spec §8.5). Kept
 	// separate from `run-started` for exactly that reason — that event is the ENGINE's, and folding a
-	// file path into it would put the filesystem inside the engine's vocabulary. Every consumer of the
+	// workflow source into it would put host concerns inside the engine's vocabulary. Every consumer of the
 	// log already ignores it: `deriveStepStates` has a `default: break`, `deriveRunStatus` filters by
 	// type, and `summarizeRun` keys off `run-started`.
-	| { type: "run-meta"; runId: string; workflowFilePath: string; at: string }
+	| RunMetaEvent
 	| { type: "run-started"; runId: string; workflowName: string; input: unknown; at: string }
 	// A resume (spec §8) continuing an existing run: appended to the same log instead of a second
 	// `run-started`. `fromPath` is the node path execution resumes at (absent if nothing remained).

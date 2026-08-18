@@ -47,8 +47,10 @@ export type {
 	ConversationMessage,
 	HostPort,
 	RunEvent,
+	RunMetaEvent,
 	RunOptions,
 	RunResult,
 	RunUpdate,
 	TokenUsage,
+	WorkflowSource,
 } from "./types.ts"

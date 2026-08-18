@@ -28,8 +28,8 @@ import { render } from "../../progress/render.ts"
 import { missingWorkflowProvenance, recordedWorkflowLoadFailure, workflowFailureLine } from "../failure-messages.ts"
 import { runIdHash } from "../naming.ts"
 import type { ProgressCtx } from "../progress-sink.ts"
+import { loadRecordedWorkflow, workflowSourceLabel, workflowSourceOf } from "../recorded-workflow.ts"
 import type { RunStore } from "../types.ts"
-import { loadValidatedWorkflow } from "../workflow-preflight.ts"
 import { type CommandCtx, resolveRunRef } from "./context.ts"
 
 /** What `handleStatus` needs beyond the store. Bound in extension.ts, faked in a test. */
@@ -56,21 +56,22 @@ export async function handleStatus(
 	const events = await store.loadEvents(runId)
 	if (events.length === 0) return void ctx.ui.notify(`workflow: run "${runId}" has no recorded events.`, "error")
 
-	const workflowFilePath = workflowFileOf(events)
-	if (!workflowFilePath) {
+	const workflowSource = workflowSourceOf(events)
+	if (!workflowSource) {
 		return void ctx.ui.notify(missingWorkflowProvenance(runId, "shown"), "error")
 	}
+	const sourceLabel = workflowSourceLabel(workflowSource)
 
 	// The DEFINITION is what supplies the shape — the log alone knows only what happened, not what was
 	// meant to (progress §3.4). A run whose file has since moved cannot be shown as a tree, and saying
 	// so plainly beats rendering a plausible-looking partial one.
-	const loaded = await loadValidatedWorkflow({ filePath: workflowFilePath, projectRoot: ctx.cwd })
+	const loaded = await loadRecordedWorkflow({ source: workflowSource, projectRoot: ctx.cwd })
 	if (!loaded.ok) {
 		ctx.ui.notify(
 			recordedWorkflowLoadFailure({
 				workflowName: workflowNameOf(events) ?? "unknown",
 				runId,
-				workflowFilePath,
+				workflowSource,
 				action: "show status",
 				cause: loaded.cause,
 			}),
@@ -93,17 +94,13 @@ export async function handleStatus(
 			? workflowFailureLine({ path: view.failurePath, cause: view.failureReason })
 			: undefined
 	ctx.ui.notify(
-		[`${workflowFilePath}`, failure, ...lines].filter((line): line is string => line !== undefined).join("\n"),
+		[sourceLabel, failure, ...lines].filter((line): line is string => line !== undefined).join("\n"),
 		view.status === "crashed" ? "error" : "info",
 	)
 }
 
 /** No colour: a notification is plain text on every harness, so the theme is the identity. */
 const PLAIN = { fg: (_colour: string, text: string) => text, bold: (text: string) => text }
-
-function workflowFileOf(events: readonly RunEvent[]): string | undefined {
-	return events.find((event) => event.type === "run-meta")?.workflowFilePath
-}
 
 function workflowNameOf(events: readonly RunEvent[]): string | undefined {
 	return events.find((event): event is Extract<RunEvent, { type: "run-started" }> => event.type === "run-started")

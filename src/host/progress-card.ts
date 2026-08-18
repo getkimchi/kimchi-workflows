@@ -47,7 +47,7 @@ export interface RunSummaryText {
  * Unstyled by construction: `notify` takes a string, so there is no theme to apply and no width to
  * wrap to — the host draws it. That also makes this trivially testable, which the themed card was not.
  */
-export function runSummaryText(view: ProgressView, runLabel: string, workflowFilePath?: string): RunSummaryText {
+export function runSummaryText(view: ProgressView, runLabel: string, workflowSourceLabel?: string): RunSummaryText {
 	const status = view.status ?? "in_progress"
 	const [glyph, statusLevel] = STATUS[status]
 	const level = status === "completed" && view.optionalFailures.length > 0 ? "warning" : statusLevel
@@ -83,7 +83,7 @@ export function runSummaryText(view: ProgressView, runLabel: string, workflowFil
 	if (status === "completed") {
 		for (const failure of view.optionalFailures) lines.push(`  "${failure.path}": ${failure.error}`)
 	}
-	if (workflowFilePath) lines.push(`  ${workflowFilePath}`)
+	if (workflowSourceLabel) lines.push(`  ${workflowSourceLabel}`)
 	if (status === "crashed") lines.push(...workflowCrashRecovery(runLabel).map((line) => `  ${line}`))
 	// `/workflow status` is where the fully expanded tree lives (§11.4, §6.6) — say so, since the panel
 	// that was showing it has just been cleared.
