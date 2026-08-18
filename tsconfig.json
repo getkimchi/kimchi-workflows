@@ -6,6 +6,9 @@
 		"moduleResolution": "Bundler",
 		"moduleDetection": "force",
 		"allowImportingTsExtensions": true,
+		"paths": {
+			"@kimchi-dev/kimchi-workflows": ["./src/flow/index.ts"]
+		},
 		"verbatimModuleSyntax": true,
 		"strict": true,
 		"noUncheckedIndexedAccess": true,

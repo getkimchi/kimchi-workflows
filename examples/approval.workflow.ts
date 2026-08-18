@@ -1,7 +1,7 @@
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent"
 import { Markdown } from "@earendil-works/pi-tui"
+import { createInteractiveStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
 import { Type } from "typebox"
-import { createInteractiveStep, createWorkflow } from "../src/flow/index.ts"
 
 const reviewRequest = Type.Object({ markdown: Type.String() })
 const reviewResult = Type.Union([

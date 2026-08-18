@@ -9,8 +9,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
+import { createAgentStep, createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
 import { type Static, Type } from "typebox"
-import { createAgentStep, createStep, createWorkflow } from "../src/flow/index.ts"
 
 const execFileAsync = promisify(execFile)
 const MAX_GIT_OUTPUT = 32 * 1024 * 1024

@@ -6,8 +6,9 @@
  * and run concurrently (bounded by the workflow's `maxConcurrency` ceiling, spec §3.6); the
  * node's output is an object keyed by arm name, independent of completion order.
  */
+
+import { createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
 import { Type } from "typebox"
-import { createStep, createWorkflow } from "../src/flow/index.ts"
 
 export const sentenceSchema = Type.Object({ text: Type.String() })
 export const wordCountSchema = Type.Object({ words: Type.Integer({ minimum: 0 }) })

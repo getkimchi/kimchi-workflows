@@ -3,8 +3,9 @@
  * function step consumes it. The framework derives the questionnaire from the annotated `output`
  * schema; on answers, they are reassembled + validated into `output` — no LLM.
  */
+
+import { createQuestionnaireStep, createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
 import { Type } from "typebox"
-import { createQuestionnaireStep, createStep, createWorkflow } from "../src/flow/index.ts"
 
 export const answerSchema = Type.Object({
 	name: Type.String({ title: "Name", description: "What is your name?" }),
