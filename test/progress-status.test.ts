@@ -223,7 +223,7 @@ describe("handleStatus (progress §11.4)", () => {
 		const h = fakeCtx("tui")
 		await handleStatus(h.ctx, store, h.deps, "9f9f9f9f")
 		expect(h.notes[0]?.[0]).toContain("workflow run workflow-orphan-9f9f9f9f cannot be shown")
-		expect(h.notes[0]?.[0]).toContain("does not record the workflow file it came from")
+		expect(h.notes[0]?.[0]).toContain("does not record the workflow source it came from")
 		expect(h.notes[0]?.[0]).toContain("The recorded run has been preserved")
 	})
 })

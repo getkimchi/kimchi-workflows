@@ -1,5 +1,8 @@
 /** Shared user-facing diagnostics for execution failures and recorded-workflow recovery. */
 
+import type { WorkflowSource } from "../engine/types.ts"
+import { workflowSourceLabel } from "./workflow-source.ts"
+
 export interface WorkflowCrashIdentity {
 	readonly workflowName: string
 	readonly runId: string
@@ -33,22 +36,27 @@ export function workflowFailureLine(details: Pick<WorkflowCrashDetails, "path" |
 export function recordedWorkflowLoadFailure(options: {
 	readonly workflowName: string
 	readonly runId: string
-	readonly workflowFilePath: string
+	readonly workflowSource: WorkflowSource
 	readonly action: "resume" | "show status"
 	readonly cause?: string
 }): string {
+	const sourceKind = options.workflowSource.kind === "file" ? "File" : "Built-in"
 	return [
 		`workflow "${options.workflowName}" cannot ${options.action} (run ${options.runId})`,
-		`  File: ${options.workflowFilePath}`,
-		`  ${options.cause ?? "The workflow file no longer exists."}`,
+		`  ${sourceKind}: ${workflowSourceLabel(options.workflowSource)}`,
+		`  ${options.cause ?? defaultLoadFailure(options.workflowSource)}`,
 		"  The recorded run has been preserved.",
 	].join("\n")
+}
+
+function defaultLoadFailure(source: WorkflowSource): string {
+	return source.kind === "file" ? "The workflow file no longer exists." : "The package-owned workflow is unavailable."
 }
 
 export function missingWorkflowProvenance(runId: string, action: "resumed" | "shown"): string {
 	return [
 		`workflow run ${runId} cannot be ${action}`,
-		"  Its history does not record the workflow file it came from.",
+		"  Its history does not record the workflow source it came from.",
 		"  The recorded run has been preserved.",
 	].join("\n")
 }

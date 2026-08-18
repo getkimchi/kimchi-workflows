@@ -20,7 +20,7 @@ export const RUN_LOG_SUFFIX = ".events.jsonl"
  * read each step session as a run log. In the other direction nothing needs doing — the log is not a
  * session file and the harness's own reader returns `null` for anything whose first line is not
  * `{"type":"session"}`, with every enumerator dropping nulls. There is no `.meta.json` sidecar any
- * more: `workflowFilePath` is a `run-meta` event in the log itself (engine/types.ts), so a run is
+ * more: workflow provenance is a `run-meta` event in the log itself (engine/types.ts), so a run is
  * exactly one file and `delete` is exactly one unlink.
  */
 export function createFsStore(dir: string): RunStore {

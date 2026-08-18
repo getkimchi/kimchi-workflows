@@ -7,13 +7,14 @@
 import { readFile } from "node:fs/promises"
 import path from "node:path"
 import { runWorkflow } from "../../engine/run-workflow.ts"
+import type { WorkflowSource } from "../../engine/types.ts"
 import type { WorkflowDefinition } from "../../flow/types.ts"
 import { describeSchemaViolations } from "../../flow/validation.ts"
 import { createHostPort } from "../host-port.ts"
 import { mintRunId } from "../naming.ts"
 import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
 import { workflowsDir } from "../project-dir.ts"
-import { BUILTIN_CREATE_WORKFLOW_FILE, createWorkflowWorkflow } from "../recorded-workflow.ts"
+import { BUILTIN_CREATE_WORKFLOW, workflowSourceLabel } from "../recorded-workflow.ts"
 import type { RunLock } from "../run-lock.ts"
 import type { RunStore } from "../types.ts"
 import { resolveWorkflow } from "../workflow-catalog.ts"
@@ -154,7 +155,16 @@ export async function handleRun(
 		initialInput = resolved.value
 	}
 
-	await startRun(ctx, store, guard, startAgent, resolution.workflow, resolution.filePath, initialInput, progressFor)
+	await startRun(
+		ctx,
+		store,
+		guard,
+		startAgent,
+		resolution.workflow,
+		{ kind: "file", path: resolution.filePath },
+		initialInput,
+		progressFor,
+	)
 }
 
 /**
@@ -171,8 +181,7 @@ export async function handleCreate(
 ): Promise<void> {
 	if (rejectIfBusy(ctx, guard, "starting")) return
 
-	// The built-in ships with the extension, so it is imported directly rather than loaded from disk.
-	// `workflowFilePath` still points at its module so a resume can reload it like any other run.
+	// The built-in ships with the extension, so it is imported directly and recorded by registry ID.
 	// `workflowsDir` rides the initial input: the built-in cannot derive it itself (createInputSchema).
 	const input = { projectRoot: ctx.cwd, workflowsDir: workflowsDir(ctx.cwd) }
 	await startRun(
@@ -180,8 +189,8 @@ export async function handleCreate(
 		store,
 		guard,
 		startAgent,
-		createWorkflowWorkflow,
-		BUILTIN_CREATE_WORKFLOW_FILE,
+		BUILTIN_CREATE_WORKFLOW.workflow,
+		BUILTIN_CREATE_WORKFLOW.source,
 		input,
 		progressFor,
 	)
@@ -194,7 +203,7 @@ async function startRun(
 	guard: RunLock,
 	startAgent: StartAgent,
 	workflow: WorkflowDefinition,
-	workflowFilePath: string,
+	workflowSource: WorkflowSource,
 	initialInput: unknown,
 	progressFor: ProgressFor,
 ): Promise<void> {
@@ -213,13 +222,14 @@ async function startRun(
 	// call does. A blocked run keeps its widget while its questionnaire renders inline (progress §7.5):
 	// the panel is what tells a user which step of what is asking, and the attended loop below is
 	// several engine calls, not one.
-	const progress = progressFor(workflow, runId, workflowFilePath)
+	const sourceLabel = workflowSourceLabel(workflowSource)
+	const progress = progressFor(workflow, runId, sourceLabel)
 	try {
 		const result = await runGuarded(guard, runId, ctx.cwd, store, notifier(ctx), async (signal) => {
 			// The adapter's own event (spec §8.9), not the engine's: `run-started` is emitted by the engine,
-			// which is deliberately unaware of files, so where this run came FROM is recorded separately —
+			// which is deliberately unaware of provenance, so where this run came FROM is recorded separately —
 			// before the first engine event, so a crash mid-run still leaves a resumable log.
-			await store.appendEvent({ type: "run-meta", runId, workflowFilePath, at: new Date().toISOString() })
+			await store.appendEvent({ type: "run-meta", runId, workflowSource, at: new Date().toISOString() })
 			const host = createHostPort(store, {
 				generateRunId: () => runId,
 				startAgent,
@@ -236,7 +246,7 @@ async function startRun(
 				store,
 				guard,
 				workflow.name,
-				workflowFilePath,
+				workflowSource,
 				startAgent,
 				runId,
 				humanInputOf(result),

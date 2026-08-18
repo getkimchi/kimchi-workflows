@@ -285,8 +285,8 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 			//    is what operators care about, and `run_blocked` → `run_resumed` already carries it;
 			//  - `agent-steer` measures the author's prompt and schema complexity, not system health — the
 			//    run log keeps every repair with its violation kind for local diagnosis;
-			//  - `run-meta` carries a raw filesystem path (revisit with hashing, if dashboards need to tell
-			//    two projects' identically-named workflows apart);
+			//  - `run-meta` can carry a raw project filesystem path (revisit with hashing, if dashboards need
+			//    to tell two projects' identically-named workflows apart);
 			//  - `step-log` is free text the author wrote, and its structured `data` is theirs too (spec R2);
 			//  - `agent-usage` waits on a double-counting policy against the harness's own request telemetry;
 			//  - node/branch/loop/foreach structure is a run-log analysis, not a telemetry query (spec R4).

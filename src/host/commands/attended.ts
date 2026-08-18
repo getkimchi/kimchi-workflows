@@ -10,13 +10,13 @@ import {
 	resumeWithAnswer,
 	resumeWithInteraction,
 } from "../../engine/resume-workflow.ts"
-import type { RunEvent, RunResult } from "../../engine/types.ts"
+import type { RunEvent, RunResult, WorkflowSource } from "../../engine/types.ts"
 import type { Questionnaire } from "../../flow/questionnaire.ts"
 import type { InteractiveStep, WorkflowDefinition } from "../../flow/types.ts"
 import { createHostPort } from "../host-port.ts"
-import { loadWorkflowFile } from "../load-workflow.ts"
 import { inertProgress, type ProgressSink, progressCallbacks } from "../progress-sink.ts"
 import { collectAnswers } from "../questionnaire-render.ts"
+import { reloadRecordedWorkflow, workflowSourceLabel } from "../recorded-workflow.ts"
 import type { RunLock } from "../run-lock.ts"
 import type { RunStore } from "../types.ts"
 import { type CommandCtx, describe, notifier, reportResult, runGuarded, type StartAgent } from "./context.ts"
@@ -48,7 +48,7 @@ export async function handleAttendedInput(
 	store: RunStore,
 	guard: RunLock,
 	workflowName: string,
-	workflowFilePath: string,
+	workflowSource: WorkflowSource,
 	startAgent: StartAgent,
 	runId: string,
 	initialInput: PendingHumanInput | undefined,
@@ -67,7 +67,7 @@ export async function handleAttendedInput(
 		if (pending.kind === "questionnaire") {
 			candidate = await collectAnswers(ctx, pending.questionnaire)
 		} else {
-			const workflow = await reloadForInteraction(ctx, workflowFilePath)
+			const workflow = await reloadForInteraction(ctx, workflowSource)
 			if (!workflow) return
 			const step = interactiveStepAt(workflow, targetPath)
 			if (!step) {
@@ -105,7 +105,7 @@ export async function handleAttendedInput(
 		let result: Awaited<ReturnType<typeof runGuarded>>
 		try {
 			result = await runGuarded(guard, runId, ctx.cwd, store, notifier(ctx), async (signal) => {
-				const workflow = await loadWorkflowFile(workflowFilePath)
+				const workflow = await reloadRecordedWorkflow(workflowSource)
 				const events = await store.loadEvents(runId)
 				const host = createHostPort(store, { startAgent, ...progressCallbacks(progress) })
 				return pendingKind === "questionnaire"
@@ -132,12 +132,15 @@ export async function handleAttendedInput(
 
 async function reloadForInteraction(
 	ctx: CommandCtx,
-	workflowFilePath: string,
+	workflowSource: WorkflowSource,
 ): Promise<WorkflowDefinition | undefined> {
 	try {
-		return await loadWorkflowFile(workflowFilePath)
+		return await reloadRecordedWorkflow(workflowSource)
 	} catch (error) {
-		ctx.ui.notify(`workflow: failed to reload "${workflowFilePath}" for interaction: ${describe(error)}`, "warning")
+		ctx.ui.notify(
+			`workflow: failed to reload "${workflowSourceLabel(workflowSource)}" for interaction: ${describe(error)}`,
+			"warning",
+		)
 		return undefined
 	}
 }
