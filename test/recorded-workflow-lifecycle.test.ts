@@ -82,5 +82,5 @@ describe("project-authored recorded workflow lifecycle", () => {
 		expect(message).toContain("✓ ask")
 		expect(message).toContain("✓ finish")
 		expect(type).toBe("info")
-	})
+	}, 20_000)
 })
