@@ -12,6 +12,7 @@ import type { ActiveRuns } from "../active-runs.ts"
 import { missingWorkflowProvenance, recordedWorkflowLoadFailure } from "../failure-messages.ts"
 import { createHostPort } from "../host-port.ts"
 import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
+import { reconcileAbandonedRun } from "../reconcile-runs.ts"
 import { loadRecordedWorkflow, workflowSourceLabel, workflowSourceOf } from "../recorded-workflow.ts"
 import { resumeAction } from "../resume-router.ts"
 import { summarizeRun } from "../summarize-run.ts"
@@ -29,6 +30,7 @@ export async function handleResume(
 ): Promise<void> {
 	const runId = await resolveRunRef(ctx, store, runRef, "resume")
 	if (!runId) return // unknown or ambiguous — already notified
+	await reconcileAbandonedRun(store, runId, (candidate) => activeRuns.find(candidate).length > 0)
 
 	// The log FIRST, and the workflow source out of it: provenance is a `run-meta` event now (spec §8.9),
 	// not a sidecar, so there is nothing else to consult. A log with no `run-meta` is one this build
@@ -38,6 +40,14 @@ export async function handleResume(
 	const summary = summarizeRun(events)
 	if (!summary) return void ctx.ui.notify(`workflow: run "${runId}" has no recorded events.`, "error")
 	const status = summary.status
+	const inspected = await store.executions?.inspect(runId)
+	if (inspected) {
+		const { host, pid } = inspected.lease.owner
+		return void ctx.ui.notify(
+			`workflow: run ${runId} is still owned by PID ${pid} on ${host}; wait for that execution to settle before resuming it.`,
+			"warning",
+		)
+	}
 
 	const workflowSource = workflowSourceOf(events)
 	if (!workflowSource) return void ctx.ui.notify(missingWorkflowProvenance(runId, "resumed"), "error")
@@ -86,8 +96,13 @@ export async function handleResume(
 		}
 
 		// rerun: node-atomic re-run (3a/5a). A re-run may itself reach a Q&A step and block → attend it.
-		const result = await runTracked(activeRuns, runId, store, (signal) => {
-			const host = createHostPort(store, { startAgent, ...progressCallbacks(progress) })
+		const result = await runTracked(activeRuns, runId, store, (signal, execution) => {
+			const host = createHostPort(store, {
+				startAgent,
+				executionId: execution.lease.executionId,
+				acceptEvent: () => execution.acceptsEvents(),
+				...progressCallbacks(progress),
+			})
 			return resumeWorkflow(workflow, events, host, { signal })
 		})
 		if (result.status === "blocked") {

@@ -44,8 +44,8 @@ describe("resume across a fresh store instance (fs, spec §8.9)", () => {
 		expect(runs[0]).toMatchObject({ runId: first.runId, workflowName: "toggle", status: "completed" })
 	})
 
-	// Provenance travels IN the log now (a `run-meta` event, spec §8.9) rather than in a sidecar, so a
-	// run is one file: it survives a fresh store instance, and deleting the run takes it with it.
+	// Provenance travels IN the log now (a `run-meta` event, spec §8.9) rather than in a metadata
+	// sidecar: it survives a fresh store instance, and deleting the run takes it with it.
 	it("round-trips run provenance through the log itself and honors delete", async () => {
 		const store = createFsStore(runDir)
 		const result = await runWorkflow(helloWorkflow, undefined, createHostPort(store))

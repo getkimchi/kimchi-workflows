@@ -31,6 +31,7 @@ import { createFsStore } from "./fs-store.ts"
 import { createPiAgentBridge } from "./pi-agent.ts"
 import { bindProgress } from "./progress-sink.ts"
 import { runArtifactsDir } from "./project-dir.ts"
+import { createProcessExecutionOwner } from "./run-lease.ts"
 import { registerStepOutputToolsFromEnv } from "./step-output-tools.ts"
 import { withTelemetry } from "./telemetry-bridge.ts"
 
@@ -40,7 +41,8 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 	// nested run inside the run it belongs to.
 	if (registerStepOutputToolsFromEnv(pi)) return
 
-	const activeRuns = createActiveRuns() // lifecycle visibility only; never limits concurrent executions
+	const activeRuns = createActiveRuns() // different run ids overlap; the same run id never does
+	const executionOwner = createProcessExecutionOwner()
 	const bindAgentStarter = createPiAgentBridge(pi) // one shared listener set for the extension's lifetime
 	const completionSources = createCompletionSources()
 
@@ -65,7 +67,9 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 			// published without each write site having to remember to. It only
 			// publishes on the harness bus; whether anything ships is a subscriber's decision, and with no
 			// subscriber loaded (plain PI) the whole thing is inert.
-			const store = withTelemetry(createFsStore(runDir), (channel, data) => pi.events.emit(channel, data))
+			const store = withTelemetry(createFsStore(runDir, { executionOwner }), (channel, data) =>
+				pi.events.emit(channel, data),
+			)
 			const startAgent = bindAgentStarter(ctx.modelRegistry, runDir, ctx)
 			// The live surface, chosen per invocation from `ctx.mode` (progress §7.2) — the context is what
 			// knows whether there is a terminal to draw in, and it does not exist until a command runs.
@@ -74,7 +78,8 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 			switch (sub) {
 				case "run": {
 					// `list` is reserved as the first argument to `run`, so it can never name a workflow (spec §6.3).
-					if (rest[0] === "list") return void (await handleListRuns(ctx, store))
+					if (rest[0] === "list")
+						return void (await handleListRuns(ctx, store, (runId) => activeRuns.find(runId).length > 0))
 
 					// Re-sliced from the RAW (not `\s+`-collapsed) remainder: `--input`'s own payload is very
 					// often a JSON object containing spaces (spec §6.1), and `rest` above has already thrown that

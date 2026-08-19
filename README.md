@@ -59,8 +59,8 @@ Because the engine owns every transition — and every branch/loop condition is 
 - **Five composable node/step types.** *Function* (a TypeScript function), *Agent* (runs the harness agent tool loop), *Questionnaire* (schema-derived forms), *Interactive* (a workflow-defined, resumable Kimchi UI), and *Nested workflow* (compose a committed workflow).
 - **Deterministic, harness-driven execution.** The engine — not the model — decides transitions. No steering messages or tool calls influence control flow, so runs are reproducible and always reach a terminal state.
 - **Fan-out with a ceiling.** `.parallel([a, b])` runs independent steps at once; `.foreach(body, { concurrency })` iterates a list, sequential by default. A workflow-wide `maxConcurrency` (default 4) caps the whole run, so a wide fan-out can't open twenty model sessions at once.
-- **Unrestricted run concurrency.** Different runs—including multiple instances of the same workflow—may execute concurrently. The host does not lock the project or infer side-effect conflicts from user-authored TypeScript; authors coordinate shared files, branches, resumable sessions, and external resources when needed.
-- **Stop and resume.** Runs are recorded as an append-only JSONL event log alongside the harness's own sessions. `blocked`, `crashed`, and `cancelled` runs all resume from the last checkpoint; `foreach` resumes at the next unprocessed item; a step blocked deep inside a loop resumes back into that iteration with its conversation intact.
+- **Run concurrency without duplicate execution.** Different run ids—including multiple instances of the same workflow—may execute concurrently. One run id has at most one active execution, enforced by a per-run lease; the host still does not infer side-effect conflicts between different runs.
+- **Stop and resume.** Runs are recorded as an append-only JSONL event log alongside the harness's own sessions. Cancellation is flushed to that log before `/workflow cancel` aborts local work, and Escape during the active in-session agent turn records the same terminal lifecycle. `blocked`, `crashed`, and `cancelled` runs all resume from the last checkpoint; `foreach` resumes at the next unprocessed item; a step blocked deep inside a loop resumes back into that iteration with its conversation intact.
 - **Human-in-the-loop when needed, unattended when not.** A workflow with no Q&A steps runs to completion with zero human interaction. A Q&A-capable step *blocks* the run and surfaces its question inline; answering resumes the same agent loop with context intact. Dismissing a question does **not** cancel — the run stays blocked until answered or explicitly cancelled.
 - **Background subagents.** An agent step marked `background: true` runs as a Kimchi subagent — its own context window and tool loop, returning only its structured output.
 - **Typed data flow with TypeBox.** Step input/output schemas are TypeBox; adjacent steps hand off automatically when schemas line up, and `.map()` / the run context (`getStepResult`, `getInitData`) reach non-adjacent outputs. The same schema validates LLM structured output and types your code.
@@ -136,10 +136,12 @@ Once the extension is registered, these are available in any Kimchi session:
 | `/workflow run <name\|file.ts>` | Start a run, by declared name or by path. Other runs may execute concurrently. |
 | `/workflow run list` | List runs: id, workflow name, status, current step, pending questions, started/completed times. |
 | `/workflow resume [run-id]` | Continue a `blocked` / `crashed` / `cancelled` run from its last checkpoint. |
-| `/workflow cancel [run-id]` | Stop a run: abort an executing one at the next step boundary, or cancel a blocked one outright. Resumable either way. |
+| `/workflow cancel [run-id]` | Durably stop a run: its executing runner records `cancelled` before aborting, or any runner may cancel an ownerless blocked run. Resumable either way. |
 | `/workflow delete <run-id>` | Permanently remove a **stopped** run and its events. The id is always required; a live run is rejected — cancel it first. |
 
 > **Listing imports every workflow.** `/workflow list` reads each file's declared name by importing it, which executes project code — the same trust boundary `.kimchi/extensions/` sits behind. Keep workflow modules free of import-time side effects: define the workflow, export it, do nothing else.
+
+An executing run can be cancelled only by the process that owns its live lease. A command from another process is refused with the owner host and PID; it is not forwarded through a mailbox. Read-only `run list` and `status` commands project a same-host owner that is provably dead as `crashed` without changing the JSONL. A later `resume`, `cancel`, or `delete` of that run persists the crash and retires its stale lease before continuing. Cross-host ownership remains conservative because local code cannot verify the remote process.
 
 ---
 

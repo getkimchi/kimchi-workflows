@@ -25,6 +25,10 @@ export interface HostPortOptions {
 	onEvent?: (event: RunEvent) => void
 	/** A non-durable progress tee. Unlike `onEvent`, it performs no store write. */
 	onUpdate?: (update: RunUpdate) => void
+	/** Execution epoch attached to run-level terminal events emitted by the engine. */
+	executionId?: string
+	/** Close the event stream synchronously while durable cancellation is being written. */
+	acceptEvent?: (event: RunEvent) => boolean
 }
 
 /**
@@ -44,11 +48,21 @@ export function createHostPort(store: RunStore, options: HostPortOptions = {}): 
 			}),
 		// Persist first, render second (progress §2.3) — never the other way round, and never in parallel.
 		emit: async (event) => {
-			await store.appendEvent(event)
-			options.onEvent?.(event)
+			if (options.acceptEvent && !options.acceptEvent(event)) return
+			const durable = withExecutionId(event, options.executionId)
+			await store.appendEvent(durable)
+			options.onEvent?.(durable)
 		},
 		update: (update) => options.onUpdate?.(update),
 	}
+}
+
+function withExecutionId(event: RunEvent, executionId: string | undefined): RunEvent {
+	if (!executionId) return event
+	if (event.type === "run-completed" || event.type === "run-crashed" || event.type === "run-cancelled") {
+		return { ...event, executionId }
+	}
+	return event
 }
 
 /** Real timer that resolves after `ms`, or early if `signal` aborts (clearing the timer so it does not linger). */

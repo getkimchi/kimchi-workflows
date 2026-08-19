@@ -126,7 +126,7 @@ export function buildDeclaredNameIndex(nodes: readonly WorkflowNode[]): Map<stri
 export type StepOutcome =
 	| { kind: "ok"; output: unknown }
 	| { kind: "crashed"; error: string }
-	| { kind: "cancelled" }
+	| { kind: "cancelled"; source?: "escape" }
 	// A step asked a `questions` batch (spec §10): the run blocks. `conversation` resumes the same loop.
 	// `violation` is set only when a questionnaire step re-blocks because the delivered answers were
 	// invalid. `elapsedMs`/`tokensUsed` (agent Q&A steps only, spec §9.4) are this attempt's running
@@ -145,7 +145,7 @@ export type StepOutcome =
 export type ExecOutcome =
 	| { kind: "ok"; output: unknown }
 	| { kind: "crashed"; error: string; path?: string }
-	| { kind: "cancelled"; path?: string }
+	| { kind: "cancelled"; path?: string; source?: "escape" }
 	| {
 			kind: "blocked"
 			blockKind: "questionnaire"

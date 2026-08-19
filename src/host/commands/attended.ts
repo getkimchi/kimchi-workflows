@@ -104,10 +104,15 @@ export async function handleAttendedInput(
 
 		let result: Awaited<ReturnType<typeof runTracked>>
 		try {
-			result = await runTracked(activeRuns, runId, store, async (signal) => {
+			result = await runTracked(activeRuns, runId, store, async (signal, execution) => {
 				const workflow = await reloadRecordedWorkflow(workflowSource)
 				const events = await store.loadEvents(runId)
-				const host = createHostPort(store, { startAgent, ...progressCallbacks(progress) })
+				const host = createHostPort(store, {
+					startAgent,
+					executionId: execution.lease.executionId,
+					acceptEvent: () => execution.acceptsEvents(),
+					...progressCallbacks(progress),
+				})
 				return pendingKind === "questionnaire"
 					? resumeWithAnswer(workflow, events, candidate as Record<string, unknown>, host, {
 							signal,

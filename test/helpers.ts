@@ -5,7 +5,7 @@ import type { AgentRequest, HostPort, RunEvent } from "../src/engine/types.ts"
 import { type ActiveRuns, createActiveRuns } from "../src/host/active-runs.ts"
 import { createHostPort, type HostPortOptions } from "../src/host/host-port.ts"
 import { createMemoryStore } from "../src/host/memory-store.ts"
-import type { RunStore } from "../src/host/types.ts"
+import type { RunExecutionLease, RunStore } from "../src/host/types.ts"
 
 export interface TestHost {
 	host: HostPort
@@ -54,7 +54,23 @@ export function tempSessionsDir(): string {
 	return mkdtempSync(path.join(tmpdir(), "pi-workflows-sessions-"))
 }
 
-/** The real non-exclusive registry is already deterministic and side-effect free, so tests use it directly. */
+/** The real per-run registry is deterministic and side-effect free, so tests use it directly. */
 export function createFakeActiveRuns(): ActiveRuns {
 	return createActiveRuns()
+}
+
+/** Explicit execution identity for registry-focused tests; production callers always acquire one from a store. */
+export function fakeRunLease(runId: string): RunExecutionLease {
+	return {
+		version: 1,
+		runId,
+		executionId: `execution-${runId}`,
+		owner: {
+			ownerId: "test-owner",
+			host: "test-host",
+			pid: 1,
+			processStartedAt: "2026-08-18T00:00:00.000Z",
+		},
+		acquiredAt: "2026-08-18T00:00:00.000Z",
+	}
 }

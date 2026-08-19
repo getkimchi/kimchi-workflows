@@ -130,6 +130,17 @@ export function lastAssistantError(messages: AgentMessages): AgentTurnError | un
 	return undefined
 }
 
+/** Whether PI ended the last assistant turn through its interrupt path (normally the Escape key). */
+export function lastAssistantWasAborted(messages: AgentMessages): boolean {
+	if (!Array.isArray(messages)) return false
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i]
+		if (!isAssistantMessage(message)) continue
+		return (message as { stopReason?: unknown }).stopReason === "aborted"
+	}
+	return false
+}
+
 /** {@link lastAssistantError} for a single message — the incremental reader's entry point. */
 export function errorFromMessage(message: unknown): AgentTurnError | undefined {
 	if (!isAssistantMessage(message)) return undefined

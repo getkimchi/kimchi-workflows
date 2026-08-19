@@ -295,6 +295,7 @@ export function createTelemetryMapper(options: TelemetryOptions = {}): Telemetry
 			case "interaction-provided":
 			case "agent-steer":
 			case "run-meta":
+			case "run-execution-started":
 			case "step-log":
 			case "agent-usage":
 			case "node-started":
@@ -386,6 +387,7 @@ export function withTelemetry(
 	}
 
 	return {
+		executions: store.executions,
 		async appendEvent(event: RunEvent): Promise<void> {
 			// Persist FIRST: the log is the run's state, and a telemetry failure must not be able to lose an
 			// event. A store error propagates untouched, and nothing is published for a write that failed.

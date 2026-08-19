@@ -21,6 +21,13 @@ export type RunMetaEvent = { readonly type: "run-meta"; readonly runId: string; 
 	| { readonly workflowSource?: never; readonly workflowFilePath: string }
 )
 
+/** Durable, public part of an execution owner. The private lease token never enters the run log. */
+export interface RunExecutionOwnerEvent {
+	readonly host: string
+	readonly pid: number
+	readonly processStartedAt: string
+}
+
 /** Why a step is being retried (spec §9.2/§9.3). Input-schema violations are never retried. */
 export type RetryReason = "thrown-error" | "invalid-output" | "budget-exceeded" | "agent-error"
 
@@ -62,6 +69,16 @@ export type RunEvent =
 	// log already ignores it: `deriveStepStates` has a `default: break`, `deriveRunStatus` filters by
 	// type, and `summarizeRun` keys off `run-started`.
 	| RunMetaEvent
+	// Host-written execution epoch. The sidecar lease provides atomic exclusion; this event makes the
+	// owner and execution identity part of the durable, replayable lifecycle without coupling a run to
+	// the parent PI session that happened to launch it.
+	| {
+			type: "run-execution-started"
+			runId: string
+			executionId: string
+			owner: RunExecutionOwnerEvent
+			at: string
+	  }
 	| { type: "run-started"; runId: string; workflowName: string; input: unknown; at: string }
 	// A resume (spec §8) continuing an existing run: appended to the same log instead of a second
 	// `run-started`. `fromPath` is the node path execution resumes at (absent if nothing remained).
@@ -147,13 +164,20 @@ export type RunEvent =
 			data?: Record<string, unknown>
 			at: string
 	  }
-	| { type: "run-completed"; runId: string; output: unknown; at: string }
+	| { type: "run-completed"; runId: string; executionId?: string; output: unknown; at: string }
 	// `path` is omitted when the failure is the workflow's own input validation (no step ran yet) or a
 	// resume-time definition-drift check (spec §8.7, no single step to attribute to).
-	| { type: "run-crashed"; runId: string; path?: string; error: string; at: string }
+	| { type: "run-crashed"; runId: string; executionId?: string; path?: string; error: string; at: string }
 	// A cooperative cancel (spec §5, §8.6): applied side effects are NOT rolled back; the run is
 	// recoverable via resume. `path` is the step the run was cancelled at, if one was executing.
-	| { type: "run-cancelled"; runId: string; path?: string; at: string }
+	| {
+			type: "run-cancelled"
+			runId: string
+			executionId?: string
+			path?: string
+			source?: "command" | "escape" | "engine"
+			at: string
+	  }
 	// A Q&A suspension (spec §8.4/§8.5/§10): a step asked a `questions` BATCH → the run is `blocked`.
 	// `path` is the step's full node path — legal anywhere (inside a loop, foreach, branch arm, or
 	// nested workflow, spec §8.5), not just top-level. `conversation` is the opaque agent history needed
@@ -335,6 +359,8 @@ export interface AgentTurnError {
 export interface AgentTurn {
 	readonly text: string
 	readonly usage?: TokenUsage
+	/** The harness interrupted this turn (for example, the user pressed Escape). */
+	readonly cancelled?: boolean
 	/**
 	 * The last `submit_*` call of the turn, if any — the ONLY channel a step under a contract reports
 	 * through, since a later message cannot displace a tool call. A step with no `outputSchema` has no

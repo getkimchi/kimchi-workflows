@@ -7,9 +7,10 @@
  */
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
 import type { AgentRequest, AgentSession, RunResult } from "../../engine/types.ts"
-import type { ActiveRuns } from "../active-runs.ts"
+import type { ActiveRun, ActiveRuns } from "../active-runs.ts"
 import { workflowCrashMessage } from "../failure-messages.ts"
 import { matchRunId } from "../naming.ts"
+import { createProcessExecutionOwner, createRunExecutionLease } from "../run-lease.ts"
 import type { RunStore } from "../types.ts"
 
 /** How a command opens an agent session (spec §2.2), bound to the invoking context's model registry. */
@@ -30,9 +31,8 @@ export interface NotifyCtx {
 export type Notify = CommandCtx["ui"]["notify"]
 
 /**
- * Track one execution without imposing exclusivity: register its abort controller, run, report its
- * outcome to the optional telemetry observer, and unregister it on every exit. Registration never
- * checks what else is active, so separate executions of the same or different workflows may overlap.
+ * Acquire and track one execution. Different run ids may overlap, while a store-backed atomic lease
+ * prevents the same run id from being executed twice across processes.
  *
  * `store.observeResult` — present only when the store is the telemetry-decorated one
  * (`host/telemetry-bridge.ts`) — is handed the outcome on the way out. This is the one run state with no
@@ -44,18 +44,47 @@ export type Notify = CommandCtx["ui"]["notify"]
 export async function runTracked(
 	activeRuns: ActiveRuns,
 	runId: string,
-	store: Pick<RunStore, "appendEvent"> & { observeResult?: (result: RunResult) => void },
-	run: (signal: AbortSignal) => Promise<RunResult>,
+	store: Pick<RunStore, "appendEvent" | "executions"> & { observeResult?: (result: RunResult) => void },
+	run: (signal: AbortSignal, execution: ActiveRun) => Promise<RunResult>,
 ): Promise<RunResult> {
-	const execution = activeRuns.start(runId)
+	const lease = store.executions
+		? await store.executions.acquire(runId)
+		: createRunExecutionLease(runId, fallbackExecutionOwner)
+	let execution: ActiveRun
 	try {
-		const outcome = await run(execution.controller.signal)
-		store.observeResult?.(outcome)
-		return outcome
+		execution = activeRuns.start(lease)
+	} catch (error) {
+		await store.executions?.release(lease)
+		throw error
+	}
+	try {
+		await store.appendEvent({
+			type: "run-execution-started",
+			runId,
+			executionId: lease.executionId,
+			owner: {
+				host: lease.owner.host,
+				pid: lease.owner.pid,
+				processStartedAt: lease.owner.processStartedAt,
+			},
+			at: lease.acquiredAt,
+		})
+		const outcome = await run(execution.controller.signal, execution)
+		const cancelled = await execution.settle()
+		const effective: RunResult = cancelled ? { runId, status: "cancelled", path: outcome.path } : outcome
+		store.observeResult?.(effective)
+		return effective
 	} finally {
-		activeRuns.finish(execution)
+		try {
+			await execution.settle()
+		} finally {
+			activeRuns.finish(execution)
+			await store.executions?.release(lease)
+		}
 	}
 }
+
+const fallbackExecutionOwner = createProcessExecutionOwner()
 
 /**
  * Turn a `resume`/`cancel`/`delete` argument into a run-id, or notify why it cannot be one and return

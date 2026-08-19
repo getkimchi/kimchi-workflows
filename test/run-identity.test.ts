@@ -10,7 +10,7 @@ import { createFsStore } from "../src/host/fs-store.ts"
 import { createMemoryStore } from "../src/host/memory-store.ts"
 import { workflowsDir } from "../src/host/project-dir.ts"
 import type { RunStore } from "../src/host/types.ts"
-import { createFakeActiveRuns } from "./helpers.ts"
+import { createFakeActiveRuns, fakeRunLease } from "./helpers.ts"
 
 type NoteType = "info" | "warning" | "error" | undefined
 
@@ -82,7 +82,7 @@ describe("run identity through the command handlers", () => {
 		return file
 	}
 
-	it("mints a readable slug and records provenance in the log itself, before anything else", async () => {
+	it("mints a readable slug and records execution ownership plus provenance before engine events", async () => {
 		const file = await writeFlaky()
 		const spy = notifySpy()
 
@@ -93,15 +93,21 @@ describe("run identity through the command handlers", () => {
 		const runId = runs[0]?.runId ?? ""
 		expect(runId).toMatch(/^workflow-flaky-demo-[0-9a-f]{8}$/)
 
-		// `run-meta` is the adapter's own event and comes FIRST — a crash mid-run still leaves a log that
-		// knows which workflow source it came from (spec §8.5's reload-to-resume).
+		// Both leading records are adapter-owned: the execution owner is durable without exposing a parent
+		// session id, then run-meta preserves the workflow source needed to resume after a crash.
 		const events = await store.loadEvents(runId)
 		expect(events[0]).toMatchObject({
+			type: "run-execution-started",
+			runId,
+			owner: { pid: process.pid },
+		})
+		expect(events[0]).not.toHaveProperty("owner.ownerId")
+		expect(events[1]).toMatchObject({
 			type: "run-meta",
 			runId,
 			workflowSource: { kind: "file", path: file },
 		})
-		expect(events[1]?.type).toBe("run-started")
+		expect(events[2]?.type).toBe("run-started")
 		expect(existsSync(path.join(runDir, `${runId}.events.jsonl`))).toBe(true)
 		const failure = spy.notes.find(([, type]) => type === "error")?.[0] ?? ""
 		expect(failure).toContain(`workflow "flaky-demo" crashed at "flaky" (run ${runId})`)
@@ -261,12 +267,12 @@ describe("resolving a run reference in delete", () => {
 	it("cancel aborts the executing run when a prefix resolves to it", async () => {
 		const store = await storeWith("workflow-deploy-1a2b3c4d")
 		const activeRuns = createFakeActiveRuns()
-		const execution = activeRuns.start("workflow-deploy-1a2b3c4d")
+		const execution = activeRuns.start(fakeRunLease("workflow-deploy-1a2b3c4d"))
 		const spy = notifySpy()
 
 		await handleCancel({ ui: { notify: spy.notify } }, activeRuns, store, "workflow-dep")
 
 		expect(execution.controller.signal.aborted).toBe(true)
-		expect(spy.notes[0]?.[0]).toMatch(/cancelling run workflow-deploy-1a2b3c4d at the next step boundary/)
+		expect(spy.notes[0]?.[0]).toMatch(/cancelled run workflow-deploy-1a2b3c4d; stopping the active execution/)
 	})
 })
