@@ -5,8 +5,9 @@
  * `createAgentStep({ asks: true })` produces a Q&A agent that fills `output`; the framework owns the
  * questionnaire schema and auto-injects the asking protocol, so the `prompt` is task-only.
  */
+
+import { createAgentStep, createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
 import { Type } from "typebox"
-import { createAgentStep, createStep, createWorkflow } from "../src/flow/index.ts"
 
 export const planSchema = Type.Object({
 	steps: Type.Array(Type.String()),

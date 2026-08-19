@@ -12,8 +12,9 @@
  * - the `.map` reaches back to `parse` — which is no longer the previous step — and combines it
  *   with `count` to build `summarize`'s input (non-adjacent data flow, spec §3.7).
  */
+
+import { createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
 import { Type } from "typebox"
-import { createStep, createWorkflow } from "../src/flow/index.ts"
 
 const wordsSchema = Type.Object({ words: Type.Array(Type.String()) })
 const countSchema = Type.Object({ count: Type.Integer({ minimum: 0 }) })

@@ -1,7 +1,7 @@
 import { readFile, realpath, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
+import { createAgentStep, createQuestionnaireStep, createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
 import { type Static, Type } from "typebox"
-import { createAgentStep, createQuestionnaireStep, createStep, createWorkflow } from "../src/flow/index.ts"
 
 export const evidenceDirectorySchema = Type.Object({
 	evidenceDirectory: Type.String({

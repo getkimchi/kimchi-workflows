@@ -4,8 +4,9 @@
  * A seed step produces a list of numbers; the foreach runs its body once per number (item as input),
  * doubling each; the node output is the array of per-item outputs, in order.
  */
+
+import { createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
 import { Type } from "typebox"
-import { createStep, createWorkflow } from "../src/flow/index.ts"
 
 export const itemSchema = Type.Object({ n: Type.Integer() })
 export const doubledSchema = Type.Object({ doubled: Type.Integer() })

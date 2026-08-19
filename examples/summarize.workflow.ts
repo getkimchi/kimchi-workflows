@@ -5,8 +5,9 @@
  * runs on the session model, or `kimchi-dev/kimi-k2.7` when set as the default). The step submits its
  * result by calling `workflow_submit_result`, and the engine validates that payload against `output`.
  */
+
+import { createAgentStep, createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
 import { Type } from "typebox"
-import { createAgentStep, createStep, createWorkflow } from "../src/flow/index.ts"
 
 export const summarySchema = Type.Object({
 	summary: Type.String(),

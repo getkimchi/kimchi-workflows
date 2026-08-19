@@ -5,8 +5,9 @@
  * The loop body is a sub-workflow (propose -> check) executed recursively by the same engine. The
  * loop's pure condition reads the check step's output from the run context.
  */
+
+import { createAgentStep, createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
 import { Type } from "typebox"
-import { createAgentStep, createStep, createWorkflow } from "../src/flow/index.ts"
 
 /** The agent must return a short slug (lowercase letters, digits, hyphens) — a deliberately strict target. */
 export const proposalSchema = Type.Object({ slug: Type.String() })

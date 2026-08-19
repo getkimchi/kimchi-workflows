@@ -6,8 +6,9 @@
  * node's output is the array of per-item outputs in ITEM order, regardless of completion order —
  * unlike `batch.workflow.ts`'s default `concurrency: 1`, this one genuinely overlaps.
  */
+
+import { createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
 import { Type } from "typebox"
-import { createStep, createWorkflow } from "../src/flow/index.ts"
 
 export const itemSchema = Type.Object({ n: Type.Integer() })
 export const squaredSchema = Type.Object({ squared: Type.Integer() })

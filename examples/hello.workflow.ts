@@ -4,8 +4,9 @@
  * Run it: `/workflow run examples/hello.workflow.ts` (from the PI host), or drive it
  * directly through the engine with a fake HostPort (see test/hello.test.ts).
  */
+
+import { createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
 import { Type } from "typebox"
-import { createStep, createWorkflow } from "../src/flow/index.ts"
 
 export const helloOutputSchema = Type.Object({
 	message: Type.String(),
