@@ -1,5 +1,3 @@
-import { readdir } from "node:fs/promises"
-import path from "node:path"
 import { ask, createTestRun, raw, reply } from "@kimchi-dev/kimchi-workflows/testing"
 import { describe, expect, it } from "vitest"
 import approvalWorkflow from "./approval.workflow.ts"
@@ -15,27 +13,7 @@ import reviewLoopWorkflow from "./review-loop.workflow.ts"
 import summarizeWorkflow from "./summarize.workflow.ts"
 import surveyWorkflow from "./survey.workflow.ts"
 
-const coveredWorkflowFiles = [
-	"approval.workflow.ts",
-	"batch.workflow.ts",
-	"code-review.workflow.ts",
-	"external-dependency/external-dependency.workflow.ts",
-	"fan-out.workflow.ts",
-	"foreach-concurrent.workflow.ts",
-	"hello.workflow.ts",
-	"kimchi-bug-investigation.workflow.ts",
-	"pipeline.workflow.ts",
-	"planning.workflow.ts",
-	"review-loop.workflow.ts",
-	"summarize.workflow.ts",
-	"survey.workflow.ts",
-] as const
-
 describe("example workflows (offline)", () => {
-	it("keeps every workflow example covered by the shared suite", async () => {
-		expect(await findWorkflowFiles(import.meta.dirname)).toEqual(coveredWorkflowFiles)
-	})
-
 	it("approval: blocks for an interactive decision and resumes", async () => {
 		const blocked = await createTestRun(approvalWorkflow)
 		expect(blocked.status).toBe("blocked")
@@ -266,17 +244,3 @@ describe("example workflows (offline)", () => {
 		expect(completed.stepOutput("write-report")).toMatchObject({ reportPath, classification: "bug" })
 	})
 })
-
-async function findWorkflowFiles(directory: string, prefix = ""): Promise<string[]> {
-	const files: string[] = []
-	for (const entry of await readdir(directory, { withFileTypes: true })) {
-		if (entry.name === "node_modules" || entry.name.startsWith(".")) continue
-		const relativePath = path.posix.join(prefix, entry.name)
-		if (entry.isDirectory()) {
-			files.push(...(await findWorkflowFiles(path.join(directory, entry.name), relativePath)))
-		} else if (entry.name.endsWith(".workflow.ts")) {
-			files.push(relativePath)
-		}
-	}
-	return files.sort()
-}

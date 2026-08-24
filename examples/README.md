@@ -23,7 +23,7 @@ questionnaire/interactive examples run with no network.
 | `planning` | Q&A agent | A planning agent that may ask a clarifying question (parks), then plans on the answer. | `/workflow run examples/planning.workflow.ts` |
 | `code-review` | agent + parallel + filesystem | A review graph with intent inference, parallel specialists, synthesis, and report persistence. | `/workflow run examples/code-review.workflow.ts` |
 | `kimchi-bug-investigation` | questionnaire + agent + filesystem | A guided evidence and source investigation that writes a bug report. | `/workflow run examples/kimchi-bug-investigation.workflow.ts` |
-| `external-dependency` | function + dependency | A workflow importing `slugify` from the shared examples package. | `/workflow run examples/external-dependency/external-dependency.workflow.ts` |
+| `external-dependency` | function + dependency | A workflow importing `slugify` from the shared examples package. | `/workflow run examples/external-dependency.workflow.ts` |
 
 ## Tests
 
