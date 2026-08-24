@@ -1,13 +1,16 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent"
+import type { Component, TUI } from "@earendil-works/pi-tui"
 import { Type } from "typebox"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { resumeWithAnswer, resumeWorkflow } from "../src/engine/resume-workflow.ts"
 import { runWorkflow } from "../src/engine/run-workflow.ts"
 import type { RunResult } from "../src/engine/types.ts"
 import { createQuestionnaireStep, createStep, createWorkflow } from "../src/flow/index.ts"
 import {
+	chooseWorkflowWelcomeAction,
 	handleCancel,
 	handleDelete,
 	handleListRuns,
@@ -194,6 +197,157 @@ describe("handleListWorkflows", () => {
 		expect(spy.notes[1]?.[1]).toBe("warning")
 		expect(spy.notes[1]?.[0]).toMatch(/1 file\(s\) failed to load/)
 		expect(spy.notes[1]?.[0]).toMatch(/bad\.workflow\.ts/)
+	})
+})
+
+// -- bare /workflow welcome and picker -------------------------------------------------------------
+
+function welcomeUi(selectOption: (options: string[]) => string | undefined) {
+	const select = vi.fn(async (_title: string, options: string[]) => selectOption(options))
+	const customMock = vi.fn()
+	const custom = customMock as unknown as ExtensionUIContext["custom"]
+	const notify = vi.fn()
+	return { select, custom, customMock, notify }
+}
+
+describe("chooseWorkflowWelcomeAction", () => {
+	it("shows the branded empty state with Create as the sole Enter-selectable action", async () => {
+		const root = await mkdtemp(path.join(tmpdir(), "pi-ext-welcome-empty-"))
+		const ui = welcomeUi((options) => options[0])
+
+		const action = await chooseWorkflowWelcomeAction({
+			cwd: root,
+			mode: "rpc",
+			hasUI: true,
+			ui,
+		})
+
+		expect(action).toEqual({ kind: "create" })
+		const [title, options] = ui.select.mock.calls[0] as [string, string[]]
+		expect(title).toContain("Kimchi Workflows")
+		expect(title).toContain("No workflows found.")
+		expect(title).toContain(`${path.relative(root, workflowsDir(root))}.`)
+		expect(options).toEqual(["Create a workflow"])
+		expect(ui.customMock).not.toHaveBeenCalled()
+	})
+
+	it("lists identifiable workflows, runs the exact selected file, and keeps Create last", async () => {
+		const root = await projectWith({
+			"deploy.workflow.ts": workflowSource("deploy", "ship it"),
+			"bare.workflow.ts": workflowSource("bare"),
+		})
+		const ui = welcomeUi((options) => options.find((option) => option.startsWith("deploy —")))
+
+		const action = await chooseWorkflowWelcomeAction({
+			cwd: root,
+			mode: "rpc",
+			hasUI: true,
+			ui,
+		})
+
+		expect(action).toEqual({ kind: "run", filePath: path.join(workflowsDir(root), "deploy.workflow.ts") })
+		const [title, options] = ui.select.mock.calls[0] as [string, string[]]
+		expect(title).toContain("Which workflow do you want to run?")
+		expect(options).toEqual(["bare", "deploy — ship it", "Create new workflow"])
+		expect(ui.customMock).not.toHaveBeenCalled()
+	})
+
+	it("adds filename hints to duplicate workflow names in the RPC dialog", async () => {
+		const root = await projectWith({
+			"a.workflow.ts": workflowSource("deploy", "first"),
+			"b.workflow.ts": workflowSource("deploy", "second"),
+		})
+		const ui = welcomeUi((options) => options.find((option) => option.startsWith("deploy (b.workflow.ts)")))
+
+		const action = await chooseWorkflowWelcomeAction({ cwd: root, mode: "rpc", hasUI: true, ui })
+
+		expect(action).toEqual({ kind: "run", filePath: path.join(workflowsDir(root), "b.workflow.ts") })
+		expect(ui.select.mock.calls[0]?.[1]).toEqual([
+			"deploy (a.workflow.ts) — first",
+			"deploy (b.workflow.ts) — second",
+			"Create new workflow",
+		])
+	})
+
+	it("keeps a workflow whose name matches the RPC create action selectable", async () => {
+		const root = await projectWith({
+			"reserved.workflow.ts": workflowSource("Create new workflow"),
+		})
+		const ui = welcomeUi((options) => options.find((option) => option.includes("reserved.workflow.ts")))
+
+		const action = await chooseWorkflowWelcomeAction({ cwd: root, mode: "rpc", hasUI: true, ui })
+
+		expect(action).toEqual({ kind: "run", filePath: path.join(workflowsDir(root), "reserved.workflow.ts") })
+		expect(ui.select.mock.calls[0]?.[1]).toEqual(["Create new workflow (reserved.workflow.ts)", "Create new workflow"])
+	})
+
+	it("connects TUI catalog discovery to the dynamically loaded quick-pick end to end", async () => {
+		const root = await projectWith({
+			"deploy.workflow.ts": workflowSource("deploy", "ship it"),
+			"bare.workflow.ts": workflowSource("bare"),
+		})
+		const tui = { requestRender: vi.fn(), terminal: { rows: 40, columns: 120 } } as unknown as TUI
+		const theme = {
+			fg: (_color: string, text: string) => text,
+			bold: (text: string) => text,
+		} as Theme
+		let component: Component | undefined
+		const customMock = vi.fn((factory: Parameters<ExtensionUIContext["custom"]>[0]) => {
+			return new Promise<unknown>((resolve) => {
+				component = factory(tui, theme, {} as never, resolve) as Component
+			})
+		})
+		const select = vi.fn()
+		const notify = vi.fn()
+		const ui = { custom: customMock, select, notify } as unknown as Pick<
+			ExtensionUIContext,
+			"custom" | "select" | "notify"
+		>
+
+		const pending = chooseWorkflowWelcomeAction({ cwd: root, mode: "tui", hasUI: true, ui })
+		await vi.waitFor(() => expect(component).toBeDefined())
+
+		expect(component?.render(100).join("\n")).toContain("❯ 1 · bare")
+		expect(select).not.toHaveBeenCalled()
+		component?.handleInput?.("\r")
+		expect(await pending).toEqual({ kind: "run", filePath: path.join(workflowsDir(root), "bare.workflow.ts") })
+		expect(customMock).toHaveBeenCalledOnce()
+	})
+
+	it("warns about broken files without offering them and treats dismissal as a no-op", async () => {
+		const root = await projectWith({
+			"good.workflow.ts": workflowSource("good", "works"),
+			"bad.workflow.ts": "export default { not: 'a workflow' };",
+		})
+		const ui = welcomeUi(() => undefined)
+
+		const action = await chooseWorkflowWelcomeAction({
+			cwd: root,
+			mode: "rpc",
+			hasUI: true,
+			ui,
+		})
+
+		expect(action).toBeUndefined()
+		expect(ui.notify).toHaveBeenCalledWith(expect.stringMatching(/bad\.workflow\.ts/), "warning")
+		expect(ui.select.mock.calls[0]?.[1]).toEqual(["good — works", "Create new workflow"])
+		expect(ui.customMock).not.toHaveBeenCalled()
+	})
+
+	it("requests the plain listing without opening UI when dialogs are unavailable", async () => {
+		const ui = welcomeUi(() => "unexpected")
+
+		const action = await chooseWorkflowWelcomeAction({
+			cwd: "/project-that-does-not-need-to-be-scanned",
+			mode: "print",
+			hasUI: false,
+			ui,
+		})
+
+		expect(action).toEqual({ kind: "list" })
+		expect(ui.select).not.toHaveBeenCalled()
+		expect(ui.customMock).not.toHaveBeenCalled()
+		expect(ui.notify).not.toHaveBeenCalled()
 	})
 })
 

@@ -15,6 +15,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
 import { createActiveRuns } from "./active-runs.ts"
 import {
+	chooseWorkflowWelcomeAction,
 	handleCancel,
 	handleCreate,
 	handleDelete,
@@ -123,7 +124,15 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 					return void (await handleDelete(ctx, store, runId))
 				}
 
-				case undefined:
+				case undefined: {
+					const action = await chooseWorkflowWelcomeAction(ctx)
+					if (!action) return
+					if (action.kind === "list") return void (await handleListWorkflows(ctx))
+					if (action.kind === "create")
+						return void (await handleCreate(ctx, store, activeRuns, startAgent, progressFor))
+					return void (await handleRun(ctx, store, activeRuns, startAgent, action.filePath, undefined, progressFor))
+				}
+
 				case "list":
 					return void (await handleListWorkflows(ctx))
 

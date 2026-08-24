@@ -9,7 +9,8 @@ import path from "node:path"
 import { workflowsDir } from "../project-dir.ts"
 import { projectRunSummaries } from "../reconcile-runs.ts"
 import type { RunStore } from "../types.ts"
-import { discoverWorkflows } from "../workflow-catalog.ts"
+import { type BrokenWorkflow, discoverWorkflows } from "../workflow-catalog.ts"
+import { isDuplicateWorkflowName, workflowNameCounts } from "../workflow-display.ts"
 import type { NotifyCtx } from "./context.ts"
 
 /** `/workflow run list` — the recorded runs (spec §6.3). */
@@ -46,19 +47,23 @@ export async function handleListWorkflows(ctx: NotifyCtx & { cwd: string }): Pro
 		// The filename is shown, not just the name: two files may declare the same workflow name, and
 		// without it the listing would show indistinguishable rows for workflows `run` then rejects as
 		// ambiguous. Duplicates are called out so the collision is obvious rather than merely implied.
-		const counts = new Map<string, number>()
-		for (const entry of entries) counts.set(entry.name, (counts.get(entry.name) ?? 0) + 1)
+		const counts = workflowNameCounts(entries)
 
 		const width = Math.max(...entries.map((entry) => entry.name.length))
 		const lines = entries.map((entry) => {
-			const duplicate = (counts.get(entry.name) ?? 0) > 1 ? "  (duplicate name)" : ""
+			const duplicate = isDuplicateWorkflowName(entry, counts) ? "  (duplicate name)" : ""
 			return `${entry.name.padEnd(width)}  ${path.basename(entry.filePath)}  ${entry.description ?? "-"}${duplicate}`
 		})
 		ctx.ui.notify(lines.join("\n"), "info")
 	}
 
 	if (broken.length > 0) {
-		const lines = broken.map((entry) => `${entry.filePath}: ${entry.error}`)
-		ctx.ui.notify(`workflow: ${broken.length} file(s) failed to load:\n${lines.join("\n")}`, "warning")
+		notifyBrokenWorkflows(ctx, broken)
 	}
+}
+
+/** Shared by the plain catalog and the bare-command picker so broken files are never hidden. */
+export function notifyBrokenWorkflows(ctx: NotifyCtx, broken: readonly BrokenWorkflow[]): void {
+	const lines = broken.map((entry) => `${entry.filePath}: ${entry.error}`)
+	ctx.ui.notify(`workflow: ${broken.length} file(s) failed to load:\n${lines.join("\n")}`, "warning")
 }
