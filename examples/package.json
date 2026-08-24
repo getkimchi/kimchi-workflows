@@ -1,11 +1,16 @@
 {
-	"name": "kimchi-external-dependency-workflow-example",
+	"name": "kimchi-workflows-examples",
 	"version": "1.0.0",
 	"private": true,
 	"type": "module",
 	"packageManager": "pnpm@10.33.0",
 	"engines": {
 		"node": ">=24"
+	},
+	"scripts": {
+		"test": "vitest run --config vitest.config.ts",
+		"typecheck": "tsc --noEmit -p tsconfig.json",
+		"verify:external-dependency": "vitest run --config vitest.config.ts external-dependency/external-dependency.workflow.test.ts"
 	},
 	"dependencies": {
 		"slugify": "1.6.9"

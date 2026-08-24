@@ -1,0 +1,11 @@
+{
+	"extends": "../tsconfig.json",
+	"compilerOptions": {
+		"paths": {
+			"@kimchi-dev/kimchi-workflows": ["../src/flow/index.ts"],
+			"@kimchi-dev/kimchi-workflows/testing": ["../src/testing/index.ts"]
+		}
+	},
+	"include": ["**/*.ts"],
+	"exclude": ["node_modules"]
+}

@@ -28,6 +28,9 @@
 			"complexity": {
 				"noBannedTypes": "off"
 			},
+			"correctness": {
+				"noUndeclaredDependencies": "error"
+			},
 			"performance": {
 				"noDelete": "warn"
 			},

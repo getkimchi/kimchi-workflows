@@ -217,7 +217,8 @@ For complete control-flow, runtime, state, and testing semantics, see the [`exte
 ## Development
 
 ```bash
-pnpm test                 # offline unit + example suite (no network)
+pnpm test                 # offline library and extension tests (no network)
+pnpm test:examples        # every example, with scripted agents and stubbed side effects
 pnpm test:integration     # live agent examples, gated on KIMCHI_API_KEY
 pnpm typecheck            # tsc --noEmit
 ```

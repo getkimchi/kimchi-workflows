@@ -36,14 +36,23 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install example dependencies
+        run: pnpm --dir examples --ignore-workspace install --frozen-lockfile
+
       - name: Lint
         run: pnpm run lint
 
       - name: Typecheck
         run: pnpm run typecheck
 
+      - name: Typecheck examples
+        run: pnpm run typecheck:examples
+
       - name: Test
         run: pnpm run test
+
+      - name: Test examples
+        run: pnpm run test:examples
 
   publish:
     name: Publish to npm

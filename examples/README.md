@@ -21,11 +21,14 @@ questionnaire/interactive examples run with no network.
 | `summarize` | agent | A single agent step returning schema-valid structured output (`{ summary, keywords }`). | `/workflow run examples/summarize.workflow.ts` |
 | `review-loop` | agent + loop | An agent proposes a slug, a function check evaluates it, `.dountil` it passes (max-iteration guard). | `/workflow run examples/review-loop.workflow.ts` |
 | `planning` | Q&A agent | A planning agent that may ask a clarifying question (parks), then plans on the answer. | `/workflow run examples/planning.workflow.ts` |
+| `code-review` | agent + parallel + filesystem | A review graph with intent inference, parallel specialists, synthesis, and report persistence. | `/workflow run examples/code-review.workflow.ts` |
+| `kimchi-bug-investigation` | questionnaire + agent + filesystem | A guided evidence and source investigation that writes a bug report. | `/workflow run examples/kimchi-bug-investigation.workflow.ts` |
+| `external-dependency` | function + dependency | A workflow importing `slugify` from the shared examples package. | `/workflow run examples/external-dependency/external-dependency.workflow.ts` |
 
 ## Tests
 
-- **Offline** (`npm test`): `test/examples-suite.test.ts` runs every LLM-free example (`hello`,
-  `pipeline`, `batch`, `fan-out`, `foreach-concurrent`, `survey`, `approval`) end-to-end through the engine with
-  a fake host.
-- **Live** (`npm run test:integration`, gated on `KIMCHI_API_KEY`): the agent-bearing examples
-  (`summarize`, `review-loop`, `planning`) run against `kimchi-dev/kimi-k2.7`.
+- **Offline** (`pnpm run test:examples` from the repository root): the shared `examples/` package runs every example
+  end-to-end through the engine. Agent responses and side-effectful steps are schema-checked test doubles, so this
+  suite needs no model credentials and does not touch Git or write reports.
+- **Live** (`pnpm run test:integration`, gated on `KIMCHI_API_KEY`): `summarize`, `review-loop`, and `planning` also
+  run against `kimchi-dev/kimi-k2.7`.

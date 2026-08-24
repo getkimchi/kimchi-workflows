@@ -43,3 +43,30 @@ jobs:
 
       - name: Run ${{ matrix.check }}
         run: ${{ matrix.run }}
+
+  examples:
+    name: examples
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Install repository dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install example dependencies
+        run: pnpm --dir examples --ignore-workspace install --frozen-lockfile
+
+      - name: Typecheck examples
+        run: pnpm run typecheck:examples
+
+      - name: Test examples
+        run: pnpm run test:examples
