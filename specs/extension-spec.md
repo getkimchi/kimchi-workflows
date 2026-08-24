@@ -304,6 +304,30 @@ starting a **new** run (fresh run-id), never a transition back. *(decision)*
 
 ## 6. Commands
 
+6.0. Bare `/workflow` is the feature entry point. In the TUI it replaces the
+ordinary editor with a compact terminal-native quick-pick, using the same interaction
+region as `/settings` so two input surfaces are never visible at once. A blank top row
+keeps the picker separated from the conversation above. The picker contains a
+`~ Kimchi Workflows ~` header, one-line explanation and project-relative workflow
+directory, then the current state and numbered actions. It does not open the host's
+generic bordered selector dialog. Arrow keys move the highlighted `❯` row, Enter runs
+it, number keys provide direct shortcuts, and Escape dismisses the picker; the host
+then restores the original editor and its text.
+
+If workflows exist, each row shows its name and description, followed by
+`Create new workflow`; duplicate declared names gain a filename hint so their rows
+remain distinguishable. In RPC, a workflow label that matches the built-in create
+action also gains a filename hint because the native dialog returns labels rather
+than row identities. Selecting a workflow runs its exact file, while selecting
+the create action is equivalent to `/workflow create`. If none exist, the screen says
+`No workflows found.` and unnumbered `Create a workflow` is the sole highlighted row,
+so Enter accepts it. Broken files remain visible as warnings but cannot be selected.
+RPC uses the same copy and actions through its native dialog transport.
+
+In `print`/`json` mode, where `hasUI` is false, bare `/workflow` falls back to the
+plain `/workflow list` response. Explicit `/workflow list` remains non-interactive in
+every mode. *(decision)*
+
 6.1. `/workflow run <name|file.ts> [--input <json>|@<file>]` — start a run. The
 argument is resolved as a filesystem path when it ends in `.ts`, otherwise as a
 workflow **name** from the catalog (§6.7). Paths resolve relative to the project

@@ -7,6 +7,7 @@
  *   resume     continuing a blocked/stopped run (§6.2)
  *   lifecycle  stopping and removing: `cancel` and `delete` (§6.4, §6.5)
  *   list       the two listings: workflows and runs (§6.7, §6.3)
+ *   welcome    the interactive bare-command entry point
  *
  * `extension.ts` holds only argument dispatch; each handler takes the narrowest context it needs, so
  * all of them are testable without a PI session.
@@ -28,3 +29,5 @@ export type { InitialInputResolution, ParsedRunArgs } from "./run.ts"
 export { handleCreate, handleRun, parseRunArgs, resolveInitialInput } from "./run.ts"
 export type { StatusDeps } from "./status.ts"
 export { handleStatus } from "./status.ts"
+export type { WorkflowWelcomeAction } from "./welcome.ts"
+export { chooseWorkflowWelcomeAction } from "./welcome.ts"

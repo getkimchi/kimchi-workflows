@@ -131,6 +131,7 @@ Once the extension is registered, these are available in any Kimchi session:
 
 | Command | What it does |
 | --- | --- |
+| `/workflow` | Open the terminal-native Kimchi Workflows quick-pick and choose a workflow to run or create. In headless modes, list the project's workflows. |
 | `/workflow list` | List the project's workflows: name, file, and description. |
 | `/workflow create` | Turn your goal into an approved behavioral plan, a runnable workflow, and a happy-path test. |
 | `/workflow run <name\|file.ts>` | Start a run, by declared name or by path. Other runs may execute concurrently. |
@@ -139,7 +140,7 @@ Once the extension is registered, these are available in any Kimchi session:
 | `/workflow cancel [run-id]` | Durably stop a run: its executing runner records `cancelled` before aborting, or any runner may cancel an ownerless blocked run. Resumable either way. |
 | `/workflow delete <run-id>` | Permanently remove a **stopped** run and its events. The id is always required; a live run is rejected — cancel it first. |
 
-> **Listing imports every workflow.** `/workflow list` reads each file's declared name by importing it, which executes project code — the same trust boundary `.kimchi/extensions/` sits behind. Keep workflow modules free of import-time side effects: define the workflow, export it, do nothing else.
+> **Opening the picker or listing imports every workflow.** `/workflow` and `/workflow list` read each file's declared name by importing it, which executes project code — the same trust boundary `.kimchi/extensions/` sits behind. Keep workflow modules free of import-time side effects: define the workflow, export it, do nothing else.
 
 An executing run can be cancelled only by the process that owns its live lease. A command from another process is refused with the owner host and PID; it is not forwarded through a mailbox. Read-only `run list` and `status` commands project a same-host owner that is provably dead as `crashed` without changing the JSONL. A later `resume`, `cancel`, or `delete` of that run persists the crash and retires its stale lease before continuing. Cross-host ownership remains conservative because local code cannot verify the remote process.
 
