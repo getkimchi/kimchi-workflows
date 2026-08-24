@@ -178,7 +178,7 @@ describe("/workflow create behavior-first path", () => {
 		expect(done.agent("implement").messages[0]).toContain("Produce one enthusiastic fixed greeting")
 	})
 
-	it("normalizes the chosen name and avoids file and declared-name collisions", async () => {
+	it("normalizes the chosen filename identity and ignores declared-name collisions", async () => {
 		const root = await projectRoot()
 		const directory = workflowsDir(root)
 		await mkdir(directory, { recursive: true })
@@ -187,12 +187,11 @@ describe("/workflow create behavior-first path", () => {
 			validSource.replace('name: "greeter"', 'name: "greet-the-world"'),
 			"utf8",
 		)
-		await writeFile(path.join(directory, "greet-the-world-2.workflow.ts"), "// reserved broken file\n", "utf8")
 
 		const namedPlan: WorkflowPlan = { ...plan, name: "Greet the World!" }
-		const entryPath = path.join(directory, "greet-the-world-3.workflow.ts")
-		const testPath = path.join(directory, "greet-the-world-3.workflow.test.ts")
-		const namedSource = validSource.replace('name: "greeter"', 'name: "greet-the-world-3"')
+		const entryPath = path.join(directory, "greet-the-world.workflow.ts")
+		const testPath = path.join(directory, "greet-the-world.workflow.test.ts")
+		const namedSource = validSource.replace('name: "greeter"', 'name: "greet-the-world"')
 		const run = await createTestRun(createWorkflowWorkflow, {
 			input: { projectRoot: root, workflowsDir: directory },
 			agents: {
@@ -202,10 +201,10 @@ describe("/workflow create behavior-first path", () => {
 		})
 
 		const proposed = await run.answer({ goal: "Greet the world" })
-		expect((proposed.interaction as { markdown: string }).markdown).toContain("greet-the-world-3.workflow.ts")
+		expect((proposed.interaction as { markdown: string }).markdown).toContain("greet-the-world.workflow.ts")
 		const done = await proposed.respond({ decision: "approve" })
 		expect(done.status, done.error).toBe("completed")
-		expect(done.output).toMatchObject({ path: entryPath, command: "/workflow run greet-the-world-3" })
+		expect(done.output).toMatchObject({ path: entryPath, command: "/workflow run greet-the-world" })
 	})
 
 	it("feeds a missing happy-path test into a focused repair", async () => {

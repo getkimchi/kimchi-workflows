@@ -10,7 +10,10 @@ with deterministic, harness-driven transitions and durable, resumable state.
 ## Concepts & terminology
 
 - **Workflow** — a definition authored in a TypeScript file (git-tracked,
-  editable). Declares steps, control flow, and I/O schemas.
+  editable). Declares a required definition name, steps, control flow, and I/O schemas.
+- **Installed workflow identity** — the workflow file's basename without
+  `.workflow.ts`. This is the project-level selector used by commands and recorded
+  runs; it is deliberately independent of the definition's declared name (§1.5).
 - **Step** — a single unit of work. One of four types (§2). Every step has a
   **state** (§5.1).
 - **Run** — a single execution instance of a workflow. Has a `run-id`, a status
@@ -52,12 +55,19 @@ package name (`@kimchi-dev/kimchi-workflows`), which also resolves for files ins
 package itself; module resolution is relative to the importing file, so a workflow
 must be validated from the directory it will actually live in (§6.6). *(decision)*
 
-1.5. **Identity & versioning.** A workflow declares a `name`/`id` in
-`createWorkflow`, used in the catalog (§6.7), `run list` (§6.3), and the run store
-(§8.9). **Versioning is out of scope** — the file is git-tracked (§1.1) and that is
-the versioning story. Definition changes are reconciled on resume by re-validating
-recorded outputs (§8.7); if an edit breaks compatibility, the engine surfaces the
-error and the author resolves it. *(decision)*
+1.5. **Identity & versioning.** A workflow declares a required `name` in
+`createWorkflow`; that name remains definition metadata and identifies a workflow when
+it is composed as a nested node. An installed top-level workflow instead takes its
+runtime identity from the source filename: `review.workflow.ts` has identity `review`,
+regardless of its declared name. The host binds the loaded root definition's runtime
+name to that identity without changing nested definitions. An explicit TypeScript path
+uses its basename. This filename-derived identity is used by the command catalog
+(§6.7), `run list` (§6.3), and run store (§8.9).
+
+**Versioning is out of scope** — the file is git-tracked (§1.1) and that is the
+versioning story. Definition changes are reconciled on resume by re-validating recorded
+outputs (§8.7); if an edit breaks compatibility, the engine surfaces the error and the
+author resolves it. *(decision)*
 
 ## 2. Step types
 
@@ -314,11 +324,11 @@ generic bordered selector dialog. Arrow keys move the highlighted `❯` row, Ent
 it, number keys provide direct shortcuts, and Escape dismisses the picker; the host
 then restores the original editor and its text.
 
-If workflows exist, each row shows its name and description, followed by
-`Create new workflow`; duplicate declared names gain a filename hint so their rows
-remain distinguishable. In RPC, a workflow label that matches the built-in create
-action also gains a filename hint because the native dialog returns labels rather
-than row identities. Selecting a workflow runs its exact file, while selecting
+If workflows exist, each row shows its installed identity and description, followed by
+`Create new workflow`. Duplicate declared names require no disambiguation because they
+are not project-level selectors. In RPC, a workflow identity that matches the built-in
+create action gains a full filename hint because the native dialog returns labels
+rather than row identities. Selecting a workflow runs its exact file, while selecting
 the create action is equivalent to `/workflow create`. If none exist, the screen says
 `No workflows found.` and unnumbered `Create a workflow` is the sole highlighted row,
 so Enter accepts it. Broken files remain visible as warnings but cannot be selected.
@@ -328,15 +338,17 @@ In `print`/`json` mode, where `hasUI` is false, bare `/workflow` falls back to t
 plain `/workflow list` response. Explicit `/workflow list` remains non-interactive in
 every mode. *(decision)*
 
-6.1. `/workflow run <name|file.ts> [--input <json>|@<file>]` — start a run. The
+6.1. `/workflow run <identity|file.ts> [--input <json>|@<file>]` — start a run. The
 argument is resolved as a filesystem path when it ends in `.ts`, otherwise as a
-workflow **name** from the catalog (§6.7). Paths resolve relative to the project
-root. Other executing runs do not prevent it from starting (§7). *(orig. R3; name
-resolution and unrestricted run concurrency: decision)*
+workflow **identity** from the catalog (§6.7), by selecting the exact
+`<identity>.workflow.ts` file. Declared definition names are not alternate selectors.
+Paths resolve relative to the project root. Other executing runs do not prevent it
+from starting (§7). *(orig. R3; identity resolution and unrestricted run concurrency:
+decision)*
 
   **`--input`** supplies the run's initial input (§3.11): `--input <json>` parses its
   argument as JSON directly; `--input @<path>` reads the file at `<path>` (a relative
-  path resolves against the project root, exactly like `<name|file.ts>` itself) and
+  path resolves against the project root, exactly like `<identity|file.ts>` itself) and
   parses its contents as JSON. The parsed value is validated against the workflow's
   declared top-level input schema, if it has one, using the SAME TypeBox check the
   engine runs on it at the top of `runWorkflow` (§4) — not a second, hand-rolled one
@@ -355,7 +367,7 @@ or `cancelled` run, continuing from the last checkpoint (§5.5/§8). Other runs 
 continue executing concurrently. A run-id selects among coexisting or earlier-session runs;
 omittable when exactly one recoverable run exists. *(orig. R7)*
 
-6.3. `/workflow run list` — list runs: run-id, workflow name, started-at,
+6.3. `/workflow run list` — list runs: run-id, workflow identity, started-at,
 stopped/completed-at, status, current step, and **pending-question count**. The count
 is not decoration: a run with one blocked step and one executing step reads
 `in_progress` (§5.3), so without it a waiting question is invisible in the listing.
@@ -412,10 +424,10 @@ candidate on unresolvable imports. Loading proves the module imports and commits
 whatever tooling the project has (TypeScript, Biome) and to report plainly when
 none is available rather than claim a check it did not run. *(decision)*
 
-6.7. `/workflow list` — list the project's workflows: name, file, and description.
-The file is shown because two workflows may declare the same name, which `run` then
-rejects as ambiguous; such rows are flagged. Files that fail to load are reported
-rather than omitted. *(decision)*
+6.7. `/workflow list` — list the project's workflows: installed identity, file, and
+description. The identity is the filename stem, so every row is directly runnable and
+unique within the directory. Declared-name duplicates create no ambiguity. Files that
+fail to load are reported rather than omitted. *(decision)*
 
 6.8. **Workflow catalog.** A project's workflows live in
 `<project>/.<app>/workflows/` as `*.workflow.ts`, where `<app>` is the running
@@ -423,14 +435,19 @@ harness's own name (§8.9); discovery filters on the suffix. The directory holds
 authored sources, never a run's own records, which live with the harness's sessions
 (§8.9).
 
-Discovery imports every candidate to read its declared name, so workflow modules
-must have no import-time side effects. Because that executes project code,
-resolving a **name** first tries the `<name>.workflow.ts` convention and only falls
-back to a full scan when it does not hold — so running one workflow does not
-normally execute the others. *(decision)*
+`discoverWorkflows()` imports every candidate to load it and read catalog metadata,
+so workflow modules must have no import-time side effects. Its public entries expose
+both `identity` (the filename stem used by commands) and `name` (the authored definition
+name retained for compatibility and composition metadata), plus `description` and
+`filePath`. Entries sort by `identity`; duplicate declared names are valid.
+
+Completion and run resolution do not use discovery. They enumerate matching filenames
+without importing modules. Resolution selects exactly one filename or explicit path,
+then validates and imports only that file and binds its top-level runtime identity
+(§1.5). There is no declared-name fallback or full catalog scan. *(decision)*
 
 6.9. **Every argument above is completable** in the interactive editor — verbs,
-workflow names, and run-ids filtered to the statuses the verb accepts. Completion is
+workflow identities, and run-ids filtered to the statuses the verb accepts. Completion is
 advisory and changes no dispatch rule; see §14. *(decision)*
 
 6.10. **`/workflow` already works in `print` and `json` mode — no extension-side
@@ -564,7 +581,7 @@ The run is recoverable — `resume` continues from the last checkpoint (§5.5).
 
 8.9. **Run store.** Runs and their event logs persist keyed by `run-id`, independent
 of any single session — so `list` / `resume` / `delete` work across sessions and
-harness restarts. A run is **one file**, `<run-id>.events.jsonl`: its workflow `name`
+harness restarts. A run is **one file**, `<run-id>.events.jsonl`: its workflow identity
 and **file path** (§1.5) are recorded as an event *in that log* rather than in a
 sidecar, so a log is self-describing wherever it is read and `resume` can reload the
 definition (§8.7) from it alone. `delete` (§6.5) removes it.
@@ -581,8 +598,8 @@ subdirectory — nothing enumerates a project directory. `<app>` is the running
 harness's own name, read from it rather than hardcoded, so a product other than `pi`
 keeps its own project directory (`.kimchi/…`) instead of being given one.
 
-A `run-id` is **readable and retypeable**: `workflow-<workflow-name>-<8 hex>`, minted
-against the store so a name shared by many runs cannot collide. It is the single
+A `run-id` is **readable and retypeable**: `workflow-<workflow-identity>-<8 hex>`, minted
+against the store so an identity shared by many runs cannot collide. It is the single
 identity — the log's filename, the tag inside every step session filename, and the
 argument `resume` / `cancel` / `delete` take, which they accept in full, as the bare
 hash, or as any unambiguous prefix; several matches are refused with the candidates
@@ -791,9 +808,9 @@ integration suite cover the ground meanwhile. *(decision)*
 ## 14. Command completion
 
 14.1. **The problem.** Every `/workflow` argument must currently be typed blind.
-Workflow names live inside files the user has to remember, and run-ids are opaque
-(§8.9) — nobody types one from memory. A mistyped argument only fails *after* the
-command dispatches. Completion turns both into a menu at the point of typing.
+Workflow identities come from filenames the user otherwise has to inspect, and run-ids
+are opaque (§8.9) — nobody types one from memory. A mistyped argument only fails
+*after* the command dispatches. Completion turns both into a menu at the point of typing.
 
 Scope: the **arguments** of `/workflow` in interactive (TUI) mode. Nothing about
 execution changes. Completion is **advisory**: it never becomes a validation path, and
@@ -862,37 +879,34 @@ therefore derived from the existing predicates — `resumeAction(status).kind !=
 for `resume` (§5.2), the live/stopped split for `cancel`/`delete` — never restated as
 a second copy of the rule. *(decision)*
 
-`run <partial>`'s slot completes ONLY the workflow-name token — `--input` (§6.1) is,
+`run <partial>`'s slot completes ONLY the workflow-identity token — `--input` (§6.1) is,
 textually, a second argument, and the existing "a second argument onward: none" row
 already covers it. This is not an oversight left over from before `--input` existed:
 completing a `--input` VALUE would mean completing arbitrary JSON or a project-relative
 file path, neither of which fits "one popup, one candidate list" the rest of this
 section is built on, and completing the bare flag name alone (`--input `) would not
-save a keystroke the way a workflow name or a run-id does. *(decision)*
+save a keystroke the way a workflow identity or a run-id does. *(decision)*
 
 14.5. **Filtering and ordering.** Case-insensitive prefix match on the slot token,
-falling back to substring; ties keep the source order. Workflows sort by name; runs
+falling back to substring; ties keep the source order. Workflows sort by identity; runs
 come **newest first**, capped at 20, because runs accumulate until deleted (§6.5) and
 the interesting one is nearly always recent. Workflow items carry no `description` —
-the name *is* the file (§14.6). A run's does the work that makes an opaque id
-meaningful: workflow name, status, current step (§6.3). *(decision)*
+the identity *is* the file stem (§14.6). A run's does the work that makes an opaque id
+meaningful: workflow identity, status, current step (§6.3). *(decision)*
 
 14.6. **Candidate sources must be cheap and read-only.** The callback runs on a
 keystroke, possibly while a run is executing, so neither listing path can be reused
 as it stands:
 
-  - **Workflow names come from filenames, never an import.** `discoverWorkflows`
-    (§6.8) imports every candidate module through a fresh loader to read its declared
-    name; per keystroke that recompiles the project's workflows and re-executes their
-    module bodies. Completion instead lists the workflows directory and strips the
-    `.workflow.ts` suffix — one `readdir`, no code executed, no cache to keep honest.
-    This is the same convention `run` resolves against first (§6.8), so a completed
-    name normally resolves in one import rather than a full scan. A file whose
-    *declared* name differs from its filename is therefore not completable — it stays
-    visible in `/workflow list` and runnable by name or path, and the convention it
-    breaks is the one §6.8 already asks for. Trading it for a background catalog cache
-    would buy declared names and descriptions at the price of executing project code
-    on a keystroke path. *(decision)*
+  - **Workflow identities come from filenames, never an import.**
+    `discoverWorkflows()` (§6.8) still imports every candidate module for descriptions,
+    declared-name metadata, and broken-file diagnostics; per keystroke that would
+    recompile the project's workflows and re-execute their module bodies. Completion
+    instead lists the workflows directory and strips the `.workflow.ts` suffix — one
+    `readdir`, no code executed, no cache to keep honest. Run resolution accepts that
+    same identity and imports only the exact selected file (§6.8). A file whose declared
+    name differs from its filename is therefore completable and runnable by its filename
+    identity (or explicit path), never by its declared name. *(decision)*
   - **Listing runs is a read.** `RunStore.list()` currently ensures the directory
     exists first; a keystroke in a project that has never run a workflow must not
     create the run-artifacts directory (§8.9). `list()` stops creating it and returns
@@ -925,7 +939,7 @@ whole-argument value assembly, silence on a second argument, and empty → `null
     delegating file completion to fix one keystroke. *(rejected)*
   - **One command per verb** (`/workflow-run`, `/workflow-resume`, …) so the built-in
     command menu completes verbs: six top-level names for one feature, and it would
-    still complete neither workflow names nor run-ids. *(rejected)*
+    still complete neither workflow identities nor run-ids. *(rejected)*
   - **Path completion for `run <file>.ts`.** Tab already force-completes paths (§14.3);
     duplicating it here would fight the built-in provider. *(decision)*
   - **An argument hint** on the command row. pi-tui's slash-command model has

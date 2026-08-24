@@ -1,5 +1,5 @@
 /**
- * Starting runs: `/workflow run <name|file.ts>` (spec §6.1) and `/workflow create` (spec §6.6).
+ * Starting runs: `/workflow run <file-name|file.ts>` (spec §6.1) and `/workflow create` (spec §6.6).
  *
  * Both go through the same {@link startRun} lifecycle — run-id, provenance, attended Q&A — so
  * `create` gets nothing bespoke beyond the initial input its steps need.
@@ -38,7 +38,7 @@ export interface ParsedRunArgs {
 const INPUT_FLAG_RE = /(^|\s)--input(\s|$)/
 
 /**
- * Parse `/workflow run <name|file.ts> [--input <json>|@<file>]` (spec §6.1).
+ * Parse `/workflow run <file-name|file.ts> [--input <json>|@<file>]` (spec §6.1).
  *
  * `--input`'s own payload is deliberately NOT tokenized the way the rest of `/workflow`'s arguments
  * are (`extension.ts` splits on `/\s+/` for every other subcommand): a JSON object routinely contains
@@ -114,8 +114,8 @@ export async function resolveInitialInput(
 }
 
 /**
- * `/workflow run <name|file.ts> [--input <json>|@<file>]` — start a workflow named either by
- * declared name or by path, optionally seeded with initial input (spec §6.1).
+ * `/workflow run <file-name|file.ts> [--input <json>|@<file>]` — start a workflow by its installed
+ * filename identity or an explicit path, optionally seeded with initial input (spec §6.1).
  *
  * With no `inputArg`, behaviour is exactly what it was before `--input` existed: `undefined` initial
  * input, unchanged for every workflow that declares no top-level schema.

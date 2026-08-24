@@ -91,7 +91,7 @@ describe("run identity through the command handlers", () => {
 		const runs = await store.list()
 		expect(runs).toHaveLength(1)
 		const runId = runs[0]?.runId ?? ""
-		expect(runId).toMatch(/^workflow-flaky-demo-[0-9a-f]{8}$/)
+		expect(runId).toMatch(/^workflow-flaky-[0-9a-f]{8}$/)
 
 		// Both leading records are adapter-owned: the execution owner is durable without exposing a parent
 		// session id, then run-meta preserves the workflow source needed to resume after a crash.
@@ -110,7 +110,7 @@ describe("run identity through the command handlers", () => {
 		expect(events[2]?.type).toBe("run-started")
 		expect(existsSync(path.join(runDir, `${runId}.events.jsonl`))).toBe(true)
 		const failure = spy.notes.find(([, type]) => type === "error")?.[0] ?? ""
-		expect(failure).toContain(`workflow "flaky-demo" crashed at "flaky" (run ${runId})`)
+		expect(failure).toContain(`workflow "flaky" crashed at "flaky" (run ${runId})`)
 		expect(failure).toContain("first attempt fails")
 		expect(failure).toContain(`Resume: /workflow resume ${runId}`)
 		expect(failure).toContain(`Details: /workflow status ${runId}`)
@@ -145,7 +145,7 @@ describe("run identity through the command handlers", () => {
 		await handleResume(ctx, store, createFakeActiveRuns(), noAgent, run?.runId ?? "")
 
 		expect(spy.notes).toHaveLength(1)
-		expect(spy.notes[0]?.[0]).toContain(`workflow "flaky-demo" cannot resume (run ${run?.runId})`)
+		expect(spy.notes[0]?.[0]).toContain(`workflow "flaky" cannot resume (run ${run?.runId})`)
 		expect(spy.notes[0]?.[0]).toContain(`File: ${file}`)
 		expect(spy.notes[0]?.[0]).toContain("The workflow file no longer exists")
 		expect(spy.notes[0]?.[0]).toContain("The recorded run has been preserved")
@@ -165,7 +165,7 @@ describe("run identity through the command handlers", () => {
 		await handleResume(ctx, store, createFakeActiveRuns(), noAgent, run?.runId ?? "")
 
 		expect(spy.notes).toHaveLength(1)
-		expect(spy.notes[0]?.[0]).toContain(`workflow "flaky-demo" cannot resume (run ${run?.runId})`)
+		expect(spy.notes[0]?.[0]).toContain(`workflow "flaky" cannot resume (run ${run?.runId})`)
 		expect(spy.notes[0]?.[0]).toContain(`File: ${file}`)
 		expect(spy.notes[0]?.[0]).toContain("TS1109")
 		expect(spy.notes[0]?.[0]).toContain("The recorded run has been preserved")
@@ -196,7 +196,7 @@ describe("run identity through the command handlers", () => {
 		await handleResume(ctx, store, createFakeActiveRuns(), noAgent, run?.runId ?? "")
 
 		expect(spy.notes).toHaveLength(1)
-		expect(spy.notes[0]?.[0]).toContain(`workflow "flaky-demo" cannot resume (run ${run?.runId})`)
+		expect(spy.notes[0]?.[0]).toContain(`workflow "flaky" cannot resume (run ${run?.runId})`)
 		expect(spy.notes[0]?.[0]).toContain("TS2322")
 		expect(spy.notes[0]?.[0]).toContain("The recorded run has been preserved")
 		expect(existsSync(evaluated)).toBe(false)

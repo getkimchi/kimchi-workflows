@@ -39,7 +39,11 @@ export const DEFAULT_FOREACH_CONCURRENCY = 1
  * @workflowCapability data-flow
  */
 export interface CreateWorkflowOptions<TInputSchema extends TSchema | undefined = undefined> {
-	/** Unique workflow name/id — used by `/workflow list` and the run store (spec §1.5, §8.9). */
+	/**
+	 * Required definition name, used for composition, nested-workflow defaults, diagnostics, and direct
+	 * in-memory execution. A project file loaded as a top-level installed workflow receives its runtime
+	 * identity from the filename instead.
+	 */
 	name: string
 	description?: string
 	/**

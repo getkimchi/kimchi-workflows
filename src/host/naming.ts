@@ -5,22 +5,22 @@
  * were named after the step, in a directory of their own. Now that a run's artifacts sit in the
  * harness's session directory (project-dir.ts) alongside the user's own sessions, every name this
  * package writes is read by a human at some point: in `/workflow run list`, in a session picker, in an
- * `ls`. So the run id is a SLUG — `workflow-<workflow-name>-<8 hex>` — and it is the single identity
+ * `ls`. So the run id is a SLUG — `workflow-<workflow-identity>-<8 hex>` — and it is the single identity
  * behind all of them: the event log is `<runId>.events.jsonl`, a step's trace session embeds the id's
  * hash, and `resume`/`cancel`/`delete` take the same string back (a prefix of it is enough, see
  * {@link matchRunId}). The `workflow-` prefix is what makes "everything a workflow run wrote" a glob.
  *
- * Names are sanitized rather than trusted: a workflow name and a node path are author-controlled
- * (spec §3, §8.5) and go straight into a path segment. `.commit()` already rejects path syntax in a
- * step NAME, but a node path legitimately contains `/`, `#` and `@` (node-path.ts's separators), and
- * nothing constrains a workflow's declared name to characters a filesystem is comfortable with.
+ * Names are sanitized rather than trusted: a runtime workflow identity and a node path go straight
+ * into path segments (spec §3, §8.5). `.commit()` already rejects path syntax in a step NAME, but a
+ * node path legitimately contains `/`, `#` and `@` (node-path.ts's separators), and explicit workflow
+ * files can still have names the filesystem utilities below need to normalize.
  *
  * Host-layer only: the engine never sees these — it addresses everything by node path (spec §8.5).
  */
 import { createHash, randomBytes } from "node:crypto"
 
 /**
- * How much of a workflow's declared name a filename carries. Long enough to identify, short enough that
+ * How much of a workflow's runtime identity a filename carries. Long enough to identify, short enough that
  * the id stays typeable — and, like a node path, TAGGED when it is truncated (see {@link capWithHash}).
  * A run id could get away without the tag, since it carries 8 random hex of its own; a resumable step's
  * session file could not. That name deliberately has no run component (see {@link resumeSessionFile}),
@@ -85,9 +85,9 @@ function capWithHash(sanitized: string, raw: string, max: number): string {
 	return `${sanitized.slice(0, max).replace(/-+$/, "")}-${hashOf(raw, NAME_HASH_LENGTH)}`
 }
 
-/** A workflow's declared name as it appears in a run id / session filename: sanitized, capped, tagged if truncated. */
-export function sanitizeWorkflowName(name: string): string {
-	return capWithHash(orHash(sanitizeSegment(name), name), name, WORKFLOW_NAME_MAX)
+/** A workflow's runtime identity as it appears in a run id / session filename: sanitized, capped, tagged if truncated. */
+export function sanitizeWorkflowName(identity: string): string {
+	return capWithHash(orHash(sanitizeSegment(identity), identity), identity, WORKFLOW_NAME_MAX)
 }
 
 /**
@@ -108,7 +108,7 @@ export function runIdHash(runId: string): string {
 }
 
 /**
- * Mint a run id: `workflow-<workflow-name>-<8 hex>` (spec §8.9 — the id the whole run is keyed by).
+ * Mint a run id: `workflow-<workflow-identity>-<8 hex>` (spec §8.9 — the id the whole run is keyed by).
  *
  * `isTaken` is asked before the id is used, because unlike a UUID this one is only 32 random bits behind
  * a name many runs share — a project that runs the same workflow often WILL collide eventually, and a
@@ -117,16 +117,16 @@ export function runIdHash(runId: string): string {
  * waiting for a real 1-in-4-billion event.
  */
 export async function mintRunId(
-	workflowName: string,
+	workflowIdentity: string,
 	isTaken: (runId: string) => Promise<boolean>,
 	hex: () => string = randomHex,
 ): Promise<string> {
-	const stem = `workflow-${sanitizeWorkflowName(workflowName)}`
+	const stem = `workflow-${sanitizeWorkflowName(workflowIdentity)}`
 	for (let attempt = 0; attempt < MINT_ATTEMPTS; attempt++) {
 		const candidate = `${stem}-${hex()}`
 		if (!(await isTaken(candidate))) return candidate
 	}
-	throw new Error(`could not mint a free run id for workflow "${workflowName}" after ${MINT_ATTEMPTS} attempts`)
+	throw new Error(`could not mint a free run id for workflow "${workflowIdentity}" after ${MINT_ATTEMPTS} attempts`)
 }
 
 function randomHex(): string {

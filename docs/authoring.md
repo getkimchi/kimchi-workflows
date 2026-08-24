@@ -3,6 +3,11 @@
 Workflows are ordinary TypeScript modules that default-export a committed `WorkflowDefinition`. Put project
 workflows in `.kimchi/workflows/*.workflow.ts`, or pass a workflow file directly to `/workflow run`.
 
+The filename without `.workflow.ts` is the installed identity used by completion, commands, run IDs, progress,
+and `ctx.workflowName`. The definition's `name` remains required for composition, nested workflows, diagnostics,
+and direct in-memory execution; when the file is loaded as a top-level installed workflow, the host binds the
+root runtime identity to the filename without changing nested definitions.
+
 ```ts
 import { Type } from "typebox"
 import { createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
@@ -50,8 +55,9 @@ See the [generated API reference](api-reference.md) for exact signatures and inv
 
 ## Keep modules safe to import
 
-Workflow discovery imports workflow modules. Define schemas and steps at module scope, commit the workflow, and
-export it; do not perform filesystem, network, or process work during import. Put effects inside step callbacks.
+Picker and list discovery import workflow modules to load descriptions and diagnose broken files. Filename
+completion and lookup do not. Define schemas and steps at module scope, commit the workflow, and export it; do not
+perform filesystem, network, or process work during import. Put effects inside step callbacks.
 
 ## Verification
 
