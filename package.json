@@ -60,6 +60,10 @@
 			"types": "./dist/host/index.d.ts",
 			"default": "./dist/host/index.js"
 		},
+		"./extension": {
+			"types": "./dist/host/extension.d.ts",
+			"default": "./dist/host/extension.js"
+		},
 		"./testing": {
 			"types": "./dist/testing/index.d.ts",
 			"default": "./dist/testing/index.js"

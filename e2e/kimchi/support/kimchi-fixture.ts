@@ -207,6 +207,10 @@ function seedKimchiHome(homeDir: string, baseUrl: string): void {
 	writePrivateJson(path.join(agentDir, "settings.json"), {
 		statusLine: { pinned: [] },
 		hideThinkingBlock: true,
+		// This suite verifies the extension from the current kimchi-workflows checkout. Disable
+		// Kimchi's bundled copy so duplicate command registration cannot make the E2E pass through a
+		// different published version once the built-in resource is enabled by default.
+		resources: { "extensions.workflows": false },
 		packages: [repositoryRoot],
 	})
 	writePrivateJson(path.join(agentDir, "models.json"), {

@@ -1,4 +1,4 @@
-import { mkdir, symlink, writeFile } from "node:fs/promises"
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { distribution } from "../src/host/distribution.ts"
 
@@ -15,6 +15,9 @@ export async function prepareWorkflowPackageFixture(options: {
 	const framework = options.sourceOnlyFramework ? path.join(directory, ".source-only-framework") : repositoryRoot
 	await mkdir(directory, { recursive: true })
 	if (options.sourceOnlyFramework) {
+		const repositoryManifest = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8")) as {
+			exports: unknown
+		}
 		await mkdir(framework, { recursive: true })
 		await Promise.all([
 			writeFile(
@@ -22,13 +25,7 @@ export async function prepareWorkflowPackageFixture(options: {
 				`${JSON.stringify({
 					name: "@kimchi-dev/kimchi-workflows",
 					type: "module",
-					exports: {
-						".": { types: "./dist/flow/index.d.ts", default: "./src/flow/index.ts" },
-						"./flow": { types: "./dist/flow/index.d.ts", default: "./src/flow/index.ts" },
-						"./engine": { types: "./dist/engine/index.d.ts", default: "./src/engine/index.ts" },
-						"./host": { types: "./dist/host/index.d.ts", default: "./src/host/index.ts" },
-						"./testing": { types: "./dist/testing/index.d.ts", default: "./src/testing/index.ts" },
-					},
+					exports: repositoryManifest.exports,
 				})}\n`,
 				"utf8",
 			),
