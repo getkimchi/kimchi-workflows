@@ -91,17 +91,17 @@ describe("verb slot", () => {
 // -- `run <workflow>` (spec §14.4, §14.6) -----------------------------------------------------------
 
 describe("run argument", () => {
-	it("offers the reserved `list` first, then workflow names sorted (spec §6.3)", async () => {
+	it("offers the reserved `list` first, then workflow identities sorted (spec §6.3)", async () => {
 		const items = await completeWorkflowArgument("run ", sourcesOf(["review-loop", "audit"]))
 		expect(labels(items)).toEqual(["list", "audit", "review-loop"])
 	})
 
-	it("assembles the whole argument string as the value, with the bare name as the label", async () => {
+	it("assembles the whole argument string as the value, with the bare identity as the label", async () => {
 		const items = await completeWorkflowArgument("run rev", sourcesOf(["review-loop"]))
 		expect(items).toEqual([{ value: "run review-loop", label: "review-loop" }])
 	})
 
-	it("carries no description — for a workflow the name is the file (spec §14.6)", async () => {
+	it("carries no description because filename completion does not import workflow modules", async () => {
 		const items = await completeWorkflowArgument("run ", sourcesOf(["audit"]))
 		expect(items?.every((item) => item.description === undefined)).toBe(true)
 	})

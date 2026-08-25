@@ -6,6 +6,7 @@ import type { WorkflowDefinition } from "../flow/types.ts"
 import createWorkflowWorkflow from "./builtin/create.workflow.ts"
 import { loadWorkflowFile } from "./load-workflow.ts"
 import { loadValidatedWorkflow, type WorkflowPreflightResult } from "./workflow-preflight.ts"
+import { bindWorkflowFileIdentity, bindWorkflowIdentity } from "./workflow-source.ts"
 
 export { workflowSourceLabel } from "./workflow-source.ts"
 
@@ -52,24 +53,46 @@ export function workflowSourceOf(events: readonly RunEvent[]): WorkflowSource | 
 /**
  * Package-owned built-ins are trusted definitions already imported by the extension. Project-authored
  * definitions retain the TypeScript-before-evaluation preflight that protects against edited source.
- * Explicit registry IDs keep trust independent of workflow names; exact paths are recognized only for legacy logs.
+ * Explicit registry IDs keep trust independent of workflow identities; exact paths are recognized only for legacy logs.
  */
 export function loadRecordedWorkflow(options: {
 	readonly source: WorkflowSource
 	readonly projectRoot: string
+	/** Existing runs retain the identity written in `run-started`, including across this behavior change. */
+	readonly identity?: string
 }): Promise<WorkflowPreflightResult> {
-	if (options.source.kind === "builtin") return Promise.resolve(resolveBuiltin(options.source.id))
-	return loadValidatedWorkflow({ filePath: options.source.path, projectRoot: options.projectRoot })
+	if (options.source.kind === "builtin") {
+		return Promise.resolve(bindPreflightIdentity(resolveBuiltin(options.source.id), options.identity))
+	}
+	const filePath = options.source.path
+	return loadValidatedWorkflow({ filePath, projectRoot: options.projectRoot }).then((loaded) =>
+		bindPreflightIdentity(loaded, options.identity, filePath),
+	)
 }
 
-/** Reload between attended turns while preserving each source kind's existing runtime behavior. */
-export async function reloadRecordedWorkflow(source: WorkflowSource): Promise<WorkflowDefinition> {
+/** Reload between attended turns while retaining the run identity established by its first event. */
+export async function reloadRecordedWorkflow(source: WorkflowSource, identity?: string): Promise<WorkflowDefinition> {
 	if (source.kind === "builtin") {
 		const loaded = resolveBuiltin(source.id)
 		if (!loaded.ok) throw new Error(loaded.cause)
-		return loaded.workflow
+		return identity ? bindWorkflowIdentity(loaded.workflow, identity) : loaded.workflow
 	}
-	return loadWorkflowFile(source.path)
+	const workflow = await loadWorkflowFile(source.path)
+	return identity ? bindWorkflowIdentity(workflow, identity) : bindWorkflowFileIdentity(workflow, source.path)
+}
+
+function bindPreflightIdentity(
+	loaded: WorkflowPreflightResult,
+	identity: string | undefined,
+	filePath?: string,
+): WorkflowPreflightResult {
+	if (!loaded.ok) return loaded
+	const workflow = identity
+		? bindWorkflowIdentity(loaded.workflow, identity)
+		: filePath
+			? bindWorkflowFileIdentity(loaded.workflow, filePath)
+			: loaded.workflow
+	return { ok: true, workflow }
 }
 
 function resolveBuiltin(id: string): WorkflowPreflightResult {

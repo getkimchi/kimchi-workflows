@@ -104,7 +104,7 @@ export interface WorkflowError {
  * `event` is the discriminator: which fact this payload states, and the sole thing a subscriber needs to
  * derive the OTLP event name from (see the module header).
  *
- * `workflow_name` is the author-declared name, unique within a project by convention and not globally
+ * `workflow_name` is the runtime workflow identity (filename-derived for installed project workflows), not globally
  * namespaced: two projects may each run a `deploy`. It is `""` in exactly one case — a terminal event
  * written for a run whose log this invocation never started or read, such as an event supplied by an
  * external recovery tool. Such an event still carries `run_id`, and the

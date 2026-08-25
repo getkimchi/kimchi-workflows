@@ -40,7 +40,7 @@ export interface ScopeFrame {
 export interface RunContext {
 	/** The run's generated id. */
 	readonly runId: string
-	/** The workflow's declared name. */
+	/** Runtime identity: filename-derived for an installed top-level workflow, otherwise the definition name. */
 	readonly workflowName: string
 	/**
 	 * The caller's own DYNAMIC node path (iteration-context spec 1.1) — the exact string the event log
@@ -449,6 +449,7 @@ export interface NestedWorkflowNode {
 
 /** A workflow's shape at rest: a name plus an ordered sequence of nodes. */
 export interface WorkflowDefinition {
+	/** Required definition name; a host may bind a different identity when installing this as a top-level workflow. */
 	readonly name: string
 	readonly description?: string
 	readonly inputSchema?: TSchema

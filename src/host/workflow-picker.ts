@@ -11,7 +11,7 @@ import {
 } from "@earendil-works/pi-tui"
 import type { WorkflowWelcomeAction } from "./commands/welcome.ts"
 import type { WorkflowEntry } from "./workflow-catalog.ts"
-import { isDuplicateWorkflowName, workflowNameCounts, workflowOptionDisplay } from "./workflow-display.ts"
+import { workflowOptionDisplay } from "./workflow-display.ts"
 
 type PickerCtx = {
 	ui: Pick<ExtensionCommandContext["ui"], "custom">
@@ -87,10 +87,9 @@ export function createWorkflowPicker(
 }
 
 function pickerItems(entries: readonly WorkflowEntry[]): PickerItem[] {
-	const counts = workflowNameCounts(entries)
 	return [
 		...entries.map((entry) => {
-			const display = workflowOptionDisplay(entry, isDuplicateWorkflowName(entry, counts))
+			const display = workflowOptionDisplay(entry)
 			return { kind: "run" as const, filePath: entry.filePath, ...display }
 		}),
 		{ kind: "create" as const, name: entries.length === 0 ? "Create a workflow" : "Create new workflow" },

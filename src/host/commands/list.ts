@@ -10,7 +10,6 @@ import { workflowsDir } from "../project-dir.ts"
 import { projectRunSummaries } from "../reconcile-runs.ts"
 import type { RunStore } from "../types.ts"
 import { type BrokenWorkflow, discoverWorkflows } from "../workflow-catalog.ts"
-import { isDuplicateWorkflowName, workflowNameCounts } from "../workflow-display.ts"
 import type { NotifyCtx } from "./context.ts"
 
 /** `/workflow run list` — the recorded runs (spec §6.3). */
@@ -44,16 +43,11 @@ export async function handleListWorkflows(ctx: NotifyCtx & { cwd: string }): Pro
 	}
 
 	if (entries.length > 0) {
-		// The filename is shown, not just the name: two files may declare the same workflow name, and
-		// without it the listing would show indistinguishable rows for workflows `run` then rejects as
-		// ambiguous. Duplicates are called out so the collision is obvious rather than merely implied.
-		const counts = workflowNameCounts(entries)
-
-		const width = Math.max(...entries.map((entry) => entry.name.length))
-		const lines = entries.map((entry) => {
-			const duplicate = isDuplicateWorkflowName(entry, counts) ? "  (duplicate name)" : ""
-			return `${entry.name.padEnd(width)}  ${path.basename(entry.filePath)}  ${entry.description ?? "-"}${duplicate}`
-		})
+		// Keep the full source filename visible beside its suffix-free installed identity.
+		const width = Math.max(...entries.map((entry) => entry.identity.length))
+		const lines = entries.map(
+			(entry) => `${entry.identity.padEnd(width)}  ${path.basename(entry.filePath)}  ${entry.description ?? "-"}`,
+		)
 		ctx.ui.notify(lines.join("\n"), "info")
 	}
 

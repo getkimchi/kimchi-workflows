@@ -208,7 +208,7 @@ describe("/workflow run --input", () => {
 		expect(existsSync(evaluated)).toBe(false)
 	})
 
-	it("does not evaluate a semantically invalid workflow while scanning a declared-name alias", async () => {
+	it("does not evaluate modules while looking up a declared-name alias", async () => {
 		const invalidFile = path.join(workflowsDir(projectRoot), "aliased.workflow.ts")
 		const evaluated = path.join(projectRoot, "catalog-semantic-workflow-evaluated.txt")
 		await mkdir(path.dirname(invalidFile), { recursive: true })
@@ -219,8 +219,9 @@ describe("/workflow run --input", () => {
 
 		expect(await store.list()).toHaveLength(0)
 		expect(spy.notes).toHaveLength(1)
-		expect(spy.notes[0]?.[0]).toContain(`File: ${invalidFile}`)
-		expect(spy.notes[0]?.[0]).toContain("TS2322")
+		expect(spy.notes[0]?.[0]).toContain('cannot find "release"')
+		expect(spy.notes[0]?.[0]).toContain("Known workflows: aliased")
+		expect(spy.notes[0]?.[0]).not.toContain("TS2322")
 		expect(existsSync(evaluated)).toBe(false)
 	})
 })

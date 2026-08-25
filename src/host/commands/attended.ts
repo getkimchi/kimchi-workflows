@@ -67,7 +67,7 @@ export async function handleAttendedInput(
 		if (pending.kind === "questionnaire") {
 			candidate = await collectAnswers(ctx, pending.questionnaire)
 		} else {
-			const workflow = await reloadForInteraction(ctx, workflowSource)
+			const workflow = await reloadForInteraction(ctx, workflowSource, workflowName)
 			if (!workflow) return
 			const step = interactiveStepAt(workflow, targetPath)
 			if (!step) {
@@ -105,7 +105,7 @@ export async function handleAttendedInput(
 		let result: Awaited<ReturnType<typeof runTracked>>
 		try {
 			result = await runTracked(activeRuns, runId, store, async (signal, execution) => {
-				const workflow = await reloadRecordedWorkflow(workflowSource)
+				const workflow = await reloadRecordedWorkflow(workflowSource, workflowName)
 				const events = await store.loadEvents(runId)
 				const host = createHostPort(store, {
 					startAgent,
@@ -136,9 +136,10 @@ export async function handleAttendedInput(
 async function reloadForInteraction(
 	ctx: CommandCtx,
 	workflowSource: WorkflowSource,
+	workflowName: string,
 ): Promise<WorkflowDefinition | undefined> {
 	try {
-		return await reloadRecordedWorkflow(workflowSource)
+		return await reloadRecordedWorkflow(workflowSource, workflowName)
 	} catch (error) {
 		ctx.ui.notify(
 			`workflow: failed to reload "${workflowSourceLabel(workflowSource)}" for interaction: ${describe(error)}`,

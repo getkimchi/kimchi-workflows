@@ -5,7 +5,7 @@
 import path from "node:path"
 import { workflowsDir } from "../project-dir.ts"
 import { discoverWorkflows, type WorkflowEntry } from "../workflow-catalog.ts"
-import { isDuplicateWorkflowName, workflowNameCounts, workflowOptionLabel } from "../workflow-display.ts"
+import { workflowOptionLabel } from "../workflow-display.ts"
 import type { CommandCtx } from "./context.ts"
 import { notifyBrokenWorkflows } from "./list.ts"
 
@@ -61,11 +61,9 @@ async function chooseViaDialog(
 }
 
 function dialogLabels(entries: readonly WorkflowEntry[], reservedLabel: string): Map<string, WorkflowEntry> {
-	const counts = workflowNameCounts(entries)
 	return new Map(
 		entries.map((entry) => {
-			const duplicate = isDuplicateWorkflowName(entry, counts)
-			const ordinaryLabel = workflowOptionLabel(entry, duplicate)
+			const ordinaryLabel = workflowOptionLabel(entry)
 			// Native dialogs return only the selected string, not the row identity. A workflow row must
 			// therefore differ from the built-in action or one of the two identical rows is unreachable.
 			const label = ordinaryLabel === reservedLabel ? workflowOptionLabel(entry, true) : ordinaryLabel

@@ -169,7 +169,7 @@ describe("handleListWorkflows", () => {
 		expect(spy.notes).toEqual([["bare    bare.workflow.ts  -\ndeploy  deploy.workflow.ts  ship it", "info"]])
 	})
 
-	it("flags duplicate workflow names, which `run` would otherwise reject as ambiguous", async () => {
+	it("treats files with the same declared definition name as distinct installed workflows", async () => {
 		const root = await projectWith({
 			"a.workflow.ts": workflowSource("deploy", "first"),
 			"b.workflow.ts": workflowSource("deploy", "second"),
@@ -178,10 +178,7 @@ describe("handleListWorkflows", () => {
 
 		await handleListWorkflows({ ui: { notify: spy.notify }, cwd: root })
 
-		const listing = spy.notes[0]?.[0] ?? ""
-		expect(listing).toContain("a.workflow.ts")
-		expect(listing).toContain("b.workflow.ts") // the two rows are distinguishable
-		expect(listing.match(/\(duplicate name\)/g)).toHaveLength(2)
+		expect(spy.notes).toEqual([["a  a.workflow.ts  first\nb  b.workflow.ts  second", "info"]])
 	})
 
 	it("still lists the good workflows and warns about the broken ones", async () => {
@@ -252,33 +249,35 @@ describe("chooseWorkflowWelcomeAction", () => {
 		expect(ui.customMock).not.toHaveBeenCalled()
 	})
 
-	it("adds filename hints to duplicate workflow names in the RPC dialog", async () => {
+	it("uses filename identities when definitions declare the same name in the RPC dialog", async () => {
 		const root = await projectWith({
 			"a.workflow.ts": workflowSource("deploy", "first"),
 			"b.workflow.ts": workflowSource("deploy", "second"),
 		})
-		const ui = welcomeUi((options) => options.find((option) => option.startsWith("deploy (b.workflow.ts)")))
+		const ui = welcomeUi((options) => options.find((option) => option.startsWith("b —")))
 
 		const action = await chooseWorkflowWelcomeAction({ cwd: root, mode: "rpc", hasUI: true, ui })
 
 		expect(action).toEqual({ kind: "run", filePath: path.join(workflowsDir(root), "b.workflow.ts") })
-		expect(ui.select.mock.calls[0]?.[1]).toEqual([
-			"deploy (a.workflow.ts) — first",
-			"deploy (b.workflow.ts) — second",
-			"Create new workflow",
-		])
+		expect(ui.select.mock.calls[0]?.[1]).toEqual(["a — first", "b — second", "Create new workflow"])
 	})
 
-	it("keeps a workflow whose name matches the RPC create action selectable", async () => {
+	it("keeps a filename identity matching the RPC create action selectable", async () => {
 		const root = await projectWith({
-			"reserved.workflow.ts": workflowSource("Create new workflow"),
+			"Create new workflow.workflow.ts": workflowSource("internal-name"),
 		})
-		const ui = welcomeUi((options) => options.find((option) => option.includes("reserved.workflow.ts")))
+		const ui = welcomeUi((options) => options.find((option) => option.includes(".workflow.ts")))
 
 		const action = await chooseWorkflowWelcomeAction({ cwd: root, mode: "rpc", hasUI: true, ui })
 
-		expect(action).toEqual({ kind: "run", filePath: path.join(workflowsDir(root), "reserved.workflow.ts") })
-		expect(ui.select.mock.calls[0]?.[1]).toEqual(["Create new workflow (reserved.workflow.ts)", "Create new workflow"])
+		expect(action).toEqual({
+			kind: "run",
+			filePath: path.join(workflowsDir(root), "Create new workflow.workflow.ts"),
+		})
+		expect(ui.select.mock.calls[0]?.[1]).toEqual([
+			"Create new workflow (Create new workflow.workflow.ts)",
+			"Create new workflow",
+		])
 	})
 
 	it("connects TUI catalog discovery to the dynamically loaded quick-pick end to end", async () => {

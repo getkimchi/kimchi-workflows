@@ -7,21 +7,10 @@ export interface WorkflowOptionDisplay {
 	readonly description?: string
 }
 
-/** Count declared workflow names once so every catalog surface agrees about duplicates. */
-export function workflowNameCounts(entries: readonly WorkflowEntry[]): ReadonlyMap<string, number> {
-	const counts = new Map<string, number>()
-	for (const entry of entries) counts.set(entry.name, (counts.get(entry.name) ?? 0) + 1)
-	return counts
-}
-
-export function isDuplicateWorkflowName(entry: WorkflowEntry, counts: ReadonlyMap<string, number>): boolean {
-	return (counts.get(entry.name) ?? 0) > 1
-}
-
-/** Normalize one workflow's display fields and add a filename hint when it must be disambiguated. */
+/** Normalize one workflow's display fields and optionally include its full source filename. */
 export function workflowOptionDisplay(entry: WorkflowEntry, showFile = false): WorkflowOptionDisplay {
 	return {
-		name: showFile ? `${entry.name} (${path.basename(entry.filePath)})` : entry.name,
+		name: showFile ? `${entry.identity} (${path.basename(entry.filePath)})` : entry.identity,
 		description: entry.description?.replace(/\s+/g, " ").trim() || undefined,
 	}
 }

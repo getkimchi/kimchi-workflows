@@ -35,7 +35,7 @@ export interface CompletionItem {
  * read-only (spec §14.6); neither is expected to sort or cap — this module does both.
  */
 export interface CompletionSources {
-	/** Workflow names, already filename-derived (spec §14.6). Any order: sorted by name here. */
+	/** Installed workflow identities, derived from filenames. Any order: sorted here. */
 	workflows(): Promise<readonly string[]>
 	/** Every recorded run, in any order: ordered newest-first here by `startedAt` (spec §14.5). */
 	runs(): Promise<readonly RunSummary[]>
@@ -127,9 +127,9 @@ async function argumentItems(
 }
 
 /**
- * `run`'s argument: the reserved `list` first (spec §6.3), then workflow names by name (spec §14.5).
+ * `run`'s argument: the reserved `list` first (spec §6.3), then filename-derived identities (§14.5).
  * The set is deduplicated so a `list.workflow.ts` cannot shadow the reserved word. No descriptions —
- * for a workflow the name *is* the file (spec §14.6).
+ * completion deliberately avoids importing project modules; explicit catalog views load descriptions.
  */
 function workflowItems(verb: string, typed: string, workflows: readonly string[]): CompletionItem[] | null {
 	const candidates = [...new Set([RESERVED_RUN_LIST, ...[...workflows].sort()])]

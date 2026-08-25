@@ -53,7 +53,11 @@ export async function handleResume(
 	if (!workflowSource) return void ctx.ui.notify(missingWorkflowProvenance(runId, "resumed"), "error")
 	const sourceLabel = workflowSourceLabel(workflowSource)
 
-	const loaded = await loadRecordedWorkflow({ source: workflowSource, projectRoot: ctx.cwd })
+	const loaded = await loadRecordedWorkflow({
+		source: workflowSource,
+		projectRoot: ctx.cwd,
+		identity: summary.workflowName,
+	})
 	if (!loaded.ok) {
 		ctx.ui.notify(
 			recordedWorkflowLoadFailure({

@@ -19,7 +19,7 @@ import {
 	createWorkflow,
 } from "../../flow/index.ts"
 import type { InteractionRenderArgs, RunContext } from "../../flow/types.ts"
-import { loadWorkflowFile, WORKFLOW_SUFFIX } from "../load-workflow.ts"
+import { WORKFLOW_SUFFIX } from "../load-workflow.ts"
 import { validateWorkflowFile } from "../workflow-candidate-validator.ts"
 import { prepareWorkflowPackage } from "../workflow-package.ts"
 import { verifyWorkflowTest, WorkflowTestInfrastructureError } from "../workflow-test-verifier.ts"
@@ -423,20 +423,12 @@ async function resolveTarget(plan: WorkflowPlan, ctx: RunContext) {
 	const directory = init.workflowsDir ?? path.join(init.projectRoot, ".pi", "workflows")
 	const files = await readdir(directory).catch(() => [] as string[])
 	const occupiedFiles = new Set(files)
-	const occupiedNames = new Set<string>()
-	for (const file of files.filter((name) => name.endsWith(WORKFLOW_SUFFIX))) {
-		try {
-			occupiedNames.add((await loadWorkflowFile(path.join(directory, file))).name)
-		} catch {
-			// A broken workflow still reserves its filename; it simply contributes no trustworthy declared name.
-		}
-	}
 
 	const fallback = ctx.getStepResult<Static<typeof goalSchema>>("goal")?.goal ?? "workflow"
 	const base = workflowSlug(plan.name || fallback)
 	let workflowName = base
 	let suffix = 2
-	while (occupiedNames.has(workflowName) || occupiedFiles.has(`${workflowName}${WORKFLOW_SUFFIX}`)) {
+	while (occupiedFiles.has(`${workflowName}${WORKFLOW_SUFFIX}`)) {
 		workflowName = `${base}-${suffix}`
 		suffix += 1
 	}

@@ -9,8 +9,13 @@ const theme = {
 	bold: (text: string) => text,
 } as Theme
 
-function entry(name: string, description?: string, filePath = `/project/.kimchi/workflows/${name}.workflow.ts`) {
-	return { name, description, filePath } satisfies WorkflowEntry
+function entry(
+	identity: string,
+	description?: string,
+	filePath = `/project/.kimchi/workflows/${identity}.workflow.ts`,
+	name = identity,
+) {
+	return { identity, name, description, filePath } satisfies WorkflowEntry
 }
 
 function picker(entries: readonly WorkflowEntry[]) {
@@ -103,15 +108,16 @@ describe("workflow welcome quick-pick", () => {
 		expect(scrolled).toContain("11 · Create new workflow")
 	})
 
-	it("disambiguates duplicate names minimally and dismisses with Escape", () => {
+	it("uses unique filename identities when declared names match and dismisses with Escape", () => {
 		const { component, done } = picker([
-			entry("deploy", "first", "/project/.kimchi/workflows/a.workflow.ts"),
-			entry("deploy", "second", "/project/.kimchi/workflows/b.workflow.ts"),
+			entry("a", "first", "/project/.kimchi/workflows/a.workflow.ts", "deploy"),
+			entry("b", "second", "/project/.kimchi/workflows/b.workflow.ts", "deploy"),
 		])
 		const rendered = component.render(100).join("\n")
 
-		expect(rendered).toContain("deploy (a.workflow.ts) — first")
-		expect(rendered).toContain("deploy (b.workflow.ts) — second")
+		expect(rendered).toContain("a — first")
+		expect(rendered).toContain("b — second")
+		expect(rendered).not.toContain("(a.workflow.ts)")
 		press(component, "\u001b")
 		expect(done).toHaveBeenCalledWith(undefined)
 	})

@@ -78,7 +78,11 @@ export async function handleStatus(
 	// The DEFINITION is what supplies the shape — the log alone knows only what happened, not what was
 	// meant to (progress §3.4). A run whose file has since moved cannot be shown as a tree, and saying
 	// so plainly beats rendering a plausible-looking partial one.
-	const loaded = await loadRecordedWorkflow({ source: workflowSource, projectRoot: ctx.cwd })
+	const loaded = await loadRecordedWorkflow({
+		source: workflowSource,
+		projectRoot: ctx.cwd,
+		identity: workflowNameOf(events),
+	})
 	if (!loaded.ok) {
 		ctx.ui.notify(
 			recordedWorkflowLoadFailure({
