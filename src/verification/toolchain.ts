@@ -133,20 +133,46 @@ function sourceLayoutEntry(pkg: InstalledPackage, specifier: string): string | u
 function frameworkTypePaths(pkg: InstalledPackage): Record<string, readonly string[]> {
 	try {
 		return declarationPaths(pkg)
-	} catch (declarationError) {
+	} catch {
 		// Published packages provide dist declarations. A local `file:` install intentionally skips
 		// lifecycle scripts, so a clean checkout may contain only the equally authoritative TS source.
 		const paths: Record<string, readonly string[]> = {}
-		for (const [exportKey] of packageExportEntries(pkg.manifest.exports)) {
-			const layer = exportKey === "." ? "flow" : exportKey.slice(2)
-			const source = path.join(pkg.directory, "src", layer, "index.ts")
-			if (!existsSync(source)) throw declarationError
+		for (const [exportKey, exported] of packageExportEntries(pkg.manifest.exports)) {
+			const source = frameworkSourceTypePath(pkg, exportKey, exported)
 			const specifier = exportKey === "." ? pkg.name : `${pkg.name}${exportKey.slice(1)}`
 			paths[specifier] = [source]
 		}
-		if (!paths[pkg.name]) throw declarationError
+		if (!paths[pkg.name]) {
+			throw new Error(`${pkg.name} does not expose a root export that can be mapped to TypeScript source`)
+		}
 		return paths
 	}
+}
+
+/** Map a generated `dist` declaration export back to its package-owned TypeScript source. */
+function frameworkSourceTypePath(pkg: InstalledPackage, exportKey: string, exported: unknown): string {
+	const target = declarationTarget(pkg, exportKey, exported)
+	if (!target) throw new Error(`${pkg.name} export ${exportKey} has no declaration target to map to source`)
+
+	const declaration = path.resolve(pkg.directory, target)
+	const relativeDeclaration = path.relative(path.join(pkg.directory, "dist"), declaration)
+	if (
+		!relativeDeclaration ||
+		path.isAbsolute(relativeDeclaration) ||
+		relativeDeclaration === ".." ||
+		relativeDeclaration.startsWith(`..${path.sep}`)
+	) {
+		throw new Error(`${pkg.name} cannot map export ${exportKey} declaration target to source: ${target}`)
+	}
+	const relativeSource = relativeDeclaration.replace(/\.d\.(ts|mts|cts)$/, ".$1")
+	if (relativeSource === relativeDeclaration) {
+		throw new Error(`${pkg.name} cannot map export ${exportKey} declaration target to source: ${target}`)
+	}
+	const source = path.join(pkg.directory, "src", relativeSource)
+	if (!existsSync(source)) {
+		throw new Error(`${pkg.name} maps export ${exportKey} to a missing source type entry: ${source}`)
+	}
+	return source
 }
 
 export async function readInstalledPackage(packageRoot: string, name: string): Promise<InstalledPackage> {
@@ -235,10 +261,7 @@ function declarationPaths(pkg: InstalledPackage): Record<string, readonly string
 	const entries = packageExportEntries(pkg.manifest.exports)
 	const paths: Record<string, readonly string[]> = {}
 	for (const [exportKey, exported] of entries) {
-		const target =
-			findTypesCondition(exported) ??
-			findTypesVersionTarget(pkg.manifest.typesVersions, exportKey) ??
-			(exportKey === "." ? (stringValue(pkg.manifest.types) ?? stringValue(pkg.manifest.typings)) : undefined)
+		const target = declarationTarget(pkg, exportKey, exported)
 		if (!target) continue
 		const declaration = path.resolve(pkg.directory, target)
 		if (!existsSync(declaration)) {
@@ -257,6 +280,14 @@ function declarationPaths(pkg: InstalledPackage): Record<string, readonly string
 	}
 	if (!paths[pkg.name]) throw new Error(`${pkg.name} does not expose a resolvable root type declaration`)
 	return paths
+}
+
+function declarationTarget(pkg: InstalledPackage, exportKey: string, exported: unknown): string | undefined {
+	return (
+		findTypesCondition(exported) ??
+		findTypesVersionTarget(pkg.manifest.typesVersions, exportKey) ??
+		(exportKey === "." ? (stringValue(pkg.manifest.types) ?? stringValue(pkg.manifest.typings)) : undefined)
+	)
 }
 
 function packageExportEntries(exportsField: unknown): ReadonlyArray<readonly [string, unknown]> {

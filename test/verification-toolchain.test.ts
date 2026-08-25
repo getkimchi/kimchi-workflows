@@ -2,10 +2,14 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { readInstalledPackage, resolveRuntimeModule } from "../src/verification/toolchain.ts"
+import {
+	readInstalledPackage,
+	resolveRuntimeModule,
+	resolveValidationToolchain,
+} from "../src/verification/toolchain.ts"
 import { prepareWorkflowPackageFixture } from "./workflow-package-fixture.ts"
 
-describe("verification toolchain runtime resolution", () => {
+describe("verification toolchain resolution", () => {
 	const roots: string[] = []
 
 	afterEach(async () => {
@@ -46,6 +50,16 @@ describe("verification toolchain runtime resolution", () => {
 		expect(resolveRuntimeModule(framework, "@kimchi-dev/kimchi-workflows/engine")).toBe(
 			path.join(framework.directory, "src", "engine", "index.ts"),
 		)
+	})
+
+	it("maps a non-index extension export to its source type entry in a clean local install", async () => {
+		const packageRoot = await preparedPackage({ sourceOnlyFramework: true })
+		const framework = await readInstalledPackage(packageRoot, "@kimchi-dev/kimchi-workflows")
+		const toolchain = await resolveValidationToolchain(packageRoot)
+
+		expect(toolchain.paths["@kimchi-dev/kimchi-workflows/extension"]).toEqual([
+			path.join(framework.directory, "src", "host", "extension.ts"),
+		])
 	})
 
 	it("resolves third-party runtime modules through the project package", async () => {
