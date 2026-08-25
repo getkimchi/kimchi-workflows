@@ -7,3 +7,4 @@ dist/
 *.log
 plans/
 __pycache__/
+*.tsbuildinfo
