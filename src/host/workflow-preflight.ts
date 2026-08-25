@@ -3,6 +3,7 @@
 import { existsSync } from "node:fs"
 import type { WorkflowDefinition } from "../flow/types.ts"
 import { loadWorkflowFile } from "./load-workflow.ts"
+import { workflowsDir } from "./project-dir.ts"
 import { validateWorkflowTypeScript } from "./workflow-candidate-validator.ts"
 
 export type WorkflowPreflightResult =
@@ -20,7 +21,11 @@ export async function loadValidatedWorkflow(options: {
 	if (!existsSync(options.filePath)) return { ok: false }
 
 	try {
-		await validateWorkflowTypeScript({ entryPath: options.filePath, projectRoot: options.projectRoot })
+		await validateWorkflowTypeScript({
+			entryPath: options.filePath,
+			projectRoot: options.projectRoot,
+			packageRoot: workflowsDir(options.projectRoot),
+		})
 		return { ok: true, workflow: await loadWorkflowFile(options.filePath) }
 	} catch (error) {
 		if (!existsSync(options.filePath)) return { ok: false }

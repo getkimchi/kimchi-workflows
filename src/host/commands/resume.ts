@@ -12,13 +12,14 @@ import type { ActiveRuns } from "../active-runs.ts"
 import { missingWorkflowProvenance, recordedWorkflowLoadFailure } from "../failure-messages.ts"
 import { createHostPort } from "../host-port.ts"
 import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
+import { prepareProjectWorkflowPackage } from "../project-workflow-package.ts"
 import { reconcileAbandonedRun } from "../reconcile-runs.ts"
 import { loadRecordedWorkflow, workflowSourceLabel, workflowSourceOf } from "../recorded-workflow.ts"
 import { resumeAction } from "../resume-router.ts"
 import { summarizeRun } from "../summarize-run.ts"
 import type { RunStore } from "../types.ts"
 import { handleAttendedInput, humanInputOf, pendingHumanInput } from "./attended.ts"
-import { type CommandCtx, reportResult, resolveRunRef, runTracked, type StartAgent } from "./context.ts"
+import { type CommandCtx, describe, reportResult, resolveRunRef, runTracked, type StartAgent } from "./context.ts"
 
 export async function handleResume(
 	ctx: CommandCtx,
@@ -52,6 +53,14 @@ export async function handleResume(
 	const workflowSource = workflowSourceOf(events)
 	if (!workflowSource) return void ctx.ui.notify(missingWorkflowProvenance(runId, "resumed"), "error")
 	const sourceLabel = workflowSourceLabel(workflowSource)
+	if (workflowSource.kind === "file") {
+		try {
+			await prepareProjectWorkflowPackage({ projectRoot: ctx.cwd })
+		} catch (error) {
+			ctx.ui.notify(`workflow: could not prepare the project workflow package: ${describe(error)}`, "error")
+			return
+		}
+	}
 
 	const loaded = await loadRecordedWorkflow({
 		source: workflowSource,

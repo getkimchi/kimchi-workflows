@@ -10,6 +10,8 @@ import { createHostPort } from "../src/host/host-port.ts"
 import { loadWorkflowFile } from "../src/host/load-workflow.ts"
 import { createMemoryStore } from "../src/host/memory-store.ts"
 import type { ProgressCtx, ProgressMode } from "../src/host/progress-sink.ts"
+import { workflowsDir } from "../src/host/project-dir.ts"
+import { prepareWorkflowPackageFixture } from "./workflow-package-fixture.ts"
 
 /**
  * `/workflow status [run-id]` (progress §11.4) — rebuilt from the log, through the same projection the
@@ -53,18 +55,18 @@ export default createWorkflow({ name: "audit" })
   .commit();
 `
 
-function fakeCtx(mode: ProgressMode, sessionDir = "/tmp/session") {
+function fakeCtx(mode: ProgressMode, options: { readonly cwd?: string; readonly sessionDir?: string } = {}) {
 	const notes: [string, string | undefined][] = []
 	const ctx = {
 		mode,
-		cwd: "/tmp",
+		cwd: options.cwd ?? "/tmp",
 		hasUI: mode === "tui" || mode === "rpc",
 		ui: {
 			notify: (message: string, type?: "info" | "warning" | "error") => void notes.push([message, type]),
 			setWidget: () => {},
 			setWorkingMessage: () => {},
 		},
-		sessionManager: { getSessionDir: () => sessionDir },
+		sessionManager: { getSessionDir: () => options.sessionDir ?? "/tmp/session" },
 	} as unknown as CommandCtx & ProgressCtx
 	return { ctx, notes, deps: { activeRunIds: () => [], width: 76 } }
 }
@@ -72,6 +74,7 @@ function fakeCtx(mode: ProgressMode, sessionDir = "/tmp/session") {
 /** Run the real workflow off a real file, and return the store its log landed in. */
 async function recordedRun() {
 	const dir = await mkdtemp(path.join(tmpdir(), "pi-workflows-status-"))
+	await prepareWorkflowPackageFixture({ directory: workflowsDir(dir) })
 	const file = path.join(dir, "audit.workflow.ts")
 	await writeFile(file, WORKFLOW_SOURCE, "utf8")
 
@@ -87,11 +90,12 @@ async function recordedRun() {
 		at: new Date().toISOString(),
 	})
 	const result = await runWorkflow(workflow, undefined, host)
-	return { store, result, file }
+	return { store, result, file, projectRoot: dir }
 }
 
 async function recordedCrash() {
 	const dir = await mkdtemp(path.join(tmpdir(), "pi-workflows-status-crash-"))
+	await prepareWorkflowPackageFixture({ directory: workflowsDir(dir) })
 	const file = path.join(dir, "audit.workflow.ts")
 	await writeFile(file, CRASHING_WORKFLOW_SOURCE, "utf8")
 	const workflow = await loadWorkflowFile(file)
@@ -104,15 +108,15 @@ async function recordedCrash() {
 		at: new Date().toISOString(),
 	})
 	const result = await runWorkflow(workflow, undefined, host)
-	return { store, result }
+	return { store, result, projectRoot: dir }
 }
 
 describe("handleStatus (progress §11.4)", () => {
 	it("notifies the fully expanded tree of a recorded run", async () => {
-		const { store, result, file } = await recordedRun()
+		const { store, result, file, projectRoot } = await recordedRun()
 		expect(result.status).toBe("completed")
 
-		const h = fakeCtx("tui")
+		const h = fakeCtx("tui", { cwd: projectRoot })
 		await handleStatus(h.ctx, store, h.deps, "1a2b3c4d") // the 8-hex tail, resolved by the shared resolveRunRef
 
 		expect(h.notes).toHaveLength(1)
@@ -136,8 +140,8 @@ describe("handleStatus (progress §11.4)", () => {
 		["rpc", "/tmp/session"],
 		["json", "/tmp/session"],
 	] as const)("answers identically in %s mode, with or without a session", async (mode, sessionDir) => {
-		const { store } = await recordedRun()
-		const h = fakeCtx(mode, sessionDir)
+		const { store, projectRoot } = await recordedRun()
+		const h = fakeCtx(mode, { cwd: projectRoot, sessionDir })
 		await handleStatus(h.ctx, store, h.deps, "1a2b3c4d")
 		expect(h.notes).toHaveLength(1)
 		expect(h.notes[0]?.[0]).toContain("✓ collect")
@@ -145,10 +149,10 @@ describe("handleStatus (progress §11.4)", () => {
 	})
 
 	it("shows a crashed run's failing path and root cause together", async () => {
-		const { store, result } = await recordedCrash()
+		const { store, result, projectRoot } = await recordedCrash()
 		expect(result).toMatchObject({ status: "crashed", path: "publish", error: "registry denied the release" })
 
-		const h = fakeCtx("tui")
+		const h = fakeCtx("tui", { cwd: projectRoot })
 		await handleStatus(h.ctx, store, h.deps, "1a2b3c4d")
 
 		expect(h.notes).toHaveLength(1)
@@ -158,9 +162,9 @@ describe("handleStatus (progress §11.4)", () => {
 	})
 
 	it("explains a workflow file deleted after the run and preserves the recorded result", async () => {
-		const { store, file } = await recordedRun()
+		const { store, file, projectRoot } = await recordedRun()
 		await rm(file)
-		const h = fakeCtx("tui")
+		const h = fakeCtx("tui", { cwd: projectRoot })
 
 		await handleStatus(h.ctx, store, h.deps, "1a2b3c4d")
 
@@ -173,10 +177,10 @@ describe("handleStatus (progress §11.4)", () => {
 	})
 
 	it("shows a new semantic TypeScript error instead of rendering a stale status tree", async () => {
-		const { store, file } = await recordedRun()
+		const { store, file, projectRoot } = await recordedRun()
 		const evaluated = path.join(path.dirname(file), "semantic-workflow-evaluated.txt")
 		await writeFile(file, semanticallyInvalidWorkflowSource(evaluated), "utf8")
-		const h = fakeCtx("tui")
+		const h = fakeCtx("tui", { cwd: projectRoot })
 
 		await handleStatus(h.ctx, store, h.deps, "1a2b3c4d")
 
@@ -190,30 +194,30 @@ describe("handleStatus (progress §11.4)", () => {
 	})
 
 	it("reports an unknown run rather than showing an empty tree", async () => {
-		const { store } = await recordedRun()
-		const h = fakeCtx("tui")
+		const { store, projectRoot } = await recordedRun()
+		const h = fakeCtx("tui", { cwd: projectRoot })
 		await handleStatus(h.ctx, store, h.deps, "nosuchrun")
 		expect(h.notes[0]?.[0]).toContain('no run "nosuchrun" to show')
 	})
 
 	it("with no argument and nothing executing, says so instead of guessing at a run", async () => {
-		const { store } = await recordedRun()
-		const h = fakeCtx("tui")
+		const { store, projectRoot } = await recordedRun()
+		const h = fakeCtx("tui", { cwd: projectRoot })
 		await handleStatus(h.ctx, store, h.deps, undefined)
 		expect(h.notes[0]?.[0]).toContain("no run is executing")
 	})
 
 	it("with no argument, shows the sole local execution", async () => {
-		const { store } = await recordedRun()
-		const h = fakeCtx("tui")
+		const { store, projectRoot } = await recordedRun()
+		const h = fakeCtx("tui", { cwd: projectRoot })
 		await handleStatus(h.ctx, store, { ...h.deps, activeRunIds: () => ["workflow-audit-1a2b3c4d"] }, undefined)
 		expect(h.notes).toHaveLength(1)
 		expect(h.notes[0]?.[0]).toContain("✓ collect")
 	})
 
 	it("with no argument, requires a run id when several local executions are active", async () => {
-		const { store } = await recordedRun()
-		const h = fakeCtx("tui")
+		const { store, projectRoot } = await recordedRun()
+		const h = fakeCtx("tui", { cwd: projectRoot })
 		await handleStatus(
 			h.ctx,
 			store,

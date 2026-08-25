@@ -11,6 +11,7 @@ import { createMemoryStore } from "../src/host/memory-store.ts"
 import { workflowsDir } from "../src/host/project-dir.ts"
 import type { RunStore } from "../src/host/types.ts"
 import { createFakeActiveRuns, fakeRunLease } from "./helpers.ts"
+import { prepareWorkflowPackageFixture } from "./workflow-package-fixture.ts"
 
 type NoteType = "info" | "warning" | "error" | undefined
 
@@ -67,6 +68,7 @@ describe("run identity through the command handlers", () => {
 		projectRoot = await mkdtemp(path.join(tmpdir(), "pi-workflows-identity-"))
 		runDir = path.join(projectRoot, "sessions", "workflow")
 		await mkdir(runDir, { recursive: true })
+		await prepareWorkflowPackageFixture({ directory: workflowsDir(projectRoot) })
 		store = createFsStore(runDir)
 	})
 

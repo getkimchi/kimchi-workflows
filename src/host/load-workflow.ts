@@ -4,7 +4,9 @@
 
 import * as piCodingAgent from "@earendil-works/pi-coding-agent"
 import * as piTui from "@earendil-works/pi-tui"
-import { createJiti } from "jiti"
+// Jiti's static entry imports its transformer eagerly so Bun includes it in standalone executables.
+// The default entry loads that file dynamically and fails inside Bun's virtual filesystem.
+import { createJiti } from "jiti/static"
 import * as typebox from "typebox"
 import * as typeboxCompile from "typebox/compile"
 import * as typeboxValue from "typebox/value"

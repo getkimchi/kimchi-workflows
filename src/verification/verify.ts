@@ -3,8 +3,13 @@ import { existsSync } from "node:fs"
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { createRequire } from "node:module"
 import path from "node:path"
-import { fileURLToPath } from "node:url"
 import type { WorkflowVerificationSuccess } from "./protocol.ts"
+import {
+	readInstalledPackage,
+	resolveRuntimeModule,
+	resolveValidationToolchain,
+	type ValidationToolchain,
+} from "./toolchain.ts"
 
 const OUTPUT_LIMIT = 64 * 1024
 const RESULT_LIMIT = 1024 * 1024
@@ -27,10 +32,9 @@ interface VitestJsonResult {
 	readonly testResults: readonly Record<string, unknown>[]
 }
 
-interface FrameworkAlias {
+interface RuntimeAlias {
 	readonly find: string
 	readonly replacement: string
-	readonly typeReplacement: string
 }
 
 export class WorkflowAuthoredVerificationError extends Error {
@@ -60,8 +64,6 @@ export async function verifyWorkflowPackage(options: {
 	const packageRoot = path.resolve(options.packageRoot)
 	const entryPath = path.resolve(options.entryPath)
 	const testPath = path.resolve(options.testPath)
-	assertInsidePackage(entryPath, packageRoot, "entry")
-	assertInsidePackage(testPath, packageRoot, "test")
 	await assertFile(entryPath, "workflow entry")
 	await assertFile(testPath, "focused test")
 	if (options.signal?.aborted) throw abortReason(options.signal)
@@ -77,12 +79,26 @@ export async function verifyWorkflowPackage(options: {
 	const resultPath = path.join(tempDirectory, "vitest-result.json")
 
 	try {
-		const aliases = frameworkAliases()
+		let toolchain: ValidationToolchain
+		let aliases: RuntimeAlias[]
+		try {
+			toolchain = await resolveValidationToolchain(packageRoot)
+			aliases = await runtimeAliases(packageRoot)
+		} catch (error) {
+			throw new WorkflowVerificationInfrastructureError(
+				`could not resolve the prepared workflow package toolchain: ${describe(error)}`,
+			)
+		}
 		await Promise.all([
-			writeFile(typeScriptConfig, renderTypeScriptConfig({ aliases, entryPath, packageRoot, testPath }), "utf8"),
-			writeFile(vitestConfig, renderVitestConfig({ aliases, packageRoot, tempDirectory }), "utf8"),
+			writeFile(typeScriptConfig, renderTypeScriptConfig({ entryPath, testPath, toolchain }), "utf8"),
+			writeFile(vitestConfig, renderVitestConfig({ aliases, entryPath, packageRoot, tempDirectory, testPath }), "utf8"),
 		])
-		await runTypeScript({ configPath: typeScriptConfig, packageRequire, packageRoot, signal: options.signal })
+		await runTypeScript({
+			compiler: toolchain.compiler,
+			configPath: typeScriptConfig,
+			packageRoot,
+			signal: options.signal,
+		})
 		const command = await runVitest({
 			configPath: vitestConfig,
 			packageRequire,
@@ -108,33 +124,36 @@ export async function verifyWorkflowPackage(options: {
 	}
 }
 
-function frameworkAliases(): FrameworkAlias[] {
+async function runtimeAliases(packageRoot: string): Promise<RuntimeAlias[]> {
+	const [framework, typebox, pi, tui] = await Promise.all([
+		readInstalledPackage(packageRoot, "@kimchi-dev/kimchi-workflows"),
+		readInstalledPackage(packageRoot, "typebox"),
+		readInstalledPackage(packageRoot, "@earendil-works/pi-coding-agent"),
+		readInstalledPackage(packageRoot, "@earendil-works/pi-tui"),
+	])
 	return [
-		{ find: "@kimchi-dev/kimchi-workflows/testing", ...frameworkModule("../testing/index") },
-		{ find: "@kimchi-dev/kimchi-workflows/engine", ...frameworkModule("../engine/index") },
-		{ find: "@kimchi-dev/kimchi-workflows/flow", ...frameworkModule("../flow/index") },
-		{ find: "@kimchi-dev/kimchi-workflows", ...frameworkModule("../flow/index") },
+		...[
+			"@kimchi-dev/kimchi-workflows/testing",
+			"@kimchi-dev/kimchi-workflows/engine",
+			"@kimchi-dev/kimchi-workflows/flow",
+			"@kimchi-dev/kimchi-workflows",
+		].map((find) => ({ find, replacement: resolveRuntimeModule(framework, find) })),
+		...["typebox/compile", "typebox/value", "typebox"].map((find) => ({
+			find,
+			replacement: resolveRuntimeModule(typebox, find),
+		})),
+		{
+			find: "@earendil-works/pi-coding-agent",
+			replacement: resolveRuntimeModule(pi, "@earendil-works/pi-coding-agent"),
+		},
+		{ find: "@earendil-works/pi-tui", replacement: resolveRuntimeModule(tui, "@earendil-works/pi-tui") },
 	]
 }
 
-/** Resolve runtime JavaScript and its declaration, falling back to source before a local build. */
-function frameworkModule(stemFromVerification: string): Omit<FrameworkAlias, "find"> {
-	const source = fileURLToPath(new URL(`${stemFromVerification}.ts`, import.meta.url))
-	const root = fileURLToPath(new URL("../..", import.meta.url))
-	const relative = path.relative(path.join(root, "src"), source)
-	const emitted = path.join(root, "dist", relative).replace(/\.ts$/, ".js")
-	const declaration = emitted.replace(/\.js$/, ".d.ts")
-	return {
-		replacement: existsSync(emitted) ? emitted : source,
-		typeReplacement: existsSync(declaration) ? declaration : source,
-	}
-}
-
 function renderTypeScriptConfig(options: {
-	readonly aliases: readonly FrameworkAlias[]
 	readonly entryPath: string
-	readonly packageRoot: string
 	readonly testPath: string
+	readonly toolchain: ValidationToolchain
 }): string {
 	return `${JSON.stringify(
 		{
@@ -151,8 +170,8 @@ function renderTypeScriptConfig(options: {
 				noImplicitOverride: true,
 				noEmit: true,
 				skipLibCheck: true,
-				typeRoots: [path.join(options.packageRoot, "node_modules", "@types")],
-				paths: Object.fromEntries(options.aliases.map((alias) => [alias.find, [alias.typeReplacement]])),
+				typeRoots: [options.toolchain.nodeTypesRoot],
+				paths: options.toolchain.paths,
 			},
 			files: [options.entryPath, options.testPath],
 		},
@@ -162,12 +181,19 @@ function renderTypeScriptConfig(options: {
 }
 
 function renderVitestConfig(options: {
-	readonly aliases: readonly FrameworkAlias[]
+	readonly aliases: readonly RuntimeAlias[]
 	readonly packageRoot: string
 	readonly tempDirectory: string
+	readonly entryPath: string
+	readonly testPath: string
 }): string {
 	const fsAllow = [
-		...new Set([options.packageRoot, ...options.aliases.map((alias) => path.dirname(alias.replacement))]),
+		...new Set([
+			options.packageRoot,
+			...options.aliases.map((alias) => path.dirname(alias.replacement)),
+			authoredPackageRoot(options.entryPath),
+			authoredPackageRoot(options.testPath),
+		]),
 	]
 	return `export default ${JSON.stringify(
 		{
@@ -183,17 +209,24 @@ function renderVitestConfig(options: {
 	)}\n`
 }
 
+function authoredPackageRoot(filePath: string): string {
+	const authoredDirectory = path.dirname(filePath)
+	let directory = authoredDirectory
+	for (;;) {
+		if (existsSync(path.join(directory, "package.json"))) return directory
+		const parent = path.dirname(directory)
+		if (parent === directory) return authoredDirectory
+		directory = parent
+	}
+}
+
 async function runTypeScript(options: {
+	readonly compiler: string
 	readonly configPath: string
-	readonly packageRequire: NodeJS.Require
 	readonly packageRoot: string
 	readonly signal: AbortSignal | undefined
 }): Promise<void> {
-	const manifestPath = resolveDependency(options.packageRequire, "typescript/package.json")
-	const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { bin?: { tsc?: string } }
-	if (!manifest.bin?.tsc) throw new WorkflowVerificationInfrastructureError("installed TypeScript has no tsc binary")
-	const compiler = path.resolve(path.dirname(manifestPath), manifest.bin.tsc)
-	const command = await runCommand(process.execPath, [compiler, "--project", options.configPath, "--pretty", "false"], {
+	const command = await runCommand(options.compiler, ["--project", options.configPath, "--pretty", "false"], {
 		cwd: options.packageRoot,
 		signal: options.signal,
 	})
@@ -225,7 +258,7 @@ async function runVitest(options: {
 			"run",
 			options.testPath,
 			"--root",
-			options.packageRoot,
+			authoredPackageRoot(options.testPath),
 			"--config",
 			options.configPath,
 			"--reporter=json",
@@ -419,12 +452,6 @@ async function assertFile(filePath: string, label: string): Promise<void> {
 		// Fall through to the focused authored-input error.
 	}
 	throw new WorkflowAuthoredVerificationError(`${label} does not exist: ${filePath}`)
-}
-
-function assertInsidePackage(filePath: string, packageRoot: string, label: string): void {
-	if (filePath !== packageRoot && !filePath.startsWith(`${packageRoot}${path.sep}`)) {
-		throw new WorkflowAuthoredVerificationError(`${label} resolves outside the workflow package: ${filePath}`)
-	}
 }
 
 function commandDiagnostic(command: CommandResult): string {

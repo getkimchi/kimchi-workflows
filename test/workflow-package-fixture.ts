@@ -1,5 +1,6 @@
 import { mkdir, symlink, writeFile } from "node:fs/promises"
 import path from "node:path"
+import { distribution } from "../src/host/distribution.ts"
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..")
 
@@ -40,12 +41,29 @@ export async function prepareWorkflowPackageFixture(options: {
 		mkdir(path.join(modules, "@earendil-works"), { recursive: true }),
 		writeFile(
 			path.join(directory, "package.json"),
-			`${JSON.stringify({
-				name: "test-project-workflows",
-				private: true,
-				type: "module",
-				scripts: { "verify:workflow": "kimchi-workflows verify" },
-			})}\n`,
+			`${JSON.stringify(
+				{
+					name: "test-project-workflows",
+					private: true,
+					type: "module",
+					packageManager: distribution.packageManager,
+					scripts: { "verify:workflow": "kimchi-workflows verify", verify: "vitest run" },
+					devDependencies: {
+						[distribution.name]:
+							distribution.version === "0.0.0"
+								? `file:${repositoryRoot.replaceAll(path.sep, "/")}`
+								: distribution.version,
+						"@earendil-works/pi-coding-agent": distribution.toolchain.piCodingAgent,
+						"@earendil-works/pi-tui": distribution.toolchain.piTui,
+						"@types/node": distribution.toolchain.typesNode,
+						typebox: distribution.toolchain.typebox,
+						typescript: distribution.toolchain.typescript,
+						vitest: distribution.toolchain.vitest,
+					},
+				},
+				null,
+				2,
+			)}\n`,
 			"utf8",
 		),
 		writeFile(path.join(directory, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8"),
