@@ -80,6 +80,7 @@
 		"docs:check": "node scripts/generate-authoring-reference.mjs --check",
 		"prepack": "pnpm run dist:metadata && pnpm run build",
 		"test": "vitest run",
+		"test:e2e:kimchi": "vitest run --config e2e/kimchi/vitest.config.ts",
 		"test:examples": "pnpm --dir examples run test",
 		"test:integration": "vitest run --config vitest.integration.config.ts",
 		"typecheck:examples": "pnpm --dir examples run typecheck",

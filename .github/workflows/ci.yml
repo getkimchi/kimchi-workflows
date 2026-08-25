@@ -83,3 +83,58 @@ jobs:
 
       - name: Test examples
         run: pnpm run test:examples
+
+  kimchi-binary-e2e:
+    name: compiled Kimchi extension lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out kimchi-workflows
+        uses: actions/checkout@v4
+        with:
+          path: kimchi-workflows
+
+      - name: Check out Kimchi harness master
+        uses: actions/checkout@v4
+        with:
+          repository: getkimchi/kimchi
+          ref: master
+          path: kimchi
+          submodules: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+          run_install: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: kimchi/tools/proxy-helper/go.mod
+          cache-dependency-path: kimchi/tools/proxy-helper/go.sum
+
+      - name: Install kimchi-workflows dependencies
+        working-directory: kimchi-workflows
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Kimchi dependencies
+        working-directory: kimchi
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Kimchi proxy helper
+        working-directory: kimchi
+        run: node scripts/build-proxy-helper.js
+
+      - name: Build Kimchi Bun binary
+        working-directory: kimchi
+        run: pnpm run build:binary
+
+      - name: Run compiled-harness workflow E2E
+        working-directory: kimchi-workflows
+        env:
+          KIMCHI_E2E_BINARY: ${{ github.workspace }}/kimchi/dist/bin/kimchi
+          KIMCHI_E2E_PACKAGE_DIR: ${{ github.workspace }}/kimchi/dist/share/kimchi
+        run: pnpm run test:e2e:kimchi

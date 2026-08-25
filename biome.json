@@ -55,7 +55,7 @@
 			}
 		},
 		{
-			"includes": ["test/**/*.ts"],
+			"includes": ["test/**/*.ts", "e2e/kimchi/**/*.ts"],
 			"linter": {
 				"rules": {
 					"suspicious": {
