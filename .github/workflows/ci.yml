@@ -85,7 +85,7 @@ jobs:
         run: pnpm run test:examples
 
   kimchi-binary-e2e:
-    name: compiled Kimchi extension lifecycle
+    name: Kimchi binary E2E
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -123,6 +123,11 @@ jobs:
       - name: Install Kimchi dependencies
         working-directory: kimchi
         run: pnpm install --frozen-lockfile
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          version: '1.4.0'
 
       - name: Build Kimchi proxy helper
         working-directory: kimchi
