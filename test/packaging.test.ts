@@ -97,6 +97,26 @@ console.log(JSON.stringify(results))
 		expect(existsSync(path.join(packedRoot, "src/host/extension.ts"))).toBe(true)
 	})
 
+	it("stamps packed distribution metadata from the packed manifest", async () => {
+		const distributionModule = pathToFileURL(path.join(packedRoot, "dist/host/distribution.js")).href
+		const { distribution } = (await import(distributionModule)) as {
+			distribution: { name: string; version: string; packageManager: string }
+		}
+		const packedManifest = JSON.parse(await readFile(path.join(packedRoot, "package.json"), "utf8")) as {
+			name: string
+			version: string
+			packageManager?: string
+			kimchiWorkflows?: { packageManager?: string }
+		}
+
+		expect(distribution.name).toBe(packedManifest.name)
+		expect(distribution.version).toBe(packedManifest.version)
+		expect(distribution.packageManager).toBe(
+			packedManifest.kimchiWorkflows?.packageManager ?? packedManifest.packageManager,
+		)
+		expect(distribution.version).toMatch(/^\d+\.\d+\.\d+/)
+	})
+
 	it("ships its package-owned verification command", () => {
 		expect(existsSync(path.join(packedRoot, "bin/kimchi-workflows.mjs"))).toBe(true)
 	})

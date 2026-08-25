@@ -11,6 +11,7 @@ import {
 const temporaryDirectories: string[] = []
 
 afterEach(async () => {
+	vi.unstubAllEnvs()
 	await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
 
@@ -122,6 +123,39 @@ describe("workflow package preparation", () => {
 		}
 
 		expect(manifest.scripts.verify).toBe("vitest run")
+	})
+
+	it("points the managed framework dependency at an explicitly supplied development package location", async () => {
+		const directory = await temporaryWorkflowDirectory()
+		const frameworkDirectory = path.join(path.dirname(directory), "framework")
+		await mkdir(frameworkDirectory, { recursive: true })
+		await writeFile(
+			path.join(frameworkDirectory, "package.json"),
+			`${JSON.stringify({ name: "@kimchi-dev/kimchi-workflows" })}\n`,
+			"utf8",
+		)
+		vi.stubEnv("KIMCHI_WORKFLOWS_PACKAGE_DIR", frameworkDirectory)
+
+		const prepared = await prepareWorkflowPackage({ directory, install: successfulInstaller() })
+		const manifest = JSON.parse(await readFile(prepared.manifestPath, "utf8")) as {
+			devDependencies: Record<string, string>
+		}
+
+		expect(manifest.devDependencies["@kimchi-dev/kimchi-workflows"]).toBe(
+			`file:${frameworkDirectory.replaceAll(path.sep, "/")}`,
+		)
+	})
+
+	it("rejects a development package location belonging to another package", async () => {
+		const directory = await temporaryWorkflowDirectory()
+		const frameworkDirectory = path.join(path.dirname(directory), "framework")
+		await mkdir(frameworkDirectory, { recursive: true })
+		await writeFile(path.join(frameworkDirectory, "package.json"), `${JSON.stringify({ name: "other" })}\n`, "utf8")
+		vi.stubEnv("KIMCHI_WORKFLOWS_PACKAGE_DIR", frameworkDirectory)
+
+		await expect(prepareWorkflowPackage({ directory, install: successfulInstaller() })).rejects.toThrow(
+			"must point to the @kimchi-dev/kimchi-workflows package directory",
+		)
 	})
 
 	it("fails before authoring when pnpm cannot prepare the package", async () => {
