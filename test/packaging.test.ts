@@ -97,6 +97,26 @@ console.log(JSON.stringify(results))
 		expect(existsSync(path.join(packedRoot, "src/host/extension.ts"))).toBe(true)
 	})
 
+	it("stamps packed distribution metadata from the packed manifest", async () => {
+		const distributionModule = pathToFileURL(path.join(packedRoot, "dist/host/distribution.js")).href
+		const { distribution } = (await import(distributionModule)) as {
+			distribution: { name: string; version: string; packageManager: string }
+		}
+		const packedManifest = JSON.parse(await readFile(path.join(packedRoot, "package.json"), "utf8")) as {
+			name: string
+			version: string
+			packageManager?: string
+			kimchiWorkflows?: { packageManager?: string }
+		}
+
+		expect(distribution.name).toBe(packedManifest.name)
+		expect(distribution.version).toBe(packedManifest.version)
+		expect(distribution.packageManager).toBe(
+			packedManifest.kimchiWorkflows?.packageManager ?? packedManifest.packageManager,
+		)
+		expect(distribution.version).toMatch(/^\d+\.\d+\.\d+/)
+	})
+
 	it("ships its package-owned verification command", () => {
 		expect(existsSync(path.join(packedRoot, "bin/kimchi-workflows.mjs"))).toBe(true)
 	})
@@ -198,6 +218,7 @@ console.log(JSON.stringify(results))
 		await Promise.all([
 			mkdir(path.join(modules, ".bin"), { recursive: true }),
 			mkdir(path.join(modules, "@kimchi-dev"), { recursive: true }),
+			mkdir(path.join(modules, "@earendil-works"), { recursive: true }),
 		])
 		await Promise.all([
 			writeFile(
@@ -211,6 +232,11 @@ console.log(JSON.stringify(results))
 				"utf8",
 			),
 			symlink(packedRoot, path.join(modules, "@kimchi-dev/kimchi-workflows")),
+			symlink(
+				path.join(repoRoot, "node_modules/@earendil-works/pi-coding-agent"),
+				path.join(modules, "@earendil-works/pi-coding-agent"),
+			),
+			symlink(path.join(repoRoot, "node_modules/@earendil-works/pi-tui"), path.join(modules, "@earendil-works/pi-tui")),
 			symlink(path.join(packedRoot, "bin/kimchi-workflows.mjs"), path.join(modules, ".bin/kimchi-workflows")),
 			...["@types", "typebox", "typescript", "vitest"].map((name) =>
 				symlink(path.join(repoRoot, "node_modules", name), path.join(modules, name)),

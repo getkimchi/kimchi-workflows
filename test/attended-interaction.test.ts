@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import type { CommandCtx, StartAgent } from "../src/host/commands/index.ts"
 import { handleRun } from "../src/host/commands/index.ts"
 import { createMemoryStore } from "../src/host/memory-store.ts"
+import { workflowsDir } from "../src/host/project-dir.ts"
 import { createFakeActiveRuns } from "./helpers.ts"
+import { prepareWorkflowPackageFixture } from "./workflow-package-fixture.ts"
 
 const flowImport = path.resolve(import.meta.dirname, "../src/flow/index.ts")
 const roots: string[] = []
@@ -35,10 +37,16 @@ function workflowSource(renderBody: string): string {
 	].join("\n")
 }
 
+async function preparedProject(prefix: string): Promise<string> {
+	const root = await mkdtemp(path.join(tmpdir(), prefix))
+	roots.push(root)
+	await prepareWorkflowPackageFixture({ directory: workflowsDir(root) })
+	return root
+}
+
 describe("attended workflow-defined interactions", () => {
 	it("renders outside active execution tracking, then resumes the exact blocked path", async () => {
-		const root = await mkdtemp(path.join(tmpdir(), "workflow-attended-interaction-"))
-		roots.push(root)
+		const root = await preparedProject("workflow-attended-interaction-")
 		const file = path.join(root, "demo.workflow.ts")
 		await writeFile(
 			file,
@@ -78,8 +86,7 @@ describe("attended workflow-defined interactions", () => {
 	})
 
 	it("leaves the run blocked when the renderer is dismissed", async () => {
-		const root = await mkdtemp(path.join(tmpdir(), "workflow-attended-dismiss-"))
-		roots.push(root)
+		const root = await preparedProject("workflow-attended-dismiss-")
 		const file = path.join(root, "demo.workflow.ts")
 		await writeFile(file, workflowSource('await ui.select(request.markdown, ["Approve"]); return undefined;'), "utf8")
 		const activeRuns = createFakeActiveRuns()
@@ -104,8 +111,7 @@ describe("attended workflow-defined interactions", () => {
 	})
 
 	it("reports renderer failure without writing a response or taking the lock again", async () => {
-		const root = await mkdtemp(path.join(tmpdir(), "workflow-attended-failure-"))
-		roots.push(root)
+		const root = await preparedProject("workflow-attended-failure-")
 		const file = path.join(root, "demo.workflow.ts")
 		await writeFile(file, workflowSource('throw new Error("renderer exploded");'), "utf8")
 		const activeRuns = createFakeActiveRuns()

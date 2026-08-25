@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest"
  * pins that static import closure; a load test alone cannot, because devDependencies resolve locally.
  */
 
-/** What `loadWorkflowFile` resolves: `workflowModules` keys, node built-ins, and its own `jiti` dependency. */
+/** What `loadWorkflowFile` resolves: `workflowModules` keys, node built-ins, and Jiti's static entry. */
 const LOADER_RESOLVABLE = new Set([
 	"typebox",
 	"typebox/value",
@@ -20,7 +20,7 @@ const LOADER_RESOLVABLE = new Set([
 	"@kimchi-dev/kimchi-workflows/engine",
 	"@earendil-works/pi-coding-agent",
 	"@earendil-works/pi-tui",
-	"jiti",
+	"jiti/static",
 ])
 
 /** Type-only imports are erased before the loader sees them, so `import type` / `export type` are skipped. */

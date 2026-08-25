@@ -26,7 +26,7 @@
 	},
 	"type": "module",
 	"engines": {
-		"node": ">=24"
+		"node": ">=22.19"
 	},
 	"bin": {
 		"kimchi-workflows": "./bin/kimchi-workflows.mjs"
@@ -71,24 +71,27 @@
 			"./src/host/extension.ts"
 		]
 	},
-	"//scripts": "`prepack` (not `prepare`) builds for the tarball: `prepare` would also wastefully build git installs, where PI loads the checked-in TypeScript source and omits the development-only typebox pin.",
+	"//scripts": "`prepack` (not `prepare`) stamps and builds for the tarball: `prepare` would also wastefully build git installs, where PI loads the checked-in TypeScript source and omits the development-only typebox pin. Stamping distribution metadata at pack time is what carries the release-stamped version into the bundled-executable build.",
 	"scripts": {
 		"build": "tsc -p tsconfig.build.json",
+		"dist:metadata": "node scripts/generate-distribution-metadata.mjs",
+		"dist:check": "node scripts/generate-distribution-metadata.mjs --check",
 		"docs:authoring": "node scripts/generate-authoring-reference.mjs",
 		"docs:check": "node scripts/generate-authoring-reference.mjs --check",
-		"prepack": "pnpm run build",
+		"prepack": "pnpm run dist:metadata && pnpm run build",
 		"test": "vitest run",
+		"test:e2e:kimchi": "vitest run --config e2e/kimchi/vitest.config.ts",
 		"test:examples": "pnpm --dir examples run test",
 		"test:integration": "vitest run --config vitest.integration.config.ts",
 		"typecheck:examples": "pnpm --dir examples run typecheck",
 		"typecheck": "tsc --noEmit",
 		"lint": "biome check .",
 		"lint:fix": "biome check --write .",
-		"check": "pnpm run docs:check && pnpm run lint && pnpm run typecheck && pnpm run test"
+		"check": "pnpm run dist:check && pnpm run docs:check && pnpm run lint && pnpm run typecheck && pnpm run test"
 	},
 	"//dependencies": "PI does not provide jiti or the verification toolchain. jiti loads workflows and the physical package CLI; TypeScript and Vitest verify project workflow packages outside the compiled harness.",
 	"dependencies": {
-		"@types/node": "^26.2.0",
+		"@types/node": "^22.19.18",
 		"jiti": "^2.7.0",
 		"typescript": "^7.0.2",
 		"vitest": "4.1.10"
@@ -104,6 +107,7 @@
 		"@biomejs/biome": "^2.5.6",
 		"@earendil-works/pi-coding-agent": "0.84.1",
 		"@earendil-works/pi-tui": "0.84.1",
+		"bun": "1.4.0",
 		"typebox": "1.3.7"
 	}
 }

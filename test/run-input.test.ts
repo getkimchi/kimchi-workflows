@@ -9,6 +9,7 @@ import { createFsStore } from "../src/host/fs-store.ts"
 import { workflowsDir } from "../src/host/project-dir.ts"
 import type { RunStore } from "../src/host/types.ts"
 import { createFakeActiveRuns } from "./helpers.ts"
+import { prepareWorkflowPackageFixture } from "./workflow-package-fixture.ts"
 
 type NoteType = "info" | "warning" | "error" | undefined
 
@@ -84,6 +85,7 @@ describe("/workflow run --input", () => {
 		projectRoot = await mkdtemp(path.join(tmpdir(), "pi-workflows-input-"))
 		const runDir = path.join(projectRoot, "sessions", "workflow")
 		await mkdir(runDir, { recursive: true })
+		await prepareWorkflowPackageFixture({ directory: workflowsDir(projectRoot) })
 		store = createFsStore(runDir)
 		file = path.join(projectRoot, "needs-input.workflow.ts")
 		await writeFile(file, echoInputWorkflowSource(), "utf8")

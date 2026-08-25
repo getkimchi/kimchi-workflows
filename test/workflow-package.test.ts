@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -11,6 +12,7 @@ import {
 const temporaryDirectories: string[] = []
 
 afterEach(async () => {
+	vi.unstubAllEnvs()
 	await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
 
@@ -43,8 +45,9 @@ describe("workflow package preparation", () => {
 	it("creates one private package with a reproducible verifier and lockfile", async () => {
 		const directory = await temporaryWorkflowDirectory()
 		const install = successfulInstaller()
+		const checkPrerequisites = vi.fn(async () => {})
 
-		const prepared = await prepareWorkflowPackage({ directory, install })
+		const prepared = await prepareWorkflowPackage({ directory, install, checkPrerequisites })
 		const manifest = JSON.parse(await readFile(prepared.manifestPath, "utf8")) as {
 			private: boolean
 			packageManager: string
@@ -67,9 +70,10 @@ describe("workflow package preparation", () => {
 		})
 		expect(install).toHaveBeenCalledTimes(1)
 
-		const unchanged = await prepareWorkflowPackage({ directory, install })
+		const unchanged = await prepareWorkflowPackage({ directory, install, checkPrerequisites })
 		expect(unchanged.installed).toBe(false)
 		expect(install).toHaveBeenCalledTimes(1)
+		expect(checkPrerequisites).toHaveBeenCalledTimes(1)
 	})
 
 	it("preserves user dependencies and scripts while restoring the managed verification contract", async () => {
@@ -124,6 +128,39 @@ describe("workflow package preparation", () => {
 		expect(manifest.scripts.verify).toBe("vitest run")
 	})
 
+	it("points the managed framework dependency at an explicitly supplied development package location", async () => {
+		const directory = await temporaryWorkflowDirectory()
+		const frameworkDirectory = path.join(path.dirname(directory), "framework")
+		await mkdir(frameworkDirectory, { recursive: true })
+		await writeFile(
+			path.join(frameworkDirectory, "package.json"),
+			`${JSON.stringify({ name: "@kimchi-dev/kimchi-workflows" })}\n`,
+			"utf8",
+		)
+		vi.stubEnv("KIMCHI_WORKFLOWS_PACKAGE_DIR", frameworkDirectory)
+
+		const prepared = await prepareWorkflowPackage({ directory, install: successfulInstaller() })
+		const manifest = JSON.parse(await readFile(prepared.manifestPath, "utf8")) as {
+			devDependencies: Record<string, string>
+		}
+
+		expect(manifest.devDependencies["@kimchi-dev/kimchi-workflows"]).toBe(
+			`file:${frameworkDirectory.replaceAll(path.sep, "/")}`,
+		)
+	})
+
+	it("rejects a development package location belonging to another package", async () => {
+		const directory = await temporaryWorkflowDirectory()
+		const frameworkDirectory = path.join(path.dirname(directory), "framework")
+		await mkdir(frameworkDirectory, { recursive: true })
+		await writeFile(path.join(frameworkDirectory, "package.json"), `${JSON.stringify({ name: "other" })}\n`, "utf8")
+		vi.stubEnv("KIMCHI_WORKFLOWS_PACKAGE_DIR", frameworkDirectory)
+
+		await expect(prepareWorkflowPackage({ directory, install: successfulInstaller() })).rejects.toThrow(
+			"must point to the @kimchi-dev/kimchi-workflows package directory",
+		)
+	})
+
 	it("fails before authoring when pnpm cannot prepare the package", async () => {
 		const directory = await temporaryWorkflowDirectory()
 
@@ -135,8 +172,45 @@ describe("workflow package preparation", () => {
 		).rejects.toEqual(
 			expect.objectContaining<Partial<WorkflowPackagePreparationError>>({
 				name: "WorkflowPackagePreparationError",
-				message: expect.stringContaining("registry unavailable"),
+				message: expect.stringMatching(/registry unavailable[\s\S]*Retry: pnpm --dir/),
 			}),
 		)
+	})
+
+	it("reports a concise recovery command when pnpm is not installed", async () => {
+		const directory = await temporaryWorkflowDirectory()
+
+		await expect(
+			prepareWorkflowPackage({
+				directory,
+				install: async () => {
+					const error = new Error("spawn pnpm ENOENT") as Error & { code: string }
+					error.code = "ENOENT"
+					throw error
+				},
+			}),
+		).rejects.toEqual(
+			expect.objectContaining<Partial<WorkflowPackagePreparationError>>({
+				name: "WorkflowPackagePreparationError",
+				message: expect.stringContaining("npm install --global pnpm@"),
+			}),
+		)
+	})
+
+	it("rejects failed prerequisites before touching the project package", async () => {
+		const directory = await temporaryWorkflowDirectory()
+		const checkPrerequisites = vi.fn(async () => {
+			throw new Error("workflow packages require external Node.js 22.19+")
+		})
+
+		await expect(
+			prepareWorkflowPackage({ directory, install: successfulInstaller(), checkPrerequisites }),
+		).rejects.toEqual(
+			expect.objectContaining<Partial<WorkflowPackagePreparationError>>({
+				name: "WorkflowPackagePreparationError",
+				message: expect.stringContaining("external Node.js 22.19"),
+			}),
+		)
+		expect(existsSync(directory)).toBe(false)
 	})
 })

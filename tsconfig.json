@@ -18,5 +18,5 @@
 		"forceConsistentCasingInFileNames": true,
 		"skipLibCheck": true
 	},
-	"include": ["src", "test"]
+	"include": ["src", "test", "e2e/kimchi/**/*.test.ts", "e2e/kimchi/support", "e2e/kimchi/vitest.config.ts"]
 }
