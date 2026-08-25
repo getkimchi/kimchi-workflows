@@ -1,9 +1,11 @@
+import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { describe, expect, it } from "vitest"
 import { workflowsDir } from "../src/host/project-dir.ts"
 import { discoverWorkflows, resolveWorkflow } from "../src/host/workflow-catalog.ts"
+import { prepareWorkflowPackageFixture } from "./workflow-package-fixture.ts"
 
 /**
  * Discovery reads real files through the real loader, so these tests build throwaway projects on
@@ -34,6 +36,12 @@ async function project(files: Record<string, string>): Promise<string> {
 	for (const [name, content] of Object.entries(files)) {
 		await writeFile(path.join(dir, name), content, "utf8")
 	}
+	return root
+}
+
+async function preparedProject(files: Record<string, string>): Promise<string> {
+	const root = await project(files)
+	await prepareWorkflowPackageFixture({ directory: workflowsDir(root) })
 	return root
 }
 
@@ -85,11 +93,20 @@ describe("discoverWorkflows", () => {
 		expect(broken[0]?.filePath).toContain("bad.workflow.ts")
 		expect(broken[0]?.error).toMatch(/does not export a workflow/)
 	})
+
+	it("does not prepare a project package merely to enumerate workflow files", async () => {
+		const root = await project({ "deploy.workflow.ts": workflowSource("deploy") })
+
+		await discoverWorkflows(root)
+
+		expect(existsSync(path.join(workflowsDir(root), "package.json"))).toBe(false)
+		expect(existsSync(path.join(workflowsDir(root), "node_modules"))).toBe(false)
+	})
 })
 
 describe("resolveWorkflow", () => {
 	it("resolves a declared name from the catalog", async () => {
-		const root = await project({ "deploy.workflow.ts": workflowSource("deploy") })
+		const root = await preparedProject({ "deploy.workflow.ts": workflowSource("deploy") })
 
 		const resolved = await resolveWorkflow(root, "deploy")
 
@@ -110,7 +127,7 @@ describe("resolveWorkflow", () => {
 			`const step = createStep({ name: "ship", run: () => undefined });`,
 			`export default createWorkflow({ name: "release" }).then(step).commit();`,
 		].join("\n")
-		const root = await project({ "aliased.workflow.ts": source })
+		const root = await preparedProject({ "aliased.workflow.ts": source })
 
 		try {
 			const resolved = await resolveWorkflow(root, "release")
@@ -124,7 +141,7 @@ describe("resolveWorkflow", () => {
 	})
 
 	it("resolves a path relative to the project root", async () => {
-		const root = await project({ "deploy.workflow.ts": workflowSource("deploy") })
+		const root = await preparedProject({ "deploy.workflow.ts": workflowSource("deploy") })
 
 		const resolved = await resolveWorkflow(
 			root,
@@ -135,8 +152,28 @@ describe("resolveWorkflow", () => {
 		if (resolved.ok) expect(resolved.workflow.name).toBe("deploy")
 	})
 
+	it("validates an explicit path outside the workflows directory against the central package", async () => {
+		const root = await preparedProject({})
+		const external = path.join(root, "automation", "external.workflow.ts")
+		await mkdir(path.dirname(external), { recursive: true })
+		await writeFile(
+			external,
+			`import { Type } from "typebox"
+import { createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"
+const step = createStep({ name: "external-step", output: Type.String(), run: () => "ok" })
+export default createWorkflow({ name: "external" }).then(step).commit()
+`,
+			"utf8",
+		)
+
+		const resolved = await resolveWorkflow(root, path.relative(root, external))
+
+		expect(resolved.ok).toBe(true)
+		if (resolved.ok) expect(resolved.workflow.name).toBe("external")
+	})
+
 	it("explains an unknown name and lists what is available", async () => {
-		const root = await project({ "deploy.workflow.ts": workflowSource("deploy") })
+		const root = await preparedProject({ "deploy.workflow.ts": workflowSource("deploy") })
 
 		const resolved = await resolveWorkflow(root, "nope")
 
@@ -148,7 +185,7 @@ describe("resolveWorkflow", () => {
 	})
 
 	it("reports why a named path failed to load", async () => {
-		const root = await project({ "bad.workflow.ts": "throw new Error('boom at import');" })
+		const root = await preparedProject({ "bad.workflow.ts": "throw new Error('boom at import');" })
 
 		const resolved = await resolveWorkflow(root, path.relative(root, path.join(workflowsDir(root), "bad.workflow.ts")))
 
@@ -157,7 +194,7 @@ describe("resolveWorkflow", () => {
 	})
 
 	it("reports an existing broken conventional file instead of calling its workflow missing", async () => {
-		const root = await project({ "broken.workflow.ts": "export default const nope = ;" })
+		const root = await preparedProject({ "broken.workflow.ts": "export default const nope = ;" })
 
 		const resolved = await resolveWorkflow(root, "broken")
 
@@ -171,7 +208,7 @@ describe("resolveWorkflow", () => {
 	})
 
 	it("distinguishes a missing explicit file from a workflow-name lookup", async () => {
-		const root = await project({ "deploy.workflow.ts": workflowSource("deploy") })
+		const root = await preparedProject({ "deploy.workflow.ts": workflowSource("deploy") })
 		const missing = path.join("custom", "missing.workflow.ts")
 
 		const resolved = await resolveWorkflow(root, missing)
@@ -184,7 +221,7 @@ describe("resolveWorkflow", () => {
 	})
 
 	it("gives an unknown name its searched path and known workflows", async () => {
-		const root = await project({ "deploy.workflow.ts": workflowSource("deploy") })
+		const root = await preparedProject({ "deploy.workflow.ts": workflowSource("deploy") })
 
 		const resolved = await resolveWorkflow(root, "deply")
 
@@ -215,6 +252,7 @@ describe("resolveWorkflow does not execute unrelated workflows (adversarial regr
 			].join("\n")
 			await writeFile(path.join(dir, `${name}.workflow.ts`), source, "utf8")
 		}
+		await prepareWorkflowPackageFixture({ directory: dir })
 		return { root, log }
 	}
 

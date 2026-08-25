@@ -218,6 +218,7 @@ console.log(JSON.stringify(results))
 		await Promise.all([
 			mkdir(path.join(modules, ".bin"), { recursive: true }),
 			mkdir(path.join(modules, "@kimchi-dev"), { recursive: true }),
+			mkdir(path.join(modules, "@earendil-works"), { recursive: true }),
 		])
 		await Promise.all([
 			writeFile(
@@ -231,6 +232,11 @@ console.log(JSON.stringify(results))
 				"utf8",
 			),
 			symlink(packedRoot, path.join(modules, "@kimchi-dev/kimchi-workflows")),
+			symlink(
+				path.join(repoRoot, "node_modules/@earendil-works/pi-coding-agent"),
+				path.join(modules, "@earendil-works/pi-coding-agent"),
+			),
+			symlink(path.join(repoRoot, "node_modules/@earendil-works/pi-tui"), path.join(modules, "@earendil-works/pi-tui")),
 			symlink(path.join(packedRoot, "bin/kimchi-workflows.mjs"), path.join(modules, ".bin/kimchi-workflows")),
 			...["@types", "typebox", "typescript", "vitest"].map((name) =>
 				symlink(path.join(repoRoot, "node_modules", name), path.join(modules, name)),

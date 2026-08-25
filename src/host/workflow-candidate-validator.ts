@@ -1,16 +1,15 @@
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { existsSync, realpathSync } from "node:fs"
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
-import { createRequire } from "node:module"
+import { existsSync } from "node:fs"
+import { mkdir, rm, writeFile } from "node:fs/promises"
 import path from "node:path"
 import type { WorkflowDefinition } from "../flow/types.ts"
+import { resolveValidationToolchain, type ValidationToolchain } from "../verification/toolchain.ts"
 import { loadWorkflowFile } from "./load-workflow.ts"
 
 const COMMAND_STDOUT_LIMIT = 1024 * 1024
 const COMMAND_DIAGNOSTIC_LIMIT = 16 * 1024
 const COMMAND_TIMEOUT_MS = 30_000
-const FRAMEWORK_ROOT = path.resolve(import.meta.dirname, "../..")
 
 export type ValidationStage = "typescript" | "runtime" | "conformance"
 
@@ -120,26 +119,24 @@ export async function validateWorkflowFile(options: ValidateWorkflowFileOptions)
 }
 
 /**
- * Type-check an existing workflow against its nearest prepared package without evaluating its module.
- * The extension package is a fallback for source checkouts and legacy layouts. Run resolution may
- * already have loaded the file; resume/status preflight deliberately calls this first so invalid
- * source cannot execute top-level side effects.
+ * Type-check an existing workflow against the central prepared project package without evaluating
+ * its module. Run resolution may already have loaded the file; resume/status preflight deliberately
+ * calls this first so invalid source cannot execute top-level side effects.
  */
 export async function validateWorkflowTypeScript(options: {
 	readonly entryPath: string
 	readonly projectRoot: string
+	readonly packageRoot: string
 	readonly signal?: AbortSignal
 	/** Test seam; production uses the bounded native TypeScript runner. */
 	readonly runCommand?: CommandRunner
 }): Promise<void> {
-	const entryPackageRoot = nearestPackageRoot(options.entryPath)
-	const packageRoots = entryPackageRoot ? uniquePaths([entryPackageRoot, FRAMEWORK_ROOT]) : [FRAMEWORK_ROOT]
 	await typecheckWorkflowEntry({
 		entryPath: options.entryPath,
 		projectRoot: options.projectRoot,
 		signal: options.signal,
 		diagnosticPath: options.entryPath,
-		packageRoots,
+		packageRoot: options.packageRoot,
 		runner: options.runCommand ?? runCommand,
 		artifactPrefix: ".pi-run-typecheck",
 	})
@@ -155,7 +152,7 @@ async function validateWorkflowModule(options: ValidateWorkflowModuleOptions): P
 		entryPath: options.entryPath,
 		diagnosticPath: options.diagnosticPath,
 		projectRoot: options.projectRoot,
-		packageRoots: [options.packageRoot],
+		packageRoot: options.packageRoot,
 		signal: options.signal,
 		runner,
 		artifactPrefix: ".pi-create-typecheck",
@@ -194,7 +191,7 @@ async function typecheckWorkflowEntry(options: {
 	readonly entryPath: string
 	readonly diagnosticPath: string
 	readonly projectRoot: string
-	readonly packageRoots: readonly string[]
+	readonly packageRoot: string
 	readonly signal?: AbortSignal
 	readonly runner: CommandRunner
 	readonly artifactPrefix: string
@@ -207,7 +204,7 @@ async function typecheckWorkflowEntry(options: {
 	try {
 		let toolchain: ValidationToolchain
 		try {
-			toolchain = await resolveValidationToolchain(options.packageRoots)
+			toolchain = await resolveValidationToolchain(options.packageRoot)
 		} catch (error) {
 			throw validationError("typescript", error)
 		}
@@ -224,260 +221,6 @@ async function typecheckWorkflowEntry(options: {
 	} finally {
 		await rm(config, { force: true })
 	}
-}
-
-interface ValidationToolchain {
-	readonly compiler: string
-	readonly nodeTypesRoot: string
-	readonly paths: Readonly<Record<string, readonly string[]>>
-}
-
-interface InstalledPackage {
-	readonly name: string
-	readonly directory: string
-	readonly manifestPath: string
-	readonly manifest: PackageManifest
-}
-
-interface PackageManifest {
-	readonly name?: unknown
-	readonly types?: unknown
-	readonly typings?: unknown
-	readonly exports?: unknown
-	readonly typesVersions?: unknown
-}
-
-/**
- * Build the static-validation environment from one complete package environment. Existing workflows
- * prefer the nearest package to their entry (normally `.kimchi/workflows`) and fall back to the
- * extension package. Candidate validation supplies only its explicitly prepared package.
- */
-async function resolveValidationToolchain(packageRoots: readonly string[]): Promise<ValidationToolchain> {
-	let lastMissing: MissingValidationPackageError | undefined
-	for (const packageRoot of uniquePaths(packageRoots)) {
-		try {
-			return await resolveValidationToolchainAt(packageRoot)
-		} catch (error) {
-			if (!(error instanceof MissingValidationPackageError)) throw error
-			lastMissing = error
-		}
-	}
-	throw lastMissing ?? new Error("workflow validation has no package environment to inspect")
-}
-
-async function resolveValidationToolchainAt(packageRoot: string): Promise<ValidationToolchain> {
-	const [framework, typebox, pi, node, typescript] = await Promise.all([
-		readInstalledPackage(packageRoot, "@kimchi-dev/kimchi-workflows"),
-		readInstalledPackage(packageRoot, "typebox"),
-		readInstalledPackage(packageRoot, "@earendil-works/pi-coding-agent"),
-		readInstalledPackage(packageRoot, "@types/node"),
-		readInstalledPackage(packageRoot, "typescript"),
-	])
-	return {
-		compiler: typeScriptCompiler(typescript.manifestPath),
-		nodeTypesRoot: path.dirname(path.dirname(node.manifestPath)),
-		paths: {
-			...frameworkTypePaths(framework),
-			...declarationPaths(typebox),
-			...declarationPaths(pi),
-		},
-	}
-}
-
-function frameworkTypePaths(pkg: InstalledPackage): Record<string, readonly string[]> {
-	try {
-		return declarationPaths(pkg)
-	} catch (declarationError) {
-		// Published packages provide dist declarations. A local `file:` install intentionally skips
-		// lifecycle scripts, so a clean checkout may contain only the equally authoritative TS source.
-		const paths: Record<string, readonly string[]> = {}
-		for (const [exportKey] of packageExportEntries(pkg.manifest.exports)) {
-			const layer = exportKey === "." ? "flow" : exportKey.slice(2)
-			const source = path.join(pkg.directory, "src", layer, "index.ts")
-			if (!existsSync(source)) throw declarationError
-			const specifier = exportKey === "." ? pkg.name : `${pkg.name}${exportKey.slice(1)}`
-			paths[specifier] = [source]
-		}
-		if (!paths[pkg.name]) throw declarationError
-		return paths
-	}
-}
-
-async function readInstalledPackage(packageRoot: string, name: string): Promise<InstalledPackage> {
-	const resolvedRoot = path.resolve(packageRoot)
-	const installedDirectory = path.join(resolvedRoot, "node_modules", ...name.split("/"))
-	const installedManifest = path.join(installedDirectory, "package.json")
-	const rootManifest = path.join(resolvedRoot, "package.json")
-	let directory = installedDirectory
-	let manifestPath = installedManifest
-	if (!existsSync(installedManifest) && existsSync(rootManifest)) {
-		try {
-			const rootPackage = JSON.parse(await readFile(rootManifest, "utf8")) as PackageManifest
-			if (rootPackage.name === name) {
-				directory = resolvedRoot
-				manifestPath = rootManifest
-			}
-		} catch {
-			// The regular diagnostic below describes an unreadable/malformed selected manifest.
-		}
-	}
-	if (!existsSync(manifestPath) && existsSync(rootManifest)) {
-		// npm commonly hoists dependencies beside the package that owns this root. Resolve from its
-		// manifest instead of assuming every dependency is nested inside the package directory.
-		const hoistedManifest = await resolveHoistedPackageManifest(rootManifest, name)
-		if (!hoistedManifest) throw new MissingValidationPackageError(name, resolvedRoot, installedManifest)
-		manifestPath = hoistedManifest
-		directory = path.dirname(manifestPath)
-	}
-	let manifest: PackageManifest
-	try {
-		manifest = JSON.parse(await readFile(manifestPath, "utf8")) as PackageManifest
-	} catch (error) {
-		if (!existsSync(manifestPath)) throw new MissingValidationPackageError(name, resolvedRoot, manifestPath, error)
-		throw new Error(`could not read workflow validation package ${name} at ${manifestPath}: ${describe(error)}`)
-	}
-	if (manifest.name !== name) {
-		throw new Error(`prepared workflow package entry ${manifestPath} identifies itself as ${String(manifest.name)}`)
-	}
-	return { name, directory, manifestPath, manifest }
-}
-
-async function resolveHoistedPackageManifest(rootManifest: string, name: string): Promise<string | undefined> {
-	const packageRequire = createRequire(rootManifest)
-	try {
-		return packageRequire.resolve(`${name}/package.json`)
-	} catch {
-		// Packages commonly hide package.json behind `exports`; resolve their public entry and walk
-		// upward to the owning manifest instead.
-	}
-
-	let entry: string
-	try {
-		entry = packageRequire.resolve(name)
-	} catch {
-		return undefined
-	}
-
-	let directory = path.dirname(realpathSync(entry))
-	for (;;) {
-		const candidate = path.join(directory, "package.json")
-		if (existsSync(candidate)) {
-			try {
-				const manifest = JSON.parse(await readFile(candidate, "utf8")) as PackageManifest
-				if (manifest.name === name) return candidate
-			} catch {
-				// Keep walking: the public entry may sit below an unrelated nested package boundary.
-			}
-		}
-		const parent = path.dirname(directory)
-		if (parent === directory) return undefined
-		directory = parent
-	}
-}
-
-class MissingValidationPackageError extends Error {
-	constructor(name: string, packageRoot: string, manifestPath: string, cause?: unknown) {
-		super(
-			`workflow validation package ${packageRoot} is missing ${name} at ${manifestPath}` +
-				(cause === undefined ? "" : `: ${describe(cause)}`),
-		)
-		this.name = "MissingValidationPackageError"
-	}
-}
-
-function nearestPackageRoot(entryPath: string): string | undefined {
-	let directory = path.dirname(path.resolve(entryPath))
-	for (;;) {
-		if (existsSync(path.join(directory, "package.json"))) return directory
-		const parent = path.dirname(directory)
-		if (parent === directory) return undefined
-		directory = parent
-	}
-}
-
-function uniquePaths(paths: readonly string[]): string[] {
-	return [...new Set(paths.map((candidate) => path.resolve(candidate)))]
-}
-
-function declarationPaths(pkg: InstalledPackage): Record<string, readonly string[]> {
-	const entries = packageExportEntries(pkg.manifest.exports)
-	const paths: Record<string, readonly string[]> = {}
-	for (const [exportKey, exported] of entries) {
-		const target =
-			findTypesCondition(exported) ??
-			findTypesVersionTarget(pkg.manifest.typesVersions, exportKey) ??
-			(exportKey === "." ? (stringValue(pkg.manifest.types) ?? stringValue(pkg.manifest.typings)) : undefined)
-		if (!target) continue
-		const declaration = path.resolve(pkg.directory, target)
-		if (!existsSync(declaration)) {
-			throw new Error(`${pkg.name} declares types for ${exportKey} at a missing path: ${declaration}`)
-		}
-		const specifier = exportKey === "." ? pkg.name : `${pkg.name}${exportKey.slice(1)}`
-		paths[specifier] = [declaration]
-	}
-	if (!paths[pkg.name]) {
-		const target = stringValue(pkg.manifest.types) ?? stringValue(pkg.manifest.typings)
-		if (target) {
-			const declaration = path.resolve(pkg.directory, target)
-			if (!existsSync(declaration)) throw new Error(`${pkg.name} declares a missing types entry: ${declaration}`)
-			paths[pkg.name] = [declaration]
-		}
-	}
-	if (!paths[pkg.name]) throw new Error(`${pkg.name} does not expose a resolvable root type declaration`)
-	return paths
-}
-
-function packageExportEntries(exportsField: unknown): ReadonlyArray<readonly [string, unknown]> {
-	if (isRecord(exportsField) && Object.keys(exportsField).some((key) => key.startsWith("."))) {
-		return Object.entries(exportsField)
-	}
-	return [[".", exportsField]]
-}
-
-function findTypesCondition(value: unknown): string | undefined {
-	if (typeof value === "string") return isDeclarationPath(value) ? value : undefined
-	if (Array.isArray(value)) {
-		for (const item of value) {
-			const target = findTypesCondition(item)
-			if (target) return target
-		}
-		return undefined
-	}
-	if (!isRecord(value)) return undefined
-	const direct = stringValue(value.types)
-	if (direct) return direct
-	for (const nested of Object.values(value)) {
-		if (!isRecord(nested) && !Array.isArray(nested)) continue
-		const target = findTypesCondition(nested)
-		if (target) return target
-	}
-	return undefined
-}
-
-function findTypesVersionTarget(typesVersions: unknown, exportKey: string): string | undefined {
-	if (!isRecord(typesVersions)) return undefined
-	const key = exportKey === "." ? "." : exportKey.slice(2)
-	for (const versionMap of Object.values(typesVersions)) {
-		if (!isRecord(versionMap)) continue
-		const targets = versionMap[key]
-		if (Array.isArray(targets)) {
-			const first = targets.find((target): target is string => typeof target === "string")
-			if (first) return first
-		}
-	}
-	return undefined
-}
-
-function isDeclarationPath(value: string): boolean {
-	return /\.d\.(?:ts|mts|cts)$/.test(value)
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function stringValue(value: unknown): string | undefined {
-	return typeof value === "string" && value.length > 0 ? value : undefined
 }
 
 function typeScriptConfig(probe: string, toolchain: ValidationToolchain): object {
@@ -529,27 +272,6 @@ async function validateTypeScript(
 			.replaceAll(config, "<validation-tsconfig>")
 		throw new WorkflowCandidateValidationError("typescript", diagnostic || `compiler exited with code ${result.code}`)
 	}
-}
-
-/**
- * Resolve TypeScript 7's platform compiler directly instead of launching its JavaScript shim through
- * `process.execPath`. A packaged Kimchi process is a Bun-compiled executable, so `process.execPath`
- * names the Kimchi CLI itself; passing `--project` to it fails before TypeScript ever sees the candidate.
- */
-function typeScriptCompiler(packageManifest: string): string {
-	// npm commonly hoists optional platform packages, while pnpm links them beside TypeScript in its
-	// content-addressed store. Resolving from the real package location lets Node support both layouts.
-	const packageRequire = createRequire(realpathSync(packageManifest))
-	const nativePackage = `@typescript/typescript-${process.platform}-${process.arch}`
-	let nativeManifest: string
-	try {
-		nativeManifest = packageRequire.resolve(`${nativePackage}/package.json`)
-	} catch {
-		throw new Error(`TypeScript compiler package ${nativePackage} is unavailable`)
-	}
-	const executable = path.join(path.dirname(nativeManifest), "lib", process.platform === "win32" ? "tsc.exe" : "tsc")
-	if (!existsSync(executable)) throw new Error(`TypeScript compiler executable is unavailable at ${executable}`)
-	return executable
 }
 
 async function runCommand(request: CommandRequest): Promise<CommandResult> {
@@ -621,8 +343,4 @@ function stageLabel(stage: ValidationStage): string {
 
 function abortReason(signal: AbortSignal | undefined): Error {
 	return signal?.reason instanceof Error ? signal.reason : new Error("workflow validation aborted")
-}
-
-function describe(error: unknown): string {
-	return error instanceof Error ? error.message : String(error)
 }

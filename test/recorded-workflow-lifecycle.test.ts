@@ -6,7 +6,9 @@ import type { CommandCtx, StartAgent } from "../src/host/commands/index.ts"
 import { handleResume, handleRun, handleStatus } from "../src/host/commands/index.ts"
 import { createMemoryStore } from "../src/host/memory-store.ts"
 import type { ProgressCtx } from "../src/host/progress-sink.ts"
+import { workflowsDir } from "../src/host/project-dir.ts"
 import { createFakeActiveRuns } from "./helpers.ts"
+import { prepareWorkflowPackageFixture } from "./workflow-package-fixture.ts"
 
 const flowImport = path.resolve(import.meta.dirname, "../src/flow/index.ts")
 
@@ -35,6 +37,7 @@ describe("project-authored recorded workflow lifecycle", () => {
 	it("runs, answers a real resume, and renders status from the recorded project file", async () => {
 		const projectRoot = await mkdtemp(path.join(tmpdir(), "kimchi-recorded-project-workflow-"))
 		roots.push(projectRoot)
+		await prepareWorkflowPackageFixture({ directory: workflowsDir(projectRoot) })
 		const workflowFile = path.join(projectRoot, "project-greeting.workflow.ts")
 		await writeFile(workflowFile, projectWorkflowSource(), "utf8")
 

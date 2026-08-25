@@ -8,6 +8,7 @@ import type { CommandCtx, StartAgent } from "../src/host/commands/index.ts"
 import { handleRun } from "../src/host/commands/index.ts"
 import { createMemoryStore } from "../src/host/memory-store.ts"
 import { workflowsDir } from "../src/host/project-dir.ts"
+import { prepareWorkflowPackageFixture } from "./workflow-package-fixture.ts"
 
 const flowImport = path.resolve(import.meta.dirname, "../src/flow/index.ts")
 const roots: string[] = []
@@ -46,6 +47,7 @@ describe("host-level run concurrency", () => {
 	it("executes two instances of the same workflow concurrently without creating a lock file", async () => {
 		const root = await mkdtemp(path.join(tmpdir(), "workflow-unlocked-"))
 		roots.push(root)
+		await prepareWorkflowPackageFixture({ directory: workflowsDir(root) })
 		const marker = path.join(root, "started.txt")
 		const workflowFile = path.join(root, "same.workflow.ts")
 		await writeFile(workflowFile, concurrentWorkflowSource(marker), "utf8")

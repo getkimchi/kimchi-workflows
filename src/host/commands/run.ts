@@ -15,6 +15,7 @@ import { createHostPort } from "../host-port.ts"
 import { mintRunId } from "../naming.ts"
 import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
 import { workflowsDir } from "../project-dir.ts"
+import { prepareProjectWorkflowPackage } from "../project-workflow-package.ts"
 import { BUILTIN_CREATE_WORKFLOW, workflowSourceLabel } from "../recorded-workflow.ts"
 import type { RunStore } from "../types.ts"
 import { resolveWorkflow } from "../workflow-catalog.ts"
@@ -129,6 +130,12 @@ export async function handleRun(
 	inputArg?: string,
 	progressFor: ProgressFor = noProgressFor,
 ): Promise<void> {
+	try {
+		await prepareProjectWorkflowPackage({ projectRoot: ctx.cwd })
+	} catch (error) {
+		ctx.ui.notify(`workflow: could not prepare the project workflow package: ${describe(error)}`, "error")
+		return
+	}
 	const resolution = await resolveWorkflow(ctx.cwd, target)
 	if (!resolution.ok) {
 		ctx.ui.notify(resolution.error, "error")

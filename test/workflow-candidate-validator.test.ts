@@ -156,6 +156,7 @@ describe("workflow candidate validation", () => {
 		await validateWorkflowTypeScript({
 			entryPath: target,
 			projectRoot: root,
+			packageRoot,
 			runCommand: async (request) => {
 				const configPath = request.args[request.args.indexOf("--project") + 1]
 				if (!configPath) throw new Error("validation command omitted --project")
