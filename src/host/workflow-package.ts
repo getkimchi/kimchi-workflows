@@ -59,23 +59,39 @@ export async function prepareWorkflowPackage(options: {
 	const directory = path.resolve(options.directory)
 	const manifestPath = path.join(directory, "package.json")
 	const lockfilePath = path.join(directory, "pnpm-lock.yaml")
-	await mkdir(directory, { recursive: true })
-
 	const current = existsSync(manifestPath) ? await readManifest(manifestPath, "workflow package") : {}
 	const desired = workflowManifest(current)
 	const rendered = `${JSON.stringify(desired, null, 2)}\n`
 	const previous = existsSync(manifestPath) ? await readFile(manifestPath, "utf8") : undefined
 	const changed = previous !== rendered
-	if (changed) await writeFile(manifestPath, rendered, "utf8")
-
 	const verifier = path.join(directory, "node_modules", ".bin", executableName("kimchi-workflows"))
 	const installRequired = changed || !existsSync(lockfilePath) || !existsSync(verifier)
 	if (installRequired) {
-		await (options.checkPrerequisites ?? checkWorkflowPrerequisites)(options.signal)
-		const result = await (options.install ?? runInstall)(directory, options.signal)
+		const checkPrerequisites = options.checkPrerequisites ?? (options.install ? undefined : checkWorkflowPrerequisites)
+		try {
+			await checkPrerequisites?.(options.signal)
+		} catch (error) {
+			throw new WorkflowPackagePreparationError(describe(error))
+		}
+	}
+
+	await mkdir(directory, { recursive: true })
+	if (changed) await writeFile(manifestPath, rendered, "utf8")
+
+	if (installRequired) {
+		let result: WorkflowPackageInstallResult
+		try {
+			result = await (options.install ?? runInstall)(directory, options.signal)
+		} catch (error) {
+			throw new WorkflowPackagePreparationError(
+				error instanceof WorkflowPackagePreparationError
+					? error.message
+					: pnpmStartupError(error instanceof Error ? error : new Error(String(error))),
+			)
+		}
 		if (result.code !== 0) {
 			throw new WorkflowPackagePreparationError(
-				`pnpm could not prepare the workflow package (exit ${result.code})${commandDiagnostic(result)}`,
+				`pnpm could not prepare the workflow package (exit ${result.code})${commandDiagnostic(result)}\nRetry: ${installCommand(directory)}`,
 			)
 		}
 		if (!existsSync(lockfilePath)) {
@@ -188,17 +204,13 @@ function runInstall(directory: string, signal: AbortSignal | undefined): Promise
 			return
 		}
 		const ownsProcessGroup = process.platform !== "win32"
-		const child = spawn(
-			"pnpm",
-			["--dir", directory, "--ignore-workspace", "install", "--no-frozen-lockfile", "--ignore-scripts"],
-			{
-				cwd: directory,
-				detached: ownsProcessGroup,
-				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
-				env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
-			},
-		)
+		const child = spawn("pnpm", installArgs(directory), {
+			cwd: directory,
+			detached: ownsProcessGroup,
+			shell: false,
+			stdio: ["ignore", "pipe", "pipe"],
+			env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+		})
 		let stdout = ""
 		let stderr = ""
 		let settled = false
@@ -248,12 +260,29 @@ function runInstall(directory: string, signal: AbortSignal | undefined): Promise
 				reject(
 					error instanceof WorkflowPackagePreparationError
 						? error
-						: new WorkflowPackagePreparationError(`could not start pnpm: ${describe(error)}`),
+						: new WorkflowPackagePreparationError(pnpmStartupError(error)),
 				)
 			} else if (result) resolve(result)
 			else reject(new WorkflowPackagePreparationError("pnpm install ended without a process result"))
 		}
 	})
+}
+
+function pnpmStartupError(error: Error): string {
+	if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+		return `pnpm is required to prepare the workflow package. Install it with: npm install --global ${distribution.packageManager}`
+	}
+	return `could not start pnpm: ${describe(error)}`
+}
+
+function installArgs(directory: string): string[] {
+	return ["--dir", directory, "--ignore-workspace", "install", "--no-frozen-lockfile", "--ignore-scripts"]
+}
+
+function installCommand(directory: string): string {
+	return ["pnpm", ...installArgs(directory)]
+		.map((argument) => (/^[\w./:@-]+$/.test(argument) ? argument : JSON.stringify(argument)))
+		.join(" ")
 }
 
 function executableName(name: string): string {
