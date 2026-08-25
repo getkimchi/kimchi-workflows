@@ -23,18 +23,25 @@ jobs:
         include:
           - check: dist-metadata
             run: pnpm run dist:check
+            node-version: '24'
           - check: lint
             run: pnpm run lint
+            node-version: '24'
           - check: typecheck
             run: pnpm run typecheck
+            node-version: '24'
           - check: test
             run: pnpm run test
+            node-version: '24'
+          - check: check (node 22)
+            run: pnpm run check
+            node-version: '22.19'
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node-version }}
 
       - uses: pnpm/action-setup@v4
         with:
@@ -47,15 +54,19 @@ jobs:
         run: ${{ matrix.run }}
 
   examples:
-    name: examples
+    name: examples (node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22.19', '24']
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node-version }}
 
       - uses: pnpm/action-setup@v4
         with:

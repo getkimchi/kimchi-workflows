@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { isWorkflowVerificationResult, type WorkflowVerificationSuccess } from "../verification/protocol.ts"
+import { checkWorkflowPrerequisites } from "./workflow-prerequisites.ts"
 
 const OUTPUT_LIMIT = 64 * 1024
 const VERIFICATION_TIMEOUT_MS = 90_000
@@ -36,8 +37,15 @@ export async function verifyWorkflowTest(options: {
 	readonly testPath: string
 	readonly packageRoot: string
 	readonly signal?: AbortSignal
+	/** Test seam; production probes the external Node and pnpm commands. */
+	readonly checkPrerequisites?: (signal: AbortSignal | undefined) => Promise<void>
 }): Promise<WorkflowVerificationSuccess> {
 	const packageRoot = path.resolve(options.packageRoot)
+	try {
+		await (options.checkPrerequisites ?? checkWorkflowPrerequisites)(options.signal)
+	} catch (error) {
+		throw new WorkflowTestInfrastructureError(describe(error))
+	}
 	const resultDirectory = await mkdtemp(path.join(tmpdir(), "kimchi-workflow-verification-result-"))
 	const resultPath = path.join(resultDirectory, "result.json")
 	try {

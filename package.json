@@ -26,7 +26,7 @@
 	},
 	"type": "module",
 	"engines": {
-		"node": ">=24"
+		"node": ">=22.19"
 	},
 	"bin": {
 		"kimchi-workflows": "./bin/kimchi-workflows.mjs"
@@ -90,7 +90,7 @@
 	},
 	"//dependencies": "PI does not provide jiti or the verification toolchain. jiti loads workflows and the physical package CLI; TypeScript and Vitest verify project workflow packages outside the compiled harness.",
 	"dependencies": {
-		"@types/node": "^26.2.0",
+		"@types/node": "^22.19.18",
 		"jiti": "^2.7.0",
 		"typescript": "^7.0.2",
 		"vitest": "4.1.10"

@@ -28,7 +28,7 @@ export const distribution: DistributionMetadata = {
 		piCodingAgent: "0.84.1",
 		piTui: "0.84.1",
 		typebox: "1.3.7",
-		typesNode: "^26.2.0",
+		typesNode: "^22.19.18",
 		typescript: "^7.0.2",
 		vitest: "4.1.10",
 	},
