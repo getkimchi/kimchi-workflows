@@ -218,6 +218,26 @@ describe("workflow package verification", () => {
 		).rejects.toBeInstanceOf(WorkflowTestInfrastructureError)
 	})
 
+	it("reports missing external prerequisites as actionable infrastructure", async () => {
+		const project = await projectWithTest('expect(run.output).toBe("hello")')
+
+		await expect(
+			verifyWorkflowTest({
+				entryPath: project.entryPath,
+				testPath: project.testPath,
+				packageRoot: project.root,
+				checkPrerequisites: async () => {
+					throw new Error("pnpm is required. Install it with: npm install --global pnpm@10.33.0")
+				},
+			}),
+		).rejects.toEqual(
+			expect.objectContaining<Partial<WorkflowTestInfrastructureError>>({
+				name: "WorkflowTestInfrastructureError",
+				message: expect.stringContaining("npm install --global pnpm@10.33.0"),
+			}),
+		)
+	})
+
 	it("terminates verification when the workflow run is aborted", async () => {
 		const project = await projectWithTest("await new Promise(() => {})")
 		const controller = new AbortController()

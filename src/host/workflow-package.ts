@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { distribution } from "./distribution.ts"
+import { checkWorkflowPrerequisites } from "./workflow-prerequisites.ts"
 
 const INSTALL_TIMEOUT_MS = 5 * 60_000
 const OUTPUT_LIMIT = 64 * 1024
@@ -52,6 +53,8 @@ export async function prepareWorkflowPackage(options: {
 	readonly signal?: AbortSignal
 	/** Test seam; production invokes pnpm directly. */
 	readonly install?: WorkflowPackageInstaller
+	/** Test seam; production probes the external Node and pnpm commands. */
+	readonly checkPrerequisites?: (signal: AbortSignal | undefined) => Promise<void>
 }): Promise<WorkflowPackagePreparation> {
 	const directory = path.resolve(options.directory)
 	const manifestPath = path.join(directory, "package.json")
@@ -68,6 +71,7 @@ export async function prepareWorkflowPackage(options: {
 	const verifier = path.join(directory, "node_modules", ".bin", executableName("kimchi-workflows"))
 	const installRequired = changed || !existsSync(lockfilePath) || !existsSync(verifier)
 	if (installRequired) {
+		await (options.checkPrerequisites ?? checkWorkflowPrerequisites)(options.signal)
 		const result = await (options.install ?? runInstall)(directory, options.signal)
 		if (result.code !== 0) {
 			throw new WorkflowPackagePreparationError(

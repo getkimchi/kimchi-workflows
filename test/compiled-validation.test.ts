@@ -15,14 +15,48 @@ afterEach(async () => {
 	await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
 
+async function compiledProbe(root: string): Promise<string> {
+	const executablePath = path.join(root, process.platform === "win32" ? "validation-probe.exe" : "validation-probe")
+	await exec(
+		"bun",
+		[
+			"build",
+			path.join(repoRoot, "test/fixtures/compiled-validation-probe.ts"),
+			"--compile",
+			`--outfile=${executablePath}`,
+		],
+		{ cwd: repoRoot, timeout: 60_000 },
+	)
+	return executablePath
+}
+
 describe("compiled validation environment", () => {
+	it("loads the bundled host graph without external Node or pnpm on PATH", async () => {
+		const root = await mkdtemp(path.join(tmpdir(), "kimchi-workflows-compiled-startup-"))
+		temporaryDirectories.push(root)
+		const executablePath = await compiledProbe(root)
+
+		const { stdout } = await exec(executablePath, ["--startup-only"], {
+			cwd: root,
+			env: { ...process.env, PATH: "" },
+			timeout: 30_000,
+		})
+		expect(stdout).toBe("ready")
+
+		const checked = await exec(executablePath, ["--check-prerequisites"], {
+			cwd: root,
+			env: { ...process.env, PATH: "" },
+			timeout: 30_000,
+		})
+		expect(checked.stdout).toMatch(/Node\.js is required.*node --version/)
+	})
+
 	it("validates and runs an external workflow through only the central project package", async () => {
 		const root = await mkdtemp(path.join(tmpdir(), "kimchi-workflows-compiled-validation-"))
 		temporaryDirectories.push(root)
 		const projectRoot = path.join(root, "project")
 		const entryPath = path.join(projectRoot, "automation", "external.workflow.ts")
 		const dependencyRoot = path.join(projectRoot, "node_modules", "project-greeting")
-		const executablePath = path.join(root, process.platform === "win32" ? "validation-probe.exe" : "validation-probe")
 		await prepareWorkflowPackageFixture({ directory: workflowsDir(projectRoot) })
 		await Promise.all([mkdir(path.dirname(entryPath), { recursive: true }), mkdir(dependencyRoot, { recursive: true })])
 		await Promise.all([
@@ -53,16 +87,7 @@ export default createWorkflow({ name: "compiled-external" }).then(greet).commit(
 			),
 		])
 
-		await exec(
-			"bun",
-			[
-				"build",
-				path.join(repoRoot, "test/fixtures/compiled-validation-probe.ts"),
-				"--compile",
-				`--outfile=${executablePath}`,
-			],
-			{ cwd: repoRoot, timeout: 60_000 },
-		)
+		const executablePath = await compiledProbe(root)
 		const { stdout } = await exec(executablePath, [projectRoot, entryPath], { cwd: root, timeout: 30_000 })
 
 		expect(JSON.parse(stdout)).toEqual({ name: "compiled-external", output: { greeting: "hello" } })
