@@ -1,23 +1,21 @@
 import { spawn } from "node:child_process"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { distribution } from "./distribution.ts"
 
 const INSTALL_TIMEOUT_MS = 5 * 60_000
 const OUTPUT_LIMIT = 64 * 1024
-const FRAMEWORK_MANIFEST_PATH = fileURLToPath(new URL("../../package.json", import.meta.url))
-const FRAMEWORK_ROOT = path.dirname(FRAMEWORK_MANIFEST_PATH)
+
+/** Env override for the one case the stamped metadata cannot cover: an unstamped, in-place source build. */
+const DEVELOPMENT_PACKAGE_DIR_ENV = "KIMCHI_WORKFLOWS_PACKAGE_DIR"
 
 interface PackageManifest {
 	readonly name?: string
 	readonly version?: string
 	readonly packageManager?: string
-	readonly kimchiWorkflows?: {
-		readonly packageManager?: string
-	}
 	readonly scripts?: Record<string, string>
-	readonly dependencies?: Record<string, string>
 	readonly devDependencies?: Record<string, string>
 	readonly [key: string]: unknown
 }
@@ -60,9 +58,8 @@ export async function prepareWorkflowPackage(options: {
 	const lockfilePath = path.join(directory, "pnpm-lock.yaml")
 	await mkdir(directory, { recursive: true })
 
-	const framework = await readManifest(FRAMEWORK_MANIFEST_PATH, "workflow framework")
 	const current = existsSync(manifestPath) ? await readManifest(manifestPath, "workflow package") : {}
-	const desired = workflowManifest(current, framework)
+	const desired = workflowManifest(current)
 	const rendered = `${JSON.stringify(desired, null, 2)}\n`
 	const previous = existsSync(manifestPath) ? await readFile(manifestPath, "utf8") : undefined
 	const changed = previous !== rendered
@@ -94,19 +91,16 @@ export async function prepareWorkflowPackage(options: {
 	}
 }
 
-function workflowManifest(current: PackageManifest, framework: PackageManifest): PackageManifest {
-	const frameworkName = requiredString(framework.name, "framework package name")
-	const frameworkVersion = requiredString(framework.version, "framework package version")
-	const dependencies = framework.dependencies ?? {}
-	const development = framework.devDependencies ?? {}
+function workflowManifest(current: PackageManifest): PackageManifest {
 	const managedDependencies: Record<string, string> = {
-		[frameworkName]: frameworkVersion === "0.0.0" ? localPackageSpecifier(FRAMEWORK_ROOT) : frameworkVersion,
-		"@earendil-works/pi-coding-agent": requiredDependency(development, "@earendil-works/pi-coding-agent"),
-		"@earendil-works/pi-tui": requiredDependency(development, "@earendil-works/pi-tui"),
-		"@types/node": requiredDependency(dependencies, "@types/node"),
-		typebox: requiredDependency(development, "typebox"),
-		typescript: requiredDependency(dependencies, "typescript"),
-		vitest: requiredDependency(dependencies, "vitest"),
+		[distribution.name]:
+			distribution.version === "0.0.0" ? localPackageSpecifier(developmentPackageRoot()) : distribution.version,
+		"@earendil-works/pi-coding-agent": distribution.toolchain.piCodingAgent,
+		"@earendil-works/pi-tui": distribution.toolchain.piTui,
+		"@types/node": distribution.toolchain.typesNode,
+		typebox: distribution.toolchain.typebox,
+		typescript: distribution.toolchain.typescript,
+		vitest: distribution.toolchain.vitest,
 	}
 	const scripts: Record<string, string> = {
 		...(current.scripts ?? {}),
@@ -119,10 +113,7 @@ function workflowManifest(current: PackageManifest, framework: PackageManifest):
 		name: current.name ?? "kimchi-project-workflows",
 		private: true,
 		type: current.type ?? "module",
-		packageManager: requiredString(
-			framework.kimchiWorkflows?.packageManager ?? framework.packageManager,
-			"framework package manager",
-		),
+		packageManager: distribution.packageManager,
 		scripts,
 		devDependencies: {
 			...(current.devDependencies ?? {}),
@@ -133,6 +124,44 @@ function workflowManifest(current: PackageManifest, framework: PackageManifest):
 
 function localPackageSpecifier(packageRoot: string): string {
 	return `file:${packageRoot.replaceAll(path.sep, "/")}`
+}
+
+/**
+ * Resolve the framework location for an unstamped source build (version 0.0.0): a git install or
+ * repository checkout, where the project package must point at the framework on disk. Stamped
+ * production builds never reach this path — they pin the published version. The explicit
+ * development package location (env) wins; a real on-disk package root beside this module is the
+ * fallback that keeps ordinary source installs working, including under a bundled executable
+ * where `import.meta.url` points into a virtual filesystem and simply finds no manifest.
+ */
+function developmentPackageRoot(): string {
+	const explicit = process.env[DEVELOPMENT_PACKAGE_DIR_ENV]?.trim()
+	if (explicit) return requireDevelopmentPackageRoot(path.resolve(explicit), DEVELOPMENT_PACKAGE_DIR_ENV)
+	try {
+		const moduleRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
+		if (isDevelopmentPackageRoot(moduleRoot)) return moduleRoot
+	} catch {
+		// `import.meta.url` is not a file URL (bundled): no implicit package root exists.
+	}
+	throw new WorkflowPackagePreparationError(
+		`this kimchi-workflows build carries no release version; set ${DEVELOPMENT_PACKAGE_DIR_ENV} to the framework package directory`,
+	)
+}
+
+function requireDevelopmentPackageRoot(packageRoot: string, source: string): string {
+	if (isDevelopmentPackageRoot(packageRoot)) return packageRoot
+	throw new WorkflowPackagePreparationError(
+		`${source} must point to the ${distribution.name} package directory: ${packageRoot}`,
+	)
+}
+
+function isDevelopmentPackageRoot(packageRoot: string): boolean {
+	try {
+		const manifest = JSON.parse(readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { name?: unknown }
+		return manifest.name === distribution.name
+	} catch {
+		return false
+	}
 }
 
 async function readManifest(manifestPath: string, label: string): Promise<PackageManifest> {
@@ -146,15 +175,6 @@ async function readManifest(manifestPath: string, label: string): Promise<Packag
 		throw new WorkflowPackagePreparationError(`${label} manifest ${manifestPath} is not a JSON object`)
 	}
 	return parsed as PackageManifest
-}
-
-function requiredDependency(dependencies: Record<string, string>, name: string): string {
-	return requiredString(dependencies[name], `framework dependency ${name}`)
-}
-
-function requiredString(value: string | undefined, label: string): string {
-	if (typeof value === "string" && value.trim()) return value
-	throw new WorkflowPackagePreparationError(`${label} is missing`)
 }
 
 function runInstall(directory: string, signal: AbortSignal | undefined): Promise<WorkflowPackageInstallResult> {

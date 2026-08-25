@@ -216,6 +216,9 @@ For complete control-flow, runtime, state, and testing semantics, see the [`exte
 
 ## Development
 
+Development requires Node.js 24 and pnpm 10.33.0. `pnpm install` also installs the pinned Bun CLI used to compile
+the executable-distribution regression fixture during `pnpm test`.
+
 ```bash
 pnpm test                 # offline library and extension tests (no network)
 pnpm test:examples        # every example, with scripted agents and stubbed side effects
