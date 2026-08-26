@@ -11,6 +11,9 @@ import { scriptedAgent } from "./scripted-agent.ts"
 
 const exec = promisify(execFile)
 const repoRoot = path.resolve(import.meta.dirname, "..")
+// Packing and packed verification cross real Node, pnpm, and Vitest process boundaries. The verifier
+// owns a 90-second timeout, so its outer Vitest budget must leave time to terminate and reap children.
+const PACKAGING_TIMEOUT_MS = 120_000
 
 const pkg = JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8")) as {
 	name: string
@@ -73,7 +76,7 @@ console.log(JSON.stringify(results))
 
 		const probed = await exec(process.execPath, [probe], { cwd: path.dirname(probe) })
 		results = new Map((JSON.parse(probed.stdout) as ProbeResult[]).map((r) => [r.specifier, r]))
-	}, 120_000)
+	}, PACKAGING_TIMEOUT_MS)
 
 	afterAll(async () => {
 		if (workDir) await rm(workDir, { recursive: true, force: true })
@@ -211,7 +214,9 @@ console.log(JSON.stringify(results))
 		expect(manifest.packageManager).toMatch(/^pnpm@/)
 	})
 
-	it("runs focused verification from the packed install", async () => {
+	it("runs focused verification from the packed install", verifyPackedWorkflow, PACKAGING_TIMEOUT_MS)
+
+	async function verifyPackedWorkflow() {
 		const projectRoot = path.join(workDir, "verification-project")
 		const workflowDirectory = path.join(projectRoot, ".kimchi/workflows")
 		const modules = path.join(workflowDirectory, "node_modules")
@@ -274,5 +279,5 @@ console.log(JSON.stringify(result))
 
 		const { stdout } = await exec(process.execPath, [verifierProbe], { cwd: path.dirname(verifierProbe) })
 		expect(JSON.parse(stdout)).toMatchObject({ files: 1, tests: 1, passedTests: 1 })
-	})
+	}
 })
