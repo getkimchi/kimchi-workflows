@@ -65,17 +65,19 @@ describe("the in-session bridge registers the tools it promises", () => {
 	function fakePi(options: { autoEnd?: boolean } = {}) {
 		const registered: { name: string; parameters: unknown }[] = []
 		let active: string[] = ["bash", "read"]
-		let endHandler: ((event: AgentEndEvent) => void) | undefined
+		const handlers = new Map<string, (event: never) => void>()
 		const pi = {
-			on: (event: string, h: (e: AgentEndEvent) => void) => {
-				if (event === "agent_end") endHandler = h
+			on: (event: string, h: (event: never) => void) => {
+				handlers.set(event, h)
 			},
 			sendMessage: () => {
 				if (options.autoEnd === false) return
-				endHandler?.({
+				// A loop ends before its containing run settles.
+				handlers.get("agent_end")?.({
 					type: "agent_end",
 					messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }], usage: { totalTokens: 1 } }],
-				} as unknown as AgentEndEvent)
+				} as unknown as AgentEndEvent as never)
+				handlers.get("agent_settled")?.({ type: "agent_settled" } as never)
 			},
 			setModel: async () => true,
 			// Mirrors pi's own loader: registerTool() calls refreshTools(), which makes the new tool ACTIVE.
