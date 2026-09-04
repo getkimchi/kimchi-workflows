@@ -1,9 +1,8 @@
 /**
  * Real PI-harness implementation of the engine's agent seam (`HostPort.startAgent`, spec §2.2).
  *
- * A session: resolve + `setModel(model)`, inject a hidden custom message that triggers a turn, await
- * the `agent_end` event, and return the last assistant message's text. Compiles against the real
- * `@earendil-works/pi-coding-agent` types (`AgentEndEvent = { messages }`).
+ * A session records per-loop output on `agent_end` and completes on `agent_settled`, so automatic
+ * retries and queued continuations retain the session-scoped output tools until the run is finished.
  *
  * One shared set of stream/lifecycle listeners is registered per bridge (the extension holds one bridge
  * for its lifetime) — `pi.on` exposes no unsubscribe, so `dispose()` clears the bridge's OWN in-flight
@@ -257,11 +256,7 @@ export function createPiAgentBridge(
 	invocationResolver: PiInvocationResolver = resolvePiInvocation,
 	spawnSubagent: SubagentSpawner = subagentSpawner,
 ): (modelRegistry: ModelRegistry, sessionsDir: string, control?: PiAgentControl) => AgentStarter {
-	// The ONE in-session turn currently awaiting the shared `agent_end` listener, if any (see the header
-	// comment). `sessionToken` is an identity private to the session that started the turn — not the step
-	// name, since the SAME step name can legitimately open several sessions across retries/repairs.
-	// `turnToken` is finer-grained: a repair prompt can start from the previous `agent_end` handler before
-	// PI's just-finished run has become idle, so that OLD turn's idle watcher must never settle the NEW one.
+	// Tokens distinguish sessions and individual turns so a late lifecycle event cannot settle a newer call.
 	let inFlight:
 		| {
 				readonly sessionToken: object
@@ -290,23 +285,31 @@ export function createPiAgentBridge(
 		try {
 			turn.onUsage(usage)
 		} catch {
-			// A transient display callback must never interrupt the agent stream. Final usage still arrives
-			// through `agent_end` and remains the durable source of truth.
+			// Display callbacks must not interrupt the agent stream.
 		}
 	})
 
+	// Correlate the last loop output with the turn that will receive the settlement event.
+	let endTurnToken: object | undefined
+
 	pi.on("agent_end", (event) => {
 		lastConversation = event.messages
+		endTurnToken = inFlight?.turnToken
+		// A loop may be followed by an automatic retry, so settlement happens in `agent_settled`.
+	})
+
+	pi.on("agent_settled", () => {
 		const turn = inFlight
 		if (!turn) return // no in-session turn was awaiting this event (only background/isolated steps ran)
 		inFlight = undefined
 		turn.cleanup()
-		const submitted = lastSubmittedOutput(event.messages)
-		const error = lastAssistantError(event.messages)
-		const cancelled = lastAssistantWasAborted(event.messages)
+		const messages = endTurnToken === turn.turnToken ? lastConversation : []
+		const submitted = lastSubmittedOutput(messages)
+		const error = lastAssistantError(messages)
+		const cancelled = lastAssistantWasAborted(messages)
 		turn.resolve({
-			text: lastAssistantText(event.messages),
-			usage: lastAssistantUsage(event.messages),
+			text: lastAssistantText(messages),
+			usage: lastAssistantUsage(messages),
 			...(cancelled ? { cancelled: true } : {}),
 			...(submitted ? { submitted } : {}),
 			...(error ? { error } : {}),
@@ -411,9 +414,7 @@ export function createPiAgentBridge(
 
 					if (request.signal) {
 						const abortTurn = () => {
-							// Releasing `inFlight` here would let a later workflow turn enter the same PI session
-							// while this one may still be streaming. Ask PI to stop, then let `agent_end` or the
-							// idle watcher below settle and release the turn safely.
+							// Keep the guard until PI confirms the run has settled or become idle.
 							try {
 								control?.abort()
 							} catch {
@@ -447,16 +448,14 @@ export function createPiAgentBridge(
 									await control.waitForIdle()
 									if (inFlight?.turnToken !== turnToken) return
 
-									// A repair/answer sent from the preceding `agent_end` handler is queued while PI is
-									// technically still finishing that run. Let PI's post-run continuation start before
-									// deciding that this turn became idle without its own `agent_end`.
+									// Give a new run scheduled from the settlement handler one task to start.
 									await new Promise<void>((settle) => setTimeout(settle, 0))
 									if (inFlight?.turnToken !== turnToken) return
 									if (!control.isIdle() || control.hasPendingMessages()) continue
 
 									fail(
 										new Error(
-											`pi-agent bridge: step "${request.stepName}" became idle without emitting agent_end; ` +
+											`pi-agent bridge: step "${request.stepName}" became idle without the run settling; ` +
 												"the PI turn failed before its completion event. PI reports the underlying " +
 												"send_message failure separately through its extension-error output",
 										),

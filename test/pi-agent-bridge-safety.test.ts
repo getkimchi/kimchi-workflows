@@ -45,6 +45,7 @@ function fakePi(scriptedTurns: readonly unknown[] = []): {
 	activeTools: () => string[]
 } {
 	let endHandler: ((event: AgentEndEvent) => void) | undefined
+	let settledHandler: (() => void) | undefined
 	let messageUpdateHandler: ((event: { message: unknown }) => void) | undefined
 	let contextHandler: ((event: { type: "context"; messages: unknown[] }) => ContextResult) | undefined
 	const sentMessages: SentMessage[] = []
@@ -52,9 +53,15 @@ function fakePi(scriptedTurns: readonly unknown[] = []): {
 	const registeredTools: string[] = []
 	let activeTools: string[] = ["bash", "read"]
 	let scriptedTurn = 0
+	const endRun = (messages: unknown[]) => {
+		// Match PI's loop-end then run-settlement lifecycle order.
+		endHandler?.({ type: "agent_end", messages } as unknown as AgentEndEvent)
+		settledHandler?.()
+	}
 	const pi = {
 		on: (event: string, h: (event: never) => unknown) => {
 			if (event === "agent_end") endHandler = h as (event: AgentEndEvent) => void
+			if (event === "agent_settled") settledHandler = h as () => void
 			if (event === "message_update") messageUpdateHandler = h as (event: { message: unknown }) => void
 			if (event === "context") contextHandler = h as (event: { type: "context"; messages: unknown[] }) => ContextResult
 		},
@@ -62,10 +69,7 @@ function fakePi(scriptedTurns: readonly unknown[] = []): {
 			sentMessages.push({ message, options })
 			const assistant = scriptedTurns[scriptedTurn++]
 			if (assistant !== undefined) {
-				endHandler?.({
-					type: "agent_end",
-					messages: [{ role: "custom", ...message, timestamp: Date.now() }, assistant],
-				} as unknown as AgentEndEvent)
+				endRun([{ role: "custom", ...message, timestamp: Date.now() }, assistant])
 			}
 		},
 		sendUserMessage: (message: UserMessage) => {
@@ -87,10 +91,8 @@ function fakePi(scriptedTurns: readonly unknown[] = []): {
 		activeTools: () => [...activeTools],
 		fireAgentEnd: (text: string) => {
 			if (!endHandler) throw new Error("test bug: no agent_end handler was registered")
-			endHandler({
-				type: "agent_end",
-				messages: [{ role: "assistant", content: [{ type: "text", text }], usage: { totalTokens: 1 } }],
-			} as unknown as AgentEndEvent)
+			if (!settledHandler) throw new Error("test bug: no agent_settled handler was registered")
+			endRun([{ role: "assistant", content: [{ type: "text", text }], usage: { totalTokens: 1 } }])
 		},
 		fireMessageUpdate: (totalTokens: number) => {
 			if (!messageUpdateHandler) throw new Error("test bug: no message_update handler was registered")
@@ -316,7 +318,7 @@ describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent tur
 })
 
 describe("createPiAgentBridge in-session lifecycle fallback", () => {
-	it("rejects and releases a turn when PI becomes idle without emitting agent_end", async () => {
+	it("rejects and releases a turn when PI becomes idle without the run settling", async () => {
 		vi.useFakeTimers()
 		try {
 			const { pi, fireAgentEnd } = fakePi()
@@ -325,7 +327,7 @@ describe("createPiAgentBridge in-session lifecycle fallback", () => {
 			const first = startAgent(agentRequest({ stepName: "missing-event" }))
 			const turn = first.sendAndAwaitEnd("go")
 			const rejected = expect(turn).rejects.toThrow(
-				/step "missing-event" became idle without emitting agent_end.*send_message.*extension-error/s,
+				/step "missing-event" became idle without the run settling.*send_message.*extension-error/s,
 			)
 
 			expect(lifecycle.waitCount()).toBe(1)
@@ -390,7 +392,7 @@ describe("createPiAgentBridge in-session lifecycle fallback", () => {
 			const abortController = new AbortController()
 			const active = startAgent(agentRequest({ stepName: "cancelled", signal: abortController.signal }))
 			const turn = active.sendAndAwaitEnd("go")
-			const rejected = expect(turn).rejects.toThrow(/became idle without emitting agent_end/)
+			const rejected = expect(turn).rejects.toThrow(/became idle without the run settling/)
 
 			abortController.abort()
 			expect(lifecycle.abortCalls()).toBe(1)
