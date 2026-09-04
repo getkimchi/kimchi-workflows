@@ -10,14 +10,16 @@ import { BUILTIN_CREATE_WORKFLOW } from "../src/host/recorded-workflow.ts"
 import { createFakeActiveRuns } from "./helpers.ts"
 import { scriptedAgent } from "./scripted-agent.ts"
 
-const { loadValidatedWorkflow } = vi.hoisted(() => ({
+const { loadValidatedWorkflow, preflightCreateWorkflow } = vi.hoisted(() => ({
 	loadValidatedWorkflow: vi.fn(async () => ({
 		ok: false as const,
 		cause: "TypeScript validation failed: installed harness has no physical typebox package",
 	})),
+	preflightCreateWorkflow: vi.fn(async () => true),
 }))
 
 vi.mock("../src/host/workflow-preflight.ts", () => ({ loadValidatedWorkflow }))
+vi.mock("../src/host/commands/create-preflight.ts", () => ({ preflightCreateWorkflow }))
 
 const RUN_ID = "workflow-create-workflow-a0e99eae"
 const CREATE_WORKFLOW_FILE = fileURLToPath(new URL("../src/host/builtin/create.workflow.ts", import.meta.url))
@@ -27,7 +29,10 @@ const noAgent: StartAgent = () => {
 }
 
 describe("built-in create workflow resume", () => {
-	beforeEach(() => loadValidatedWorkflow.mockClear())
+	beforeEach(() => {
+		loadValidatedWorkflow.mockClear()
+		preflightCreateWorkflow.mockClear()
+	})
 
 	it("answers the built-in goal and continues without project-workflow validation", async () => {
 		const store = createMemoryStore()
@@ -78,6 +83,7 @@ describe("built-in create workflow resume", () => {
 
 		await handleResume(ctx, store, createFakeActiveRuns(), agent.startAgent as StartAgent, RUN_ID)
 
+		expect(preflightCreateWorkflow).toHaveBeenCalledWith(ctx)
 		expect(loadValidatedWorkflow).not.toHaveBeenCalled()
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("is still blocked"), "info")
 		expect((await store.list())[0]?.status).toBe("blocked")
@@ -118,6 +124,7 @@ describe("built-in create workflow resume", () => {
 
 		await handleResume(ctx, store, createFakeActiveRuns(), noAgent, RUN_ID)
 
+		expect(preflightCreateWorkflow).toHaveBeenCalledWith(ctx)
 		expect(loadValidatedWorkflow).not.toHaveBeenCalled()
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("is still blocked"), "info")
 	})

@@ -1,10 +1,14 @@
-import { spawn } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { distribution } from "./distribution.ts"
-import { checkWorkflowPrerequisites } from "./workflow-prerequisites.ts"
+import {
+	formatWorkflowPackageManagerCommand,
+	resolveWorkflowPackageManager,
+	runWorkflowPackageManager,
+	type WorkflowPackageManagerCommand,
+} from "./workflow-package-manager.ts"
 
 const INSTALL_TIMEOUT_MS = 5 * 60_000
 const OUTPUT_LIMIT = 64 * 1024
@@ -51,10 +55,10 @@ export class WorkflowPackagePreparationError extends Error {
 export async function prepareWorkflowPackage(options: {
 	readonly directory: string
 	readonly signal?: AbortSignal
-	/** Test seam; production invokes pnpm directly. */
+	/** Test seam replacing package installation, including package-manager resolution. */
 	readonly install?: WorkflowPackageInstaller
-	/** Test seam; production probes the external Node and pnpm commands. */
-	readonly checkPrerequisites?: (signal: AbortSignal | undefined) => Promise<void>
+	/** Test seam used when exercising production command construction with a fake installer. */
+	readonly resolvePackageManager?: (signal: AbortSignal | undefined) => Promise<WorkflowPackageManagerCommand>
 }): Promise<WorkflowPackagePreparation> {
 	const directory = path.resolve(options.directory)
 	const manifestPath = path.join(directory, "package.json")
@@ -66,10 +70,10 @@ export async function prepareWorkflowPackage(options: {
 	const changed = previous !== rendered
 	const verifier = path.join(directory, "node_modules", ".bin", executableName("kimchi-workflows"))
 	const installRequired = changed || !existsSync(lockfilePath) || !existsSync(verifier)
-	if (installRequired) {
-		const checkPrerequisites = options.checkPrerequisites ?? (options.install ? undefined : checkWorkflowPrerequisites)
+	let packageManager: WorkflowPackageManagerCommand | undefined
+	if (!options.install || options.resolvePackageManager) {
 		try {
-			await checkPrerequisites?.(options.signal)
+			packageManager = await (options.resolvePackageManager ?? resolveWorkflowPackageManager)(options.signal)
 		} catch (error) {
 			throw new WorkflowPackagePreparationError(describe(error))
 		}
@@ -81,7 +85,9 @@ export async function prepareWorkflowPackage(options: {
 	if (installRequired) {
 		let result: WorkflowPackageInstallResult
 		try {
-			result = await (options.install ?? runInstall)(directory, options.signal)
+			result = options.install
+				? await options.install(directory, options.signal)
+				: await runInstall(directory, options.signal, requirePackageManager(packageManager))
 		} catch (error) {
 			throw new WorkflowPackagePreparationError(
 				error instanceof WorkflowPackagePreparationError
@@ -91,7 +97,7 @@ export async function prepareWorkflowPackage(options: {
 		}
 		if (result.code !== 0) {
 			throw new WorkflowPackagePreparationError(
-				`pnpm could not prepare the workflow package (exit ${result.code})${commandDiagnostic(result)}\nRetry: ${installCommand(directory)}`,
+				`pnpm could not prepare the workflow package (exit ${result.code})${commandDiagnostic(result)}\nRetry: ${installCommand(directory, packageManager)}`,
 			)
 		}
 		if (!existsSync(lockfilePath)) {
@@ -106,7 +112,7 @@ export async function prepareWorkflowPackage(options: {
 		directory,
 		manifestPath,
 		lockfilePath,
-		verifyCommand: "pnpm run verify:workflow -- --entry <workflow.ts> --test <workflow.test.ts>",
+		verifyCommand: verifyCommand(packageManager),
 		installed: installRequired,
 	}
 }
@@ -197,74 +203,17 @@ async function readManifest(manifestPath: string, label: string): Promise<Packag
 	return parsed as PackageManifest
 }
 
-function runInstall(directory: string, signal: AbortSignal | undefined): Promise<WorkflowPackageInstallResult> {
-	return new Promise((resolve, reject) => {
-		if (signal?.aborted) {
-			reject(abortReason(signal))
-			return
-		}
-		const ownsProcessGroup = process.platform !== "win32"
-		const child = spawn("pnpm", installArgs(directory), {
-			cwd: directory,
-			detached: ownsProcessGroup,
-			shell: false,
-			stdio: ["ignore", "pipe", "pipe"],
-			env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
-		})
-		let stdout = ""
-		let stderr = ""
-		let settled = false
-		let terminationError: Error | undefined
-		let forceKill: ReturnType<typeof setTimeout> | undefined
-		const timeout = setTimeout(() => {
-			terminate(new WorkflowPackagePreparationError(`pnpm install exceeded ${INSTALL_TIMEOUT_MS}ms`))
-		}, INSTALL_TIMEOUT_MS)
-		const onAbort = () => terminate(abortReason(signal))
-		signal?.addEventListener("abort", onAbort, { once: true })
-
-		child.stdout.on("data", (chunk: Buffer) => {
-			stdout = appendBounded(stdout, chunk.toString())
-		})
-		child.stderr.on("data", (chunk: Buffer) => {
-			stderr = appendBounded(stderr, chunk.toString())
-		})
-		child.once("error", (error) => finish(terminationError ?? error))
-		child.once("close", (code) => {
-			if (terminationError) finish(terminationError)
-			else finish(undefined, { code: code ?? 1, stdout, stderr })
-		})
-
-		function terminate(error: Error): void {
-			if (settled || terminationError) return
-			terminationError = error
-			killChild("SIGTERM")
-			forceKill = setTimeout(() => killChild("SIGKILL"), 1_000)
-		}
-
-		function killChild(signalName: NodeJS.Signals): void {
-			try {
-				if (ownsProcessGroup && child.pid) process.kill(-child.pid, signalName)
-				else child.kill(signalName)
-			} catch {
-				// The process may have exited between the close check and signal delivery.
-			}
-		}
-
-		function finish(error?: Error, result?: WorkflowPackageInstallResult): void {
-			if (settled) return
-			settled = true
-			clearTimeout(timeout)
-			if (forceKill) clearTimeout(forceKill)
-			signal?.removeEventListener("abort", onAbort)
-			if (error) {
-				reject(
-					error instanceof WorkflowPackagePreparationError
-						? error
-						: new WorkflowPackagePreparationError(pnpmStartupError(error)),
-				)
-			} else if (result) resolve(result)
-			else reject(new WorkflowPackagePreparationError("pnpm install ended without a process result"))
-		}
+function runInstall(
+	directory: string,
+	signal: AbortSignal | undefined,
+	packageManager: WorkflowPackageManagerCommand,
+): Promise<WorkflowPackageInstallResult> {
+	return runWorkflowPackageManager(packageManager, installArgs(directory), {
+		cwd: directory,
+		signal,
+		timeoutMs: INSTALL_TIMEOUT_MS,
+		timeoutError: () => new WorkflowPackagePreparationError(`pnpm install exceeded ${INSTALL_TIMEOUT_MS}ms`),
+		outputLimit: OUTPUT_LIMIT,
 	})
 }
 
@@ -279,10 +228,24 @@ function installArgs(directory: string): string[] {
 	return ["--dir", directory, "--ignore-workspace", "install", "--no-frozen-lockfile", "--ignore-scripts"]
 }
 
-function installCommand(directory: string): string {
-	return ["pnpm", ...installArgs(directory)]
-		.map((argument) => (/^[\w./:@-]+$/.test(argument) ? argument : JSON.stringify(argument)))
-		.join(" ")
+function installCommand(directory: string, packageManager: WorkflowPackageManagerCommand | undefined): string {
+	return packageManager
+		? formatWorkflowPackageManagerCommand(packageManager, installArgs(directory))
+		: ["pnpm", ...installArgs(directory)]
+				.map((argument) => (/^[\w./:@-]+$/.test(argument) ? argument : JSON.stringify(argument)))
+				.join(" ")
+}
+
+function verifyCommand(packageManager: WorkflowPackageManagerCommand | undefined): string {
+	const args = ["run", "verify:workflow", "--", "--entry", "<workflow.ts>", "--test", "<workflow.test.ts>"]
+	return packageManager ? formatWorkflowPackageManagerCommand(packageManager, args) : ["pnpm", ...args].join(" ")
+}
+
+function requirePackageManager(
+	packageManager: WorkflowPackageManagerCommand | undefined,
+): WorkflowPackageManagerCommand {
+	if (packageManager) return packageManager
+	throw new WorkflowPackagePreparationError("workflow package manager was not resolved")
 }
 
 function executableName(name: string): string {
@@ -292,14 +255,6 @@ function executableName(name: string): string {
 function commandDiagnostic(command: WorkflowPackageInstallResult): string {
 	const diagnostic = [command.stderr.trim(), command.stdout.trim()].filter(Boolean).join("\n")
 	return diagnostic ? `\n${diagnostic}` : ""
-}
-
-function appendBounded(current: string, addition: string): string {
-	return (current + addition).slice(-OUTPUT_LIMIT)
-}
-
-function abortReason(signal: AbortSignal | undefined): Error {
-	return signal?.reason instanceof Error ? signal.reason : new Error("workflow package preparation aborted")
 }
 
 function describe(error: unknown): string {

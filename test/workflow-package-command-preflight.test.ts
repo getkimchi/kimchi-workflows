@@ -2,14 +2,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { RunEvent } from "../src/engine/types.ts"
 import type { CommandCtx, StartAgent } from "../src/host/commands/context.ts"
 import { handleResume } from "../src/host/commands/resume.ts"
-import { handleRun } from "../src/host/commands/run.ts"
+import { handleCreate, handleRun } from "../src/host/commands/run.ts"
 import { createMemoryStore } from "../src/host/memory-store.ts"
+import { BUILTIN_CREATE_WORKFLOW } from "../src/host/recorded-workflow.ts"
 import { createFakeActiveRuns } from "./helpers.ts"
 
 const dependencies = vi.hoisted(() => ({
 	loadRecordedWorkflow: vi.fn(),
 	prepareProjectWorkflowPackage: vi.fn(),
+	resolveWorkflowPackageManager: vi.fn(),
 	resolveWorkflow: vi.fn(),
+}))
+
+vi.mock("../src/host/workflow-package-manager.ts", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../src/host/workflow-package-manager.ts")>()),
+	resolveWorkflowPackageManager: dependencies.resolveWorkflowPackageManager,
 }))
 
 vi.mock("../src/host/project-workflow-package.ts", () => ({
@@ -34,19 +41,86 @@ function context(): CommandCtx & { readonly notes: string[] } {
 		mode: "print",
 		hasUI: false,
 		modelRegistry: {} as CommandCtx["modelRegistry"],
-		ui: { notify: (message: string) => void notes.push(message) } as CommandCtx["ui"],
+		ui: {
+			notify: (message: string) => void notes.push(message),
+			input: async () => undefined,
+			select: async () => undefined,
+			confirm: async () => false,
+			setWidget: () => {},
+			setWorkingMessage: () => {},
+		} as unknown as CommandCtx["ui"],
 		notes,
 	}
 }
 
 beforeEach(() => {
 	vi.clearAllMocks()
+	dependencies.resolveWorkflowPackageManager.mockResolvedValue({ command: "corepack", args: ["pnpm@10.33.0"] })
 	dependencies.prepareProjectWorkflowPackage.mockResolvedValue({ directory: "/project/.kimchi/workflows" })
 	dependencies.resolveWorkflow.mockResolvedValue({ ok: false, error: "stop after resolution" })
 	dependencies.loadRecordedWorkflow.mockResolvedValue({ ok: false, cause: "stop after recorded load" })
 })
 
 describe("project workflow package command preflight", () => {
+	it("rejects create before recording a run when the package toolchain is unavailable", async () => {
+		const ctx = context()
+		const store = createMemoryStore()
+		const startAgent = vi.fn(noAgent)
+		dependencies.resolveWorkflowPackageManager.mockRejectedValueOnce(
+			new Error("pnpm is required for workflow packages. Install it with: npm install --global pnpm@10.33.0"),
+		)
+
+		await handleCreate(ctx, store, createFakeActiveRuns(), startAgent)
+
+		expect(dependencies.resolveWorkflowPackageManager).toHaveBeenCalledWith()
+		expect(startAgent).not.toHaveBeenCalled()
+		expect(store.events).toEqual([])
+		expect(ctx.notes).toContainEqual(expect.stringContaining("npm install --global pnpm@10.33.0"))
+	})
+
+	it("rejects create-workflow resume before recording events or invoking an agent", async () => {
+		const ctx = context()
+		const store = createMemoryStore()
+		const startAgent = vi.fn(noAgent)
+		for (const event of [
+			{
+				type: "run-meta" as const,
+				runId: "workflow-create-deadbeef",
+				workflowSource: BUILTIN_CREATE_WORKFLOW.source,
+				at: "T0",
+			},
+			{
+				type: "run-started" as const,
+				runId: "workflow-create-deadbeef",
+				workflowName: "create-workflow",
+				input: undefined,
+				at: "T1",
+			},
+			{
+				type: "run-crashed" as const,
+				runId: "workflow-create-deadbeef",
+				error: "boom",
+				at: "T2",
+			},
+		]) {
+			await store.appendEvent(event)
+		}
+		dependencies.loadRecordedWorkflow.mockResolvedValueOnce({
+			ok: true,
+			workflow: BUILTIN_CREATE_WORKFLOW.workflow,
+		})
+		dependencies.resolveWorkflowPackageManager.mockRejectedValueOnce(
+			new Error("pnpm is required. Install it with: npm install --global pnpm@10.33.0"),
+		)
+
+		await handleResume(ctx, store, createFakeActiveRuns(), startAgent, "deadbeef")
+
+		expect(dependencies.resolveWorkflowPackageManager).toHaveBeenCalledWith()
+		expect(startAgent).not.toHaveBeenCalled()
+		expect(store.events).toHaveLength(3)
+		expect(ctx.notes).toContainEqual(expect.stringContaining("npm install --global pnpm@10.33.0"))
+	})
+
 	it("prepares the central package before run validation", async () => {
 		const ctx = context()
 

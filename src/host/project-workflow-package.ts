@@ -11,13 +11,10 @@ export function prepareProjectWorkflowPackage(options: {
 	readonly signal?: AbortSignal
 	/** Test seam forwarded to {@link prepareWorkflowPackage}. */
 	readonly install?: WorkflowPackageInstaller
-	/** Test seam forwarded to {@link prepareWorkflowPackage}. */
-	readonly checkPrerequisites?: (signal: AbortSignal | undefined) => Promise<void>
 }): Promise<WorkflowPackagePreparation> {
 	return prepareWorkflowPackage({
 		directory: workflowsDir(options.projectRoot),
 		signal: options.signal,
 		install: options.install,
-		checkPrerequisites: options.checkPrerequisites,
 	})
 }

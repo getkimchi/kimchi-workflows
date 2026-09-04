@@ -14,12 +14,18 @@ import { createHostPort } from "../host-port.ts"
 import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
 import { prepareProjectWorkflowPackage } from "../project-workflow-package.ts"
 import { reconcileAbandonedRun } from "../reconcile-runs.ts"
-import { loadRecordedWorkflow, workflowSourceLabel, workflowSourceOf } from "../recorded-workflow.ts"
+import {
+	BUILTIN_CREATE_WORKFLOW,
+	loadRecordedWorkflow,
+	workflowSourceLabel,
+	workflowSourceOf,
+} from "../recorded-workflow.ts"
 import { resumeAction } from "../resume-router.ts"
 import { summarizeRun } from "../summarize-run.ts"
 import type { RunStore } from "../types.ts"
 import { handleAttendedInput, humanInputOf, pendingHumanInput } from "./attended.ts"
 import { type CommandCtx, describe, reportResult, resolveRunRef, runTracked, type StartAgent } from "./context.ts"
+import { preflightCreateWorkflow } from "./create-preflight.ts"
 
 export async function handleResume(
 	ctx: CommandCtx,
@@ -86,6 +92,13 @@ export async function handleResume(
 	const action = resumeAction(status)
 	if (action.kind === "error")
 		return void ctx.ui.notify(`workflow: cannot resume run ${runId}: ${action.reason}.`, "warning")
+	if (
+		workflowSource.kind === "builtin" &&
+		workflowSource.id === BUILTIN_CREATE_WORKFLOW.source.id &&
+		!(await preflightCreateWorkflow(ctx))
+	) {
+		return
+	}
 
 	// Seed the panel from the log BEFORE the first new event (progress §9.1), so the widget opens showing
 	// everything already done — collapsed per §6.1 — rather than an empty tree that fills in backwards.
