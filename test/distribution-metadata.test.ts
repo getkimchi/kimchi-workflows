@@ -26,12 +26,12 @@ describe("distribution metadata", () => {
 	it("prepares a project package from a Bun executable without package metadata on disk", async () => {
 		const fixture = await distributionFixture("1.2.3")
 		const workflowPackagePath = path.join(fixture.root, "src/host/workflow-package.ts")
-		const workflowPrerequisitesPath = path.join(fixture.root, "src/host/workflow-prerequisites.ts")
+		const workflowPackageManagerPath = path.join(fixture.root, "src/host/workflow-package-manager.ts")
 		const entryPath = path.join(fixture.root, "test/fixtures/compiled-workflow-package-probe.ts")
 		const executablePath = path.join(fixture.root, process.platform === "win32" ? "probe.exe" : "probe")
 		await mkdir(path.dirname(entryPath), { recursive: true })
 		await copyFile(path.join(repoRoot, "src/host/workflow-package.ts"), workflowPackagePath)
-		await copyFile(path.join(repoRoot, "src/host/workflow-prerequisites.ts"), workflowPrerequisitesPath)
+		await copyFile(path.join(repoRoot, "src/host/workflow-package-manager.ts"), workflowPackageManagerPath)
 		await copyFile(path.join(repoRoot, "test/fixtures/compiled-workflow-package-probe.ts"), entryPath)
 
 		await exec("bun", ["build", entryPath, "--compile", `--outfile=${executablePath}`], {
