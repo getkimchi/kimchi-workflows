@@ -12,6 +12,7 @@ import {
 
 const INSTALL_TIMEOUT_MS = 5 * 60_000
 const OUTPUT_LIMIT = 64 * 1024
+const DEFAULT_PACKAGE_MANAGER: WorkflowPackageManagerCommand = { command: "pnpm", args: [] }
 
 /** Env override for the one case the stamped metadata cannot cover: an unstamped, in-place source build. */
 const DEVELOPMENT_PACKAGE_DIR_ENV = "KIMCHI_WORKFLOWS_PACKAGE_DIR"
@@ -71,7 +72,7 @@ export async function prepareWorkflowPackage(options: {
 	const verifier = path.join(directory, "node_modules", ".bin", executableName("kimchi-workflows"))
 	const installRequired = changed || !existsSync(lockfilePath) || !existsSync(verifier)
 	let packageManager: WorkflowPackageManagerCommand | undefined
-	if (!options.install || options.resolvePackageManager) {
+	if (installRequired && (!options.install || options.resolvePackageManager)) {
 		try {
 			packageManager = await (options.resolvePackageManager ?? resolveWorkflowPackageManager)(options.signal)
 		} catch (error) {
@@ -213,6 +214,7 @@ function runInstall(
 		signal,
 		timeoutMs: INSTALL_TIMEOUT_MS,
 		timeoutError: () => new WorkflowPackagePreparationError(`pnpm install exceeded ${INSTALL_TIMEOUT_MS}ms`),
+		abortError: () => new WorkflowPackagePreparationError("workflow package preparation aborted"),
 		outputLimit: OUTPUT_LIMIT,
 	})
 }
@@ -229,16 +231,12 @@ function installArgs(directory: string): string[] {
 }
 
 function installCommand(directory: string, packageManager: WorkflowPackageManagerCommand | undefined): string {
-	return packageManager
-		? formatWorkflowPackageManagerCommand(packageManager, installArgs(directory))
-		: ["pnpm", ...installArgs(directory)]
-				.map((argument) => (/^[\w./:@-]+$/.test(argument) ? argument : JSON.stringify(argument)))
-				.join(" ")
+	return formatWorkflowPackageManagerCommand(packageManager ?? DEFAULT_PACKAGE_MANAGER, installArgs(directory))
 }
 
 function verifyCommand(packageManager: WorkflowPackageManagerCommand | undefined): string {
 	const args = ["run", "verify:workflow", "--", "--entry", "<workflow.ts>", "--test", "<workflow.test.ts>"]
-	return packageManager ? formatWorkflowPackageManagerCommand(packageManager, args) : ["pnpm", ...args].join(" ")
+	return formatWorkflowPackageManagerCommand(packageManager ?? DEFAULT_PACKAGE_MANAGER, args)
 }
 
 function requirePackageManager(

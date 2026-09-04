@@ -119,6 +119,7 @@ async function runCommand(
 			timeoutMs: VERIFICATION_TIMEOUT_MS,
 			timeoutError: () =>
 				new WorkflowTestInfrastructureError(`workflow verification exceeded ${VERIFICATION_TIMEOUT_MS}ms`),
+			abortError: () => new WorkflowTestInfrastructureError("workflow verification aborted"),
 			outputLimit: OUTPUT_LIMIT,
 		})
 	} catch (error) {

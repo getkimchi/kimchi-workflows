@@ -93,6 +93,43 @@ describe("built-in create workflow resume", () => {
 		expect(agent.opened).toBe(1)
 	})
 
+	it("preflights before accepting an answer that can continue into agent work", async () => {
+		const store = createMemoryStore()
+		await store.appendEvent({
+			type: "run-meta",
+			runId: RUN_ID,
+			workflowSource: BUILTIN_CREATE_WORKFLOW.source,
+			at: new Date().toISOString(),
+		})
+		const result = await runWorkflow(
+			createWorkflowWorkflow,
+			{ projectRoot: "/tmp", workflowsDir: "/tmp/.kimchi/workflows" },
+			createHostPort(store, { generateRunId: () => RUN_ID }),
+		)
+		expect(result.status).toBe("blocked")
+		const eventCount = (await store.loadEvents(RUN_ID)).length
+		const input = vi.fn(async () => "Build a release-notes workflow")
+		const ctx = {
+			cwd: "/tmp",
+			mode: "print",
+			hasUI: false,
+			modelRegistry: {},
+			ui: {
+				notify: vi.fn(),
+				input,
+				select: vi.fn(async () => undefined),
+				confirm: vi.fn(async () => false),
+			},
+		} as unknown as CommandCtx
+		preflightCreateWorkflow.mockResolvedValueOnce(false)
+
+		await handleResume(ctx, store, createFakeActiveRuns(), noAgent, RUN_ID)
+
+		expect(preflightCreateWorkflow).toHaveBeenCalledWith(ctx)
+		expect(input).not.toHaveBeenCalled()
+		expect(await store.loadEvents(RUN_ID)).toHaveLength(eventCount)
+	})
+
 	it("recognizes legacy package-path provenance without project-workflow validation", async () => {
 		const store = createMemoryStore()
 		await store.appendEvent({

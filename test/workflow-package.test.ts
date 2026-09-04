@@ -91,7 +91,10 @@ describe("workflow package preparation", () => {
 		const unchanged = await prepareWorkflowPackage({ directory, install, resolvePackageManager })
 		expect(unchanged.installed).toBe(false)
 		expect(install).toHaveBeenCalledTimes(1)
-		expect(resolvePackageManager).toHaveBeenCalledTimes(2)
+		expect(resolvePackageManager).toHaveBeenCalledTimes(1)
+		expect(unchanged.verifyCommand).toBe(
+			'pnpm run verify:workflow -- --entry "<workflow.ts>" --test "<workflow.test.ts>"',
+		)
 	})
 
 	it("preserves user dependencies and scripts while restoring the managed verification contract", async () => {

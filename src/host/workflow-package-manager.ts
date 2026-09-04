@@ -6,6 +6,7 @@ const MIN_NODE_MINOR = 19
 const COMMAND_PROBE_TIMEOUT_MS = 10_000
 const PACKAGE_MANAGER_BOOTSTRAP_TIMEOUT_MS = 60_000
 const OUTPUT_LIMIT = 4 * 1024
+const PROBE_FAILURE_DETAIL_LIMIT = 512
 
 export interface WorkflowPackageManagerCommand {
 	readonly command: string
@@ -36,6 +37,7 @@ export interface RunWorkflowPackageManagerOptions {
 	readonly signal?: AbortSignal
 	readonly timeoutMs: number
 	readonly timeoutError: () => Error
+	readonly abortError?: () => Error
 	readonly outputLimit: number
 }
 
@@ -72,10 +74,10 @@ export async function resolveWorkflowPackageManager(
 	}
 
 	const candidates: readonly WorkflowPackageManagerCommand[] = [
-		{ command: "corepack", args: [distribution.packageManager] },
-		{ command: "pnpm", args: [] },
+		{ command: packageManagerExecutable("corepack"), args: [distribution.packageManager] },
+		{ command: packageManagerExecutable("pnpm"), args: [] },
 		{
-			command: "npm",
+			command: packageManagerExecutable("npm"),
 			args: ["exec", "--yes", `--package=${distribution.packageManager}`, "--", "pnpm"],
 		},
 	]
@@ -83,7 +85,7 @@ export async function resolveWorkflowPackageManager(
 	for (const candidate of candidates) {
 		const attempt = await probePackageManager(candidate, signal, runProbe)
 		if (attempt.ok) return candidate
-		failures.push(`${formatWorkflowPackageManagerCommand(candidate)}: ${attempt.error}`)
+		failures.push(`${formatWorkflowPackageManagerCommand(candidate)}: ${summarizeProbeFailure(attempt.error)}`)
 	}
 
 	throw new WorkflowPackageManagerError(
@@ -201,6 +203,7 @@ function runPackageManagerProbe(request: WorkflowPackageManagerProbe): Promise<W
 			signal: request.signal,
 			timeoutMs: request.timeoutMs,
 			timeoutError: () => new Error(`${request.command} probe exceeded ${request.timeoutMs}ms`),
+			abortError: () => new Error("workflow package manager probe aborted"),
 			outputLimit: OUTPUT_LIMIT,
 		},
 	)
@@ -212,7 +215,7 @@ function runCommand(
 ): Promise<WorkflowPackageManagerCommandResult> {
 	return new Promise((resolve, reject) => {
 		if (options.signal?.aborted) {
-			reject(abortReason(options.signal))
+			reject(abortReason(options.signal, options.abortError))
 			return
 		}
 		const ownsProcessGroup = process.platform !== "win32"
@@ -229,7 +232,7 @@ function runCommand(
 		let terminationError: Error | undefined
 		let forceKill: ReturnType<typeof setTimeout> | undefined
 		const timeout = setTimeout(() => terminate(options.timeoutError()), options.timeoutMs)
-		const onAbort = () => terminate(abortReason(options.signal))
+		const onAbort = () => terminate(abortReason(options.signal, options.abortError))
 		options.signal?.addEventListener("abort", onAbort, { once: true })
 
 		child.stdout.on("data", (chunk: Buffer) => {
@@ -290,8 +293,21 @@ function appendBounded(current: string, addition: string, limit: number): string
 	return (current + addition).slice(-limit)
 }
 
-function abortReason(signal: AbortSignal | undefined): Error {
-	return signal?.reason instanceof Error ? signal.reason : new Error("workflow package manager probe aborted")
+function abortReason(signal: AbortSignal | undefined, fallback: (() => Error) | undefined): Error {
+	return signal?.reason instanceof Error
+		? signal.reason
+		: (fallback?.() ?? new Error("workflow package manager aborted"))
+}
+
+function packageManagerExecutable(command: "corepack" | "pnpm" | "npm"): string {
+	return process.platform === "win32" ? `${command}.cmd` : command
+}
+
+function summarizeProbeFailure(failure: string): string {
+	const singleLine = failure.replace(/\s+/g, " ").trim()
+	return singleLine.length <= PROBE_FAILURE_DETAIL_LIMIT
+		? singleLine
+		: `${singleLine.slice(0, PROBE_FAILURE_DETAIL_LIMIT - 3)}...`
 }
 
 function describe(error: unknown): string {

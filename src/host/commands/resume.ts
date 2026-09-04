@@ -92,6 +92,9 @@ export async function handleResume(
 	const action = resumeAction(status)
 	if (action.kind === "error")
 		return void ctx.ui.notify(`workflow: cannot resume run ${runId}: ${action.reason}.`, "warning")
+	// Keep this ahead of both resume routes. Answering a create-workflow question continues the run and
+	// may immediately invoke another agent, so re-check the eventual package toolchain before spending
+	// more model tokens even though installation itself happens in the later prepare-package step.
 	if (
 		workflowSource.kind === "builtin" &&
 		workflowSource.id === BUILTIN_CREATE_WORKFLOW.source.id &&

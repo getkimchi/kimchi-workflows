@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	formatWorkflowPackageManagerCommand,
 	resolveWorkflowPackageManager,
+	runWorkflowPackageManager,
 	type WorkflowPackageManagerError,
 	type WorkflowPackageManagerProbeRunner,
 	workflowPackageManagerInvocation,
@@ -14,6 +15,7 @@ const temporaryDirectories: string[] = []
 
 afterEach(async () => {
 	vi.unstubAllEnvs()
+	vi.restoreAllMocks()
 	await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
 
@@ -79,6 +81,27 @@ describe("external workflow package manager", () => {
 		})
 	})
 
+	it("uses explicit command shims for package-manager launchers on Windows", async () => {
+		vi.spyOn(process, "platform", "get").mockReturnValue("win32")
+		const runProbe: WorkflowPackageManagerProbeRunner = vi.fn(async ({ command }) => {
+			if (command === "node") return { code: 0, stdout: "v22.19.0\n", stderr: "" }
+			if (command === "corepack.cmd") throw missingCommand(command)
+			if (command === "pnpm.cmd") return { code: 0, stdout: "9.15.0\n", stderr: "" }
+			return { code: 0, stdout: "10.33.0\n", stderr: "" }
+		})
+
+		await expect(resolveWorkflowPackageManager(undefined, runProbe)).resolves.toEqual({
+			command: "npm.cmd",
+			args: ["exec", "--yes", "--package=pnpm@10.33.0", "--", "pnpm"],
+		})
+		expect(vi.mocked(runProbe).mock.calls.map(([request]) => request.command)).toEqual([
+			"node",
+			"corepack.cmd",
+			"pnpm.cmd",
+			"npm.cmd",
+		])
+	})
+
 	it("preserves every launcher failure in the actionable error", async () => {
 		const runProbe: WorkflowPackageManagerProbeRunner = vi.fn(async ({ command }) => {
 			if (command === "node") return { code: 0, stdout: "v22.19.0\n", stderr: "" }
@@ -94,6 +117,38 @@ describe("external workflow package manager", () => {
 			"npm exec --yes --package=pnpm@10.33.0 -- pnpm: exit 1: registry unavailable",
 		)
 		await expect(resolution).rejects.toThrow("npm install --global pnpm@10.33.0")
+	})
+
+	it("bounds noisy launcher diagnostics in the aggregate error", async () => {
+		const runProbe: WorkflowPackageManagerProbeRunner = vi.fn(async ({ command }) =>
+			command === "node"
+				? { code: 0, stdout: "v22.19.0\n", stderr: "" }
+				: { code: 1, stdout: "", stderr: `registry unavailable ${"x".repeat(10_000)}` },
+		)
+
+		const resolution = resolveWorkflowPackageManager(undefined, runProbe)
+		await expect(resolution).rejects.toEqual(
+			expect.objectContaining({ message: expect.stringContaining("registry unavailable") }),
+		)
+		await expect(resolution).rejects.toEqual(
+			expect.objectContaining({ message: expect.not.stringContaining("x".repeat(513)) }),
+		)
+	})
+
+	it("uses the caller's abort context when a non-Error reason is supplied", async () => {
+		const controller = new AbortController()
+		controller.abort("cancelled")
+
+		await expect(
+			runWorkflowPackageManager({ command: "pnpm", args: [] }, ["--version"], {
+				cwd: process.cwd(),
+				signal: controller.signal,
+				timeoutMs: 1_000,
+				timeoutError: () => new Error("timed out"),
+				abortError: () => new Error("workflow verification aborted"),
+				outputLimit: 1_024,
+			}),
+		).rejects.toThrow("workflow verification aborted")
 	})
 
 	it.each(["v20.10.0", "v22.18.9"])("rejects unsupported external Node %s before probing pnpm", async (version) => {
