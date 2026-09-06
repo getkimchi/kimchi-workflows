@@ -42,22 +42,29 @@ function successfulInstaller(): WorkflowPackageInstaller {
 }
 
 describe("workflow package preparation", () => {
-	it("reports the resolved pinned launcher in the verification command", async () => {
+	it.each([
+		{ command: "corepack", args: ["pnpm@10.33.0"] },
+		{ command: "npm", args: ["exec", "--yes", "--package=pnpm@10.33.0", "--", "pnpm"] },
+	])("retains the $command verification launcher when installation is skipped", async (packageManager) => {
 		const directory = await temporaryWorkflowDirectory()
 		const install = successfulInstaller()
-		const packageManager = {
-			command: "corepack",
-			args: ["pnpm@10.33.0"],
-		} as const
+		const resolvePackageManager = vi.fn(async () => packageManager)
 
 		const prepared = await prepareWorkflowPackage({
 			directory,
 			install,
-			resolvePackageManager: async () => packageManager,
+			resolvePackageManager,
 		})
+		const unchanged = await prepareWorkflowPackage({ directory, resolvePackageManager })
 
 		expect(install).toHaveBeenCalledWith(path.resolve(directory), undefined)
-		expect(prepared.verifyCommand).toMatch(/^corepack pnpm@10\.33\.0 run verify:workflow/)
+		expect(install).toHaveBeenCalledTimes(1)
+		expect(prepared.verifyCommand).toBe(
+			`${[packageManager.command, ...packageManager.args].join(" ")} run verify:workflow -- --entry "<workflow.ts>" --test "<workflow.test.ts>"`,
+		)
+		expect(unchanged.installed).toBe(false)
+		expect(unchanged.verifyCommand).toBe(prepared.verifyCommand)
+		expect(resolvePackageManager).toHaveBeenCalledTimes(2)
 	})
 
 	it("creates one private package with a reproducible verifier and lockfile", async () => {
@@ -91,7 +98,7 @@ describe("workflow package preparation", () => {
 		const unchanged = await prepareWorkflowPackage({ directory, install, resolvePackageManager })
 		expect(unchanged.installed).toBe(false)
 		expect(install).toHaveBeenCalledTimes(1)
-		expect(resolvePackageManager).toHaveBeenCalledTimes(1)
+		expect(resolvePackageManager).toHaveBeenCalledTimes(2)
 		expect(unchanged.verifyCommand).toBe(
 			'pnpm run verify:workflow -- --entry "<workflow.ts>" --test "<workflow.test.ts>"',
 		)

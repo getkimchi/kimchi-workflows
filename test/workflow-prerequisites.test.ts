@@ -81,24 +81,24 @@ describe("external workflow package manager", () => {
 		})
 	})
 
-	it("uses explicit command shims for package-manager launchers on Windows", async () => {
+	it("allows Windows executable lookup to select native binaries or command shims", async () => {
 		vi.spyOn(process, "platform", "get").mockReturnValue("win32")
 		const runProbe: WorkflowPackageManagerProbeRunner = vi.fn(async ({ command }) => {
 			if (command === "node") return { code: 0, stdout: "v22.19.0\n", stderr: "" }
-			if (command === "corepack.cmd") throw missingCommand(command)
-			if (command === "pnpm.cmd") return { code: 0, stdout: "9.15.0\n", stderr: "" }
+			if (command === "corepack") throw missingCommand(command)
+			if (command === "pnpm") return { code: 0, stdout: "9.15.0\n", stderr: "" }
 			return { code: 0, stdout: "10.33.0\n", stderr: "" }
 		})
 
 		await expect(resolveWorkflowPackageManager(undefined, runProbe)).resolves.toEqual({
-			command: "npm.cmd",
+			command: "npm",
 			args: ["exec", "--yes", "--package=pnpm@10.33.0", "--", "pnpm"],
 		})
 		expect(vi.mocked(runProbe).mock.calls.map(([request]) => request.command)).toEqual([
 			"node",
-			"corepack.cmd",
-			"pnpm.cmd",
-			"npm.cmd",
+			"corepack",
+			"pnpm",
+			"npm",
 		])
 	})
 

@@ -1,4 +1,8 @@
-import { spawn } from "node:child_process"
+import { execFile } from "node:child_process"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import path from "node:path"
+import { spawn } from "cross-spawn"
 import { distribution } from "./distribution.ts"
 
 const MIN_NODE_MAJOR = 22
@@ -7,6 +11,7 @@ const COMMAND_PROBE_TIMEOUT_MS = 10_000
 const PACKAGE_MANAGER_BOOTSTRAP_TIMEOUT_MS = 60_000
 const OUTPUT_LIMIT = 4 * 1024
 const PROBE_FAILURE_DETAIL_LIMIT = 512
+const PROCESS_TREE_KILL_TIMEOUT_MS = 5_000
 
 export interface WorkflowPackageManagerCommand {
 	readonly command: string
@@ -74,10 +79,10 @@ export async function resolveWorkflowPackageManager(
 	}
 
 	const candidates: readonly WorkflowPackageManagerCommand[] = [
-		{ command: packageManagerExecutable("corepack"), args: [distribution.packageManager] },
-		{ command: packageManagerExecutable("pnpm"), args: [] },
+		{ command: "corepack", args: [distribution.packageManager] },
+		{ command: "pnpm", args: [] },
 		{
-			command: packageManagerExecutable("npm"),
+			command: "npm",
 			args: ["exec", "--yes", `--package=${distribution.packageManager}`, "--", "pnpm"],
 		},
 	]
@@ -195,23 +200,39 @@ function pnpmRecovery(): string {
 	return `Install it with: npm install --global ${distribution.packageManager}`
 }
 
-function runPackageManagerProbe(request: WorkflowPackageManagerProbe): Promise<WorkflowPackageManagerCommandResult> {
-	return runCommand(
-		{ command: request.command, args: request.args },
-		{
-			cwd: process.cwd(),
-			signal: request.signal,
-			timeoutMs: request.timeoutMs,
-			timeoutError: () => new Error(`${request.command} probe exceeded ${request.timeoutMs}ms`),
-			abortError: () => new Error("workflow package manager probe aborted"),
-			outputLimit: OUTPUT_LIMIT,
-		},
-	)
+async function runPackageManagerProbe(
+	request: WorkflowPackageManagerProbe,
+): Promise<WorkflowPackageManagerCommandResult> {
+	const options = {
+		cwd: process.cwd(),
+		signal: request.signal,
+		timeoutMs: request.timeoutMs,
+		timeoutError: () => new Error(`${request.command} probe exceeded ${request.timeoutMs}ms`),
+		abortError: () => new Error("workflow package manager probe aborted"),
+		outputLimit: OUTPUT_LIMIT,
+	}
+	if (request.command === "node") return runCommand(request, options)
+	// Keep the process cwd for version-manager shims (e.g. asdf's .tool-versions), while directing
+	// pnpm to a neutral workspace. Its --version parser discards version-switching configuration flags.
+	const directory = await mkdtemp(path.join(tmpdir(), "kimchi-package-manager-probe-"))
+	try {
+		await writeFile(path.join(directory, "package.json"), '{"private":true}\n', "utf8")
+		await writeFile(path.join(directory, "pnpm-workspace.yaml"), "packages: []\n", "utf8")
+		return await runCommand({ command: request.command, args: [...request.args, "--dir", directory] }, options, {
+			NPM_CONFIG_WORKSPACE_DIR: undefined,
+			npm_config_workspace_dir: undefined,
+			COREPACK_ENABLE_PROJECT_SPEC: "0",
+			COREPACK_ENABLE_AUTO_PIN: "0",
+		})
+	} finally {
+		await rm(directory, { recursive: true, force: true })
+	}
 }
 
 function runCommand(
 	invocation: WorkflowPackageManagerInvocation,
 	options: RunWorkflowPackageManagerOptions,
+	env: NodeJS.ProcessEnv = {},
 ): Promise<WorkflowPackageManagerCommandResult> {
 	return new Promise((resolve, reject) => {
 		if (options.signal?.aborted) {
@@ -224,7 +245,7 @@ function runCommand(
 			detached: ownsProcessGroup,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
-			env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+			env: { ...process.env, ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
 		})
 		let stdout = ""
 		let stderr = ""
@@ -243,6 +264,8 @@ function runCommand(
 		})
 		child.once("error", (error) => finish(terminationError ?? error))
 		child.once("close", (code) => {
+			// On Windows, wait for taskkill to finish stopping descendants even if the shell closes first.
+			if (terminationError && !ownsProcessGroup && child.pid) return
 			if (terminationError) finish(terminationError)
 			else finish(undefined, { code: code ?? 1, stdout, stderr })
 		})
@@ -250,6 +273,28 @@ function runCommand(
 		function terminate(error: Error): void {
 			if (settled || terminationError) return
 			terminationError = error
+			if (!ownsProcessGroup && child.pid) {
+				// Killing cmd.exe alone strands its descendants and can leave their output pipes open.
+				execFile(
+					path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"),
+					["/PID", String(child.pid), "/T", "/F"],
+					{ windowsHide: true, timeout: PROCESS_TREE_KILL_TIMEOUT_MS },
+					(killError) => {
+						// Do not leave the caller waiting for inherited pipes if tree termination failed.
+						child.stdout.destroy()
+						child.stderr.destroy()
+						if (killError) {
+							killChild("SIGKILL")
+							finish(
+								new Error(`${error.message}; could not terminate process tree: ${describe(killError)}`, {
+									cause: error,
+								}),
+							)
+						} else finish(error)
+					},
+				)
+				return
+			}
 			killChild("SIGTERM")
 			forceKill = setTimeout(() => killChild("SIGKILL"), 1_000)
 		}
@@ -297,10 +342,6 @@ function abortReason(signal: AbortSignal | undefined, fallback: (() => Error) | 
 	return signal?.reason instanceof Error
 		? signal.reason
 		: (fallback?.() ?? new Error("workflow package manager aborted"))
-}
-
-function packageManagerExecutable(command: "corepack" | "pnpm" | "npm"): string {
-	return process.platform === "win32" ? `${command}.cmd` : command
 }
 
 function summarizeProbeFailure(failure: string): string {

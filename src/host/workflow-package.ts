@@ -72,7 +72,7 @@ export async function prepareWorkflowPackage(options: {
 	const verifier = path.join(directory, "node_modules", ".bin", executableName("kimchi-workflows"))
 	const installRequired = changed || !existsSync(lockfilePath) || !existsSync(verifier)
 	let packageManager: WorkflowPackageManagerCommand | undefined
-	if (installRequired && (!options.install || options.resolvePackageManager)) {
+	if (!options.install || options.resolvePackageManager) {
 		try {
 			packageManager = await (options.resolvePackageManager ?? resolveWorkflowPackageManager)(options.signal)
 		} catch (error) {

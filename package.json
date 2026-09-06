@@ -96,6 +96,7 @@
 	"//dependencies": "PI does not provide jiti or the verification toolchain. jiti loads workflows and the physical package CLI; TypeScript and Vitest verify project workflow packages outside the compiled harness.",
 	"dependencies": {
 		"@types/node": "^22.19.18",
+		"cross-spawn": "^7.0.6",
 		"jiti": "^2.7.0",
 		"typescript": "^7.0.2",
 		"vitest": "4.1.10"
@@ -111,6 +112,7 @@
 		"@biomejs/biome": "^2.5.6",
 		"@earendil-works/pi-coding-agent": "0.84.1",
 		"@earendil-works/pi-tui": "0.84.1",
+		"@types/cross-spawn": "^6.0.6",
 		"bun": "1.4.0",
 		"typebox": "1.3.7"
 	}
