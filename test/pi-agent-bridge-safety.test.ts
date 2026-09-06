@@ -1,4 +1,5 @@
-import type { AgentEndEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import type { AgentEndEvent, ExtensionAPI, TerminalInputHandler } from "@earendil-works/pi-coding-agent"
+import { getKeybindings, KeybindingsManager, setKeybindings } from "@earendil-works/pi-tui"
 import { Type } from "typebox"
 import { describe, expect, it, vi } from "vitest"
 import { SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "../src/engine/output-tools.ts"
@@ -37,6 +38,9 @@ type UserMessage = Parameters<ExtensionAPI["sendUserMessage"]>[0]
 function fakePi(scriptedTurns: readonly unknown[] = []): {
 	pi: ExtensionAPI
 	fireAgentEnd: (text: string) => void
+	fireLoopEnd: (messages: unknown[]) => void
+	fireAgentStart: () => void
+	fireSettled: () => void
 	fireMessageUpdate: (totalTokens: number) => void
 	fireContext: (messages: unknown[]) => ContextResult
 	sentMessages: SentMessage[]
@@ -46,6 +50,7 @@ function fakePi(scriptedTurns: readonly unknown[] = []): {
 } {
 	let endHandler: ((event: AgentEndEvent) => void) | undefined
 	let settledHandler: (() => void) | undefined
+	let startHandler: (() => void) | undefined
 	let messageUpdateHandler: ((event: { message: unknown }) => void) | undefined
 	let contextHandler: ((event: { type: "context"; messages: unknown[] }) => ContextResult) | undefined
 	const sentMessages: SentMessage[] = []
@@ -62,6 +67,7 @@ function fakePi(scriptedTurns: readonly unknown[] = []): {
 		on: (event: string, h: (event: never) => unknown) => {
 			if (event === "agent_end") endHandler = h as (event: AgentEndEvent) => void
 			if (event === "agent_settled") settledHandler = h as () => void
+			if (event === "agent_start") startHandler = h as () => void
 			if (event === "message_update") messageUpdateHandler = h as (event: { message: unknown }) => void
 			if (event === "context") contextHandler = h as (event: { type: "context"; messages: unknown[] }) => ContextResult
 		},
@@ -89,6 +95,9 @@ function fakePi(scriptedTurns: readonly unknown[] = []): {
 		pi,
 		registeredTools,
 		activeTools: () => [...activeTools],
+		fireLoopEnd: (messages) => endHandler?.({ type: "agent_end", messages } as AgentEndEvent),
+		fireAgentStart: () => startHandler?.(),
+		fireSettled: () => settledHandler?.(),
 		fireAgentEnd: (text: string) => {
 			if (!endHandler) throw new Error("test bug: no agent_end handler was registered")
 			if (!settledHandler) throw new Error("test bug: no agent_settled handler was registered")
@@ -119,7 +128,16 @@ function fakeAgentControl(initialIdle = false) {
 	let pendingMessages = false
 	let abortCalls = 0
 	const idleWaiters: Array<() => void> = []
+	const terminalListeners = new Set<TerminalInputHandler>()
 	const control = {
+		ui: {
+			onTerminalInput: (handler: TerminalInputHandler) => {
+				terminalListeners.add(handler)
+				return () => {
+					terminalListeners.delete(handler)
+				}
+			},
+		},
 		abort: () => {
 			abortCalls++
 		},
@@ -133,6 +151,10 @@ function fakeAgentControl(initialIdle = false) {
 
 	return {
 		control,
+		fireTerminalInput: (data: string) => {
+			for (const handler of terminalListeners) expect(handler(data)).toBeUndefined()
+		},
+		terminalListenerCount: () => terminalListeners.size,
 		abortCalls: () => abortCalls,
 		setIdle: (value: boolean) => {
 			idle = value
@@ -314,6 +336,193 @@ describe("createPiAgentBridge in-session safety (spec §2.2): two concurrent tur
 
 		expect(calls).toHaveLength(2) // both routed to the subprocess path
 		expect(sentMessages).toEqual([]) // neither ever called `pi.sendUserMessage`
+	})
+})
+
+describe("createPiAgentBridge automatic retries", () => {
+	const providerError = {
+		role: "assistant",
+		content: [],
+		stopReason: "error",
+		errorMessage: "503 overloaded",
+	}
+	const question = {
+		role: "assistant",
+		content: [
+			{
+				type: "toolCall",
+				id: "ask",
+				name: SUBMIT_QUESTIONS_TOOL,
+				arguments: { questions: [{ key: "backend", header: "Backend", question: "Which backend?", kind: "text" }] },
+			},
+		],
+	}
+
+	it("persists every retry loop and restores the original task and tool results after a restart", async () => {
+		const fake = fakePi()
+		const startAgent = createPiAgentBridge(fake.pi)(fakeModelRegistry(), sessionsDir)
+		const workflow = createWorkflow({ name: "retry-questionnaire" })
+			.then(
+				createAgentStep({
+					name: "plan",
+					output: Type.Object({ backend: Type.String() }),
+					asks: true,
+					prompt: () => "Plan the backend.",
+				}),
+			)
+			.commit()
+		const { host, store } = createTestHost({ startAgent })
+		const running = runWorkflow(workflow, undefined, host)
+		await vi.waitFor(() => expect(fake.sentMessages).toHaveLength(1))
+		const initial = [
+			{ role: "custom", ...fake.sentMessages[0]?.message, timestamp: 1 },
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "read", name: "read", arguments: { path: "README.md" } }],
+			},
+			{
+				role: "toolResult",
+				toolCallId: "read",
+				toolName: "read",
+				content: [{ type: "text", text: "Existing backend requirements" }],
+			},
+			providerError,
+		]
+		fake.fireLoopEnd(initial)
+		fake.fireAgentStart()
+		fake.fireLoopEnd([providerError])
+		fake.fireAgentStart()
+		fake.fireLoopEnd([question])
+		fake.fireSettled()
+		const blocked = await running
+		expect(blocked.status).toBe("blocked")
+
+		const restarted = fakePi()
+		const resumed = resumeWithAnswer(
+			workflow,
+			await store.loadEvents(blocked.runId),
+			{ backend: "Redis" },
+			{
+				...host,
+				startAgent: createPiAgentBridge(restarted.pi)(fakeModelRegistry(), sessionsDir),
+			},
+		)
+		await vi.waitFor(() => expect(restarted.sentMessages).toHaveLength(1))
+		const answer = { role: "custom", ...restarted.sentMessages[0]?.message, timestamp: 2 }
+		expect(restarted.fireContext([answer])).toEqual({ messages: [...initial, providerError, question, answer] })
+		restarted.fireLoopEnd([
+			{
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: "result", name: SUBMIT_RESULT_TOOL, arguments: { result: { backend: "Redis" } } },
+				],
+			},
+		])
+		restarted.fireSettled()
+		expect((await resumed).status).toBe("completed")
+	})
+
+	it("retains only this session's history and uses only this turn's terminal output", async () => {
+		const fake = fakePi()
+		const startAgent = createPiAgentBridge(fake.pi)(fakeModelRegistry(), sessionsDir)
+		const first = startAgent(agentRequest({ stepName: "first" }))
+		const turn = first.sendAndAwaitEnd("first")
+		fake.fireLoopEnd([question])
+		fake.fireSettled()
+		await turn
+		const repair = first.sendAndAwaitEnd("repair")
+		fake.fireLoopEnd([providerError])
+		fake.fireSettled()
+		await expect(repair).resolves.toMatchObject({ error: { message: "503 overloaded" } })
+		expect((await repair).submitted).toBeUndefined()
+		expect(first.getConversation()).toEqual([question, providerError])
+		first.dispose()
+		fake.fireLoopEnd([providerError]) // unrelated activity cannot overwrite a disposed session
+		const second = startAgent(agentRequest({ stepName: "second" }))
+		expect(second.getConversation()).toEqual([])
+		const next = second.sendAndAwaitEnd("second")
+		fake.fireAgentEnd("done")
+		await next
+		expect(first.getConversation()).toEqual([question, providerError])
+	})
+
+	it.each(["\u001b", "\u0018"])(
+		"stops workflow repeats when the interrupt key %j cancels retry backoff",
+		async (key) => {
+			const previousBindings = getKeybindings()
+			setKeybindings(
+				new KeybindingsManager({ "app.interrupt": { defaultKeys: key === "\u001b" ? "escape" : "ctrl+x" } }),
+			)
+			try {
+				const fake = fakePi()
+				const lifecycle = fakeAgentControl()
+				const startAgent = createPiAgentBridge(fake.pi)(fakeModelRegistry(), sessionsDir, lifecycle.control)
+				const workflow = createWorkflow({ name: "interrupt-backoff" })
+					.then(createAgentStep({ name: "worker", retry: { maxRetry: 2 }, prompt: () => "go" }))
+					.commit()
+				const { host, store } = createTestHost({ startAgent })
+				const running = runWorkflow(workflow, undefined, host)
+				await vi.waitFor(() => expect(fake.sentMessages).toHaveLength(1))
+				fake.fireLoopEnd([providerError])
+				lifecycle.fireTerminalInput(key)
+				await expect(startAgent(agentRequest({ stepName: "overlap" })).sendAndAwaitEnd("overlap")).rejects.toThrow(
+					/still in flight/,
+				)
+				fake.fireSettled() // abortRetry emits no further assistant message
+				const result = await running
+				expect(result.status).toBe("cancelled")
+				expect(fake.sentMessages).toHaveLength(1)
+				expect((await store.loadEvents(result.runId)).filter((event) => event.type === "step-retry")).toEqual([])
+				expect(lifecycle.terminalListenerCount()).toBe(0)
+			} finally {
+				setKeybindings(previousBindings)
+			}
+		},
+	)
+
+	it("does not report cancellation when the editor consumes Escape and PI continues retrying", async () => {
+		const previousBindings = getKeybindings()
+		setKeybindings(new KeybindingsManager({ "app.interrupt": { defaultKeys: "escape" } }))
+		try {
+			const fake = fakePi()
+			const lifecycle = fakeAgentControl()
+			const session = createPiAgentBridge(fake.pi)(fakeModelRegistry(), sessionsDir, lifecycle.control)(
+				agentRequest({ stepName: "continue" }),
+			)
+			const turn = session.sendAndAwaitEnd("go")
+			fake.fireLoopEnd([providerError])
+			lifecycle.fireTerminalInput("\u001b") // autocomplete can consume Escape before PI's retry handler
+			fake.fireAgentStart()
+			fake.fireAgentEnd("recovered")
+			await expect(turn).resolves.toEqual({ text: "recovered", usage: { totalTokens: 1 } })
+		} finally {
+			setKeybindings(previousBindings)
+		}
+	})
+
+	it("reports exhausted retries as provider errors and resets cancellation for the next turn", async () => {
+		const fake = fakePi()
+		const lifecycle = fakeAgentControl()
+		const abort = new AbortController()
+		const startAgent = createPiAgentBridge(fake.pi)(fakeModelRegistry(), sessionsDir, lifecycle.control)
+		const cancelled = startAgent(agentRequest({ stepName: "cancelled", signal: abort.signal }))
+		const turn = cancelled.sendAndAwaitEnd("cancel")
+		fake.fireLoopEnd([providerError])
+		abort.abort()
+		fake.fireSettled()
+		await expect(turn).resolves.toEqual({ text: "", usage: undefined, cancelled: true })
+		cancelled.dispose()
+		const exhausted = startAgent(agentRequest({ stepName: "exhausted" })).sendAndAwaitEnd("retry")
+		fake.fireLoopEnd([providerError])
+		lifecycle.fireTerminalInput("a")
+		fake.fireAgentStart()
+		fake.fireLoopEnd([{ ...providerError, errorMessage: "503 still overloaded" }])
+		fake.fireSettled()
+		await expect(exhausted).resolves.toEqual({
+			text: "",
+			usage: undefined,
+			error: { kind: "provider-error", message: "503 still overloaded" },
+		})
 	})
 })
 
