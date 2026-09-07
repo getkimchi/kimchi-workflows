@@ -33,6 +33,54 @@ export function submitQuestionsParameters(): TSchema {
 	return QuestionnaireSchema
 }
 
+/** Tag written by framework-owned submission handlers into PI tool-result details. */
+export const WORKFLOW_STEP_SUBMISSION_TYPE = "kimchi-workflow-step-submission" as const
+
+/** Framework-owned identity that attributes a persisted submission to one workflow attempt. */
+export interface StepSubmissionIdentity {
+	readonly runId: string
+	readonly path: string
+	readonly attempt: number
+}
+
+/** Durable handoff from a workflow submission tool to the bridge settling its logical run. */
+export interface WorkflowStepSubmissionDetails extends StepSubmissionIdentity {
+	readonly type: typeof WORKFLOW_STEP_SUBMISSION_TYPE
+	readonly kind: "result" | "questions"
+	/** The validated tool arguments, kept wrapped exactly as the engine expects them. */
+	readonly payload: unknown
+}
+
+/** Read a framework submission record defensively from an untrusted PI session entry. */
+export function readSubmissionDetails(details: unknown): WorkflowStepSubmissionDetails | undefined {
+	if (!details || typeof details !== "object") return undefined
+	const record = details as Record<string, unknown>
+	if (record.type !== WORKFLOW_STEP_SUBMISSION_TYPE) return undefined
+	if (record.kind !== "result" && record.kind !== "questions") return undefined
+	if (typeof record.runId !== "string" || typeof record.path !== "string") return undefined
+	if (typeof record.attempt !== "number") return undefined
+	return details as WorkflowStepSubmissionDetails
+}
+
+/** Whether a durable submission belongs to the workflow attempt currently being settled. */
+export function isSubmissionForIdentity(
+	details: WorkflowStepSubmissionDetails,
+	identity: StepSubmissionIdentity,
+): boolean {
+	return details.runId === identity.runId && details.path === identity.path && details.attempt === identity.attempt
+}
+
+/** Adapt persisted submission details to the engine's existing tool-call-shaped contract. */
+export function submittedOutputFromDetails(details: WorkflowStepSubmissionDetails): SubmittedOutput {
+	return {
+		tool: details.kind === "result" ? SUBMIT_RESULT_TOOL : SUBMIT_QUESTIONS_TOOL,
+		arguments:
+			typeof details.payload === "object" && details.payload !== null
+				? (details.payload as Record<string, unknown>)
+				: {},
+	}
+}
+
 /** What a submitted tool call carried, with the tool identity resolved to a kind. */
 export type SubmittedPayload =
 	| { readonly kind: "result"; readonly value: unknown }

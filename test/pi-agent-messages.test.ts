@@ -1,21 +1,143 @@
+import type { SessionEntry } from "@earendil-works/pi-coding-agent"
 import { describe, expect, it } from "vitest"
+import { SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL, WORKFLOW_STEP_SUBMISSION_TYPE } from "../src/engine/output-tools.ts"
 import {
 	type AgentMessages,
 	createAssistantTurnReader,
 	lastAssistantText,
 	lastAssistantUsage,
 	lastAssistantWasAborted,
+	latestSubmissionAfterCursor,
 	type ModelRegistry,
 	parseNdjsonMessages,
 	resolveModel,
 	seedHistory,
 } from "../src/host/pi-agent-messages.ts"
+import { fakeSessionManager } from "./fake-session-manager.ts"
 
 // The real PI `AgentMessage` / `Model` types carry many fields these pure readers never touch. We feed
 // them minimal fixtures via one localized assertion each (no `any`); the readers only read the fields
 // asserted below.
 const asMessages = (items: readonly object[]): AgentMessages => items as unknown as AgentMessages
 type FoundModel = ReturnType<ModelRegistry["find"]>
+
+const identity = { runId: "run-1", path: "items@0/grade", attempt: 2 }
+
+describe("latestSubmissionAfterCursor", () => {
+	const result = { result: { grade: "A" } }
+	const expected = { tool: SUBMIT_RESULT_TOOL, arguments: result }
+	const details = {
+		type: WORKFLOW_STEP_SUBMISSION_TYPE,
+		kind: "result",
+		...identity,
+		payload: { result: "must be ignored" },
+	}
+
+	it("returns the newest successful matching submission after the cursor", () => {
+		const manager = fakeSessionManager()
+		const cursor = manager.appendSubmission("result", identity, { result: "previous turn" })
+		manager.appendSubmission("result", identity, result)
+		const questions = { questions: [{ key: "scope", question: "Which scope?" }] }
+		manager.appendSubmission("questions", identity, questions)
+
+		expect(latestSubmissionAfterCursor(manager.getBranch(), cursor, identity)).toEqual({
+			tool: SUBMIT_QUESTIONS_TOOL,
+			arguments: questions,
+		})
+	})
+
+	it("does not resurrect an earlier submission when the current turn submitted nothing", () => {
+		const manager = fakeSessionManager()
+		manager.appendSubmission("result", identity, result)
+		const cursor = manager.appendSubmission("result", identity, result)
+		manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "No submission." }] })
+
+		expect(latestSubmissionAfterCursor(manager.getBranch(), cursor, identity)).toBeUndefined()
+	})
+
+	it("scans from the root when the first run starts with a null cursor", () => {
+		const manager = fakeSessionManager()
+		manager.appendSubmission("result", identity, result)
+
+		expect(latestSubmissionAfterCursor(manager.getBranch(), null, identity)).toEqual(expected)
+	})
+
+	it("does not scan a branch that no longer contains the captured cursor", () => {
+		const manager = fakeSessionManager()
+		manager.appendSubmission("result", identity, result)
+
+		expect(latestSubmissionAfterCursor(manager.getBranch(), "cursor-on-another-branch", identity)).toBeUndefined()
+	})
+
+	it.each([{ runId: "run-2" }, { path: "items@1/grade" }, { attempt: 3 }])(
+		"ignores a newer submission with a different identity: %j",
+		(other) => {
+			const manager = fakeSessionManager()
+			const cursor = manager.appendSubmission("result", identity, result)
+			manager.appendSubmission("result", { ...identity, ...other }, { result: "wrong step" })
+
+			expect(latestSubmissionAfterCursor(manager.getBranch(), cursor, identity)).toBeUndefined()
+			expect(latestSubmissionAfterCursor(manager.getBranch(), null, identity)).toEqual(expected)
+		},
+	)
+
+	it.each([
+		["failed tool result", { role: "toolResult", isError: true, details }],
+		["unrelated details", { role: "toolResult", details: { ...details, type: "another-extension" } }],
+		["missing identity", { role: "toolResult", details: { type: WORKFLOW_STEP_SUBMISSION_TYPE, kind: "result" } }],
+		["invalid kind", { role: "toolResult", details: { ...details, kind: "other" } }],
+		["missing details", { role: "toolResult" }],
+		["null details", { role: "toolResult", details: null }],
+		["primitive details", { role: "toolResult", details: "not a submission record" }],
+		["array details", { role: "toolResult", details: [] }],
+		["non-tool message", { role: "assistant", details }],
+	])("ignores a newer %s instead of masking the last valid submission", (_label, message) => {
+		const manager = fakeSessionManager()
+		const cursor = manager.appendSubmission("result", identity, result)
+		manager.appendMessage(message)
+
+		expect(latestSubmissionAfterCursor(manager.getBranch(), cursor, identity)).toBeUndefined()
+		expect(latestSubmissionAfterCursor(manager.getBranch(), null, identity)).toEqual(expected)
+	})
+
+	it("ignores assistant tool calls that have no successful persisted result", () => {
+		const manager = fakeSessionManager()
+		manager.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-1", name: SUBMIT_RESULT_TOOL, arguments: result }],
+		})
+
+		expect(latestSubmissionAfterCursor(manager.getBranch(), null, identity)).toBeUndefined()
+	})
+
+	it("recovers persisted submissions across labels and compaction entries", () => {
+		const manager = fakeSessionManager()
+		const cursor = manager.appendMessage({ role: "user", content: "earlier prompt" })
+		const submissionId = manager.appendSubmission("result", identity, result)
+		const branch: SessionEntry[] = [
+			...manager.getBranch(),
+			{
+				type: "label",
+				id: "label",
+				parentId: submissionId,
+				timestamp: "2026-09-07T00:00:00.000Z",
+				targetId: submissionId,
+				label: "submitted",
+			},
+			{
+				type: "compaction",
+				id: "compaction",
+				parentId: "label",
+				timestamp: "2026-09-07T00:00:00.000Z",
+				summary: "The step submitted its result.",
+				firstKeptEntryId: "label",
+				tokensBefore: 100,
+			},
+		]
+
+		expect(latestSubmissionAfterCursor(branch, cursor, identity)).toEqual(expected)
+	})
+})
 
 // -- resolveModel (fake ModelRegistry) --------------------------------------------------------------
 

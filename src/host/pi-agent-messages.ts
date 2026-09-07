@@ -3,8 +3,14 @@
  * are unit-testable offline. Every PI reference here is *type-only* (erased at runtime), so importing
  * this module pulls no PI/host/network code.
  */
-import type { AgentEndEvent, ExtensionContext } from "@earendil-works/pi-coding-agent"
-import { isOutputToolName } from "../engine/output-tools.ts"
+import type { AgentEndEvent, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent"
+import {
+	isOutputToolName,
+	isSubmissionForIdentity,
+	readSubmissionDetails,
+	type StepSubmissionIdentity,
+	submittedOutputFromDetails,
+} from "../engine/output-tools.ts"
 import type {
 	AgentTurnError,
 	AgentTurnErrorKind,
@@ -38,6 +44,36 @@ export function resolveModel(
  */
 function isAssistantMessage(value: unknown): value is { content: unknown; usage?: { totalTokens?: unknown } } {
 	return typeof value === "object" && value !== null && (value as { role?: unknown }).role === "assistant"
+}
+
+/**
+ * Recover the newest successful submission after the turn's start cursor from PI's active branch.
+ * PI owns persistence and branch ordering; this reader only applies workflow identity correlation.
+ */
+export function latestSubmissionAfterCursor(
+	branch: readonly SessionEntry[],
+	cursor: string | null,
+	identity: StepSubmissionIdentity,
+): SubmittedOutput | undefined {
+	let start = 0
+	if (cursor !== null) {
+		const cursorIndex = branch.findIndex((entry) => entry.id === cursor)
+		// A different branch cannot prove which submissions belong to this turn. Only a captured
+		// null leaf means the turn began at the root; a missing non-null cursor is not that case.
+		if (cursorIndex === -1) return undefined
+		start = cursorIndex + 1
+	}
+
+	for (let index = branch.length - 1; index >= start; index--) {
+		const entry = branch[index]
+		if (entry?.type !== "message") continue
+		const message = entry.message as { role?: unknown; isError?: unknown; details?: unknown }
+		if (message.role !== "toolResult" || message.isError === true) continue
+		const details = readSubmissionDetails(message.details)
+		if (!details || !isSubmissionForIdentity(details, identity)) continue
+		return submittedOutputFromDetails(details)
+	}
+	return undefined
 }
 
 /** The last assistant message's concatenated text content (`""` when there is no assistant message). */

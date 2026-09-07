@@ -34,6 +34,16 @@ type SentMessage = {
 	options: SendMessageArgs[1]
 }
 type UserMessage = Parameters<ExtensionAPI["sendUserMessage"]>[0]
+type TestTool = {
+	name: string
+	execute: (
+		toolCallId: string,
+		params: never,
+		signal: undefined,
+		onUpdate: undefined,
+		ctx: never,
+	) => Promise<{ content: unknown; details?: unknown }>
+}
 
 function fakePi(scriptedTurns: readonly unknown[] = []): {
 	pi: ExtensionAPI
@@ -48,31 +58,99 @@ function fakePi(scriptedTurns: readonly unknown[] = []): {
 	registeredTools: string[]
 	activeTools: () => string[]
 } {
-	let endHandler: ((event: AgentEndEvent) => void) | undefined
-	let settledHandler: (() => void) | undefined
-	let startHandler: (() => void) | undefined
+	let endHandler: ((event: AgentEndEvent, ctx: never) => void) | undefined
+	let settledHandler: ((event: { type: "agent_settled" }, ctx: never) => void) | undefined
+	let startHandler: ((event: { type: "agent_start" }, ctx: never) => void) | undefined
 	let messageUpdateHandler: ((event: { message: unknown }) => void) | undefined
 	let contextHandler: ((event: { type: "context"; messages: unknown[] }) => ContextResult) | undefined
 	const sentMessages: SentMessage[] = []
 	const userMessages: UserMessage[] = []
 	const registeredTools: string[] = []
+	const toolDefinitions = new Map<string, TestTool>()
+	const branch: unknown[] = []
+	let leafId: string | null = null
+	let entrySequence = 0
+	let pendingToolResults = Promise.resolve()
 	let activeTools: string[] = ["bash", "read"]
 	let scriptedTurn = 0
+	const sessionManager = {
+		getLeafId: () => leafId,
+		getBranch: () => branch,
+	}
+	const eventContext = { sessionManager }
+	const appendMessage = (message: unknown) => {
+		const id = `entry-${++entrySequence}`
+		branch.push({
+			type: "message",
+			id,
+			parentId: leafId,
+			timestamp: "2026-09-07T00:00:00.000Z",
+			message,
+		})
+		leafId = id
+	}
+	const persistSubmissionResults = (messages: unknown[]) => {
+		for (const message of messages) {
+			if (!message || typeof message !== "object") continue
+			const candidate = message as { role?: unknown; content?: unknown }
+			if (candidate.role !== "assistant" || !Array.isArray(candidate.content)) continue
+			for (const part of candidate.content) {
+				if (!part || typeof part !== "object") continue
+				const call = part as { type?: unknown; id?: unknown; name?: unknown; arguments?: unknown }
+				if (call.type !== "toolCall" || typeof call.id !== "string" || typeof call.name !== "string") continue
+				const tool = toolDefinitions.get(call.name)
+				if (!tool) continue
+				pendingToolResults = pendingToolResults.then(async () => {
+					const result = await tool.execute(
+						call.id as string,
+						call.arguments as never,
+						undefined,
+						undefined,
+						eventContext as never,
+					)
+					appendMessage({
+						role: "toolResult",
+						toolCallId: call.id,
+						toolName: call.name,
+						content: result.content,
+						details: result.details,
+						isError: false,
+						timestamp: Date.now(),
+					})
+				})
+			}
+		}
+	}
+	const fireStart = () => startHandler?.({ type: "agent_start" }, eventContext as never)
+	const fireLoopEnd = (messages: unknown[]) => {
+		for (const message of messages) appendMessage(message)
+		persistSubmissionResults(messages)
+		endHandler?.({ type: "agent_end", messages } as unknown as AgentEndEvent, eventContext as never)
+	}
+	const fireSettled = () => {
+		void pendingToolResults.then(() => settledHandler?.({ type: "agent_settled" }, eventContext as never))
+	}
 	const endRun = (messages: unknown[]) => {
 		// Match PI's loop-end then run-settlement lifecycle order.
-		endHandler?.({ type: "agent_end", messages } as unknown as AgentEndEvent)
-		settledHandler?.()
+		fireLoopEnd(messages)
+		fireSettled()
 	}
 	const pi = {
 		on: (event: string, h: (event: never) => unknown) => {
-			if (event === "agent_end") endHandler = h as (event: AgentEndEvent) => void
-			if (event === "agent_settled") settledHandler = h as () => void
-			if (event === "agent_start") startHandler = h as () => void
+			if (event === "agent_end") endHandler = h as unknown as (event: AgentEndEvent, ctx: never) => void
+			if (event === "agent_settled") {
+				settledHandler = h as unknown as (event: { type: "agent_settled" }, ctx: never) => void
+			}
+			if (event === "agent_start") {
+				startHandler = h as unknown as (event: { type: "agent_start" }, ctx: never) => void
+			}
 			if (event === "message_update") messageUpdateHandler = h as (event: { message: unknown }) => void
 			if (event === "context") contextHandler = h as (event: { type: "context"; messages: unknown[] }) => ContextResult
 		},
 		sendMessage: (...[message, options]: SendMessageArgs) => {
 			sentMessages.push({ message, options })
+			fireStart()
+			appendMessage({ role: "custom", ...message, timestamp: Date.now() })
 			const assistant = scriptedTurns[scriptedTurn++]
 			if (assistant !== undefined) {
 				endRun([{ role: "custom", ...message, timestamp: Date.now() }, assistant])
@@ -82,8 +160,9 @@ function fakePi(scriptedTurns: readonly unknown[] = []): {
 			userMessages.push(message)
 		},
 		setModel: async () => true,
-		registerTool: (tool: { name: string }) => {
+		registerTool: (tool: TestTool) => {
 			registeredTools.push(tool.name)
+			toolDefinitions.set(tool.name, tool)
 		},
 		getActiveTools: () => [...activeTools],
 		setActiveTools: (names: string[]) => {
@@ -95,9 +174,9 @@ function fakePi(scriptedTurns: readonly unknown[] = []): {
 		pi,
 		registeredTools,
 		activeTools: () => [...activeTools],
-		fireLoopEnd: (messages) => endHandler?.({ type: "agent_end", messages } as AgentEndEvent),
-		fireAgentStart: () => startHandler?.(),
-		fireSettled: () => settledHandler?.(),
+		fireLoopEnd,
+		fireAgentStart: fireStart,
+		fireSettled,
 		fireAgentEnd: (text: string) => {
 			if (!endHandler) throw new Error("test bug: no agent_end handler was registered")
 			if (!settledHandler) throw new Error("test bug: no agent_settled handler was registered")

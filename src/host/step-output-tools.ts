@@ -8,10 +8,11 @@
  * before it loads — hence a file whose path travels in the environment. The process boundary is what
  * makes per-step tool schemas possible at all; a single long-lived process could not do it.
  *
- * The handlers deliberately do nothing but acknowledge and terminate the PI tool loop. The payload is
- * read back off the TRANSCRIPT (pi-agent-messages.ts), because a subprocess handler's return value has
- * no way to reach the engine. Termination is essential: without it PI asks the model for another reply,
- * delaying the engine's questionnaire/result and allowing a later duplicate submission to replace it.
+ * The handlers acknowledge and terminate the PI tool loop while stamping an attributed submission in
+ * the tool result's `details`. PI persists that record before the logical run settles, so the in-session
+ * bridge can recover it from the session without maintaining another transcript. Termination is essential:
+ * without it PI asks the model for another reply, delaying the questionnaire/result and allowing a later
+ * duplicate submission to replace it.
  */
 import { readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
@@ -20,19 +21,24 @@ import { Container } from "@earendil-works/pi-tui"
 import type { TSchema } from "typebox"
 import {
 	isOutputToolName,
+	type StepSubmissionIdentity,
 	SUBMIT_QUESTIONS_TOOL,
 	SUBMIT_RESULT_TOOL,
 	submitQuestionsParameters,
 	submitResultParameters,
+	WORKFLOW_STEP_SUBMISSION_TYPE,
+	type WorkflowStepSubmissionDetails,
 } from "../engine/output-tools.ts"
 
 /** Env var naming the JSON file that describes which output tools a spawned step should register. */
 export const STEP_OUTPUT_TOOLS_ENV = "KIMCHI_WORKFLOW_STEP_OUTPUT_TOOLS"
 
-/** The handoff file's contents. `asks` decides whether `workflow_submit_questions` is offered alongside the result tool. */
+/** The complete per-execution contract handed to an in-process or spawned workflow step. */
 export interface StepOutputToolSpec {
 	readonly outputSchema: TSchema
 	readonly asks?: boolean
+	/** Filled from the active AgentRequest by the host, never by the model. */
+	readonly identity: StepSubmissionIdentity
 }
 
 /**
@@ -67,13 +73,30 @@ export function removeStepOutputToolSpec(file: string): void {
 export function readStepOutputToolSpec(file: string): StepOutputToolSpec | undefined {
 	try {
 		const parsed = JSON.parse(readFileSync(file, "utf8")) as StepOutputToolSpec
-		if (!parsed || typeof parsed !== "object" || !parsed.outputSchema) return undefined
+		if (!parsed || typeof parsed !== "object" || !parsed.outputSchema || !isStepSubmissionIdentity(parsed.identity)) {
+			return undefined
+		}
 		return parsed
 	} catch {
 		// A missing or corrupt handoff means no tools, and with no text channel the step will fail — but it
 		// must fail through the engine's own violation path, not by throwing out of extension load.
 		return undefined
 	}
+}
+
+function isStepSubmissionIdentity(identity: unknown): identity is StepSubmissionIdentity {
+	if (!identity || typeof identity !== "object") return false
+	const record = identity as Record<string, unknown>
+	return typeof record.runId === "string" && typeof record.path === "string" && typeof record.attempt === "number"
+}
+
+/** Build the framework-owned record PI will persist on the successful tool result. */
+function submissionDetails(
+	spec: StepOutputToolSpec,
+	kind: WorkflowStepSubmissionDetails["kind"],
+	payload: unknown,
+): WorkflowStepSubmissionDetails {
+	return { type: WORKFLOW_STEP_SUBMISSION_TYPE, kind, ...spec.identity, payload }
 }
 
 /**
@@ -92,9 +115,9 @@ export function registerStepOutputTools(pi: ExtensionAPI, spec: StepOutputToolSp
 			description:
 				"Submit this step's result. Pass the result as the `result` argument. Call this once you are done; you may explain your reasoning around the call.",
 			parameters: submitResultParameters(spec.outputSchema),
-			execute: async () => ({
+			execute: async (_toolCallId, params) => ({
 				content: [{ type: "text", text: "Result submitted." }],
-				details: undefined,
+				details: submissionDetails(spec, "result", params),
 				terminate: true,
 			}),
 		}),
@@ -110,9 +133,9 @@ export function registerStepOutputTools(pi: ExtensionAPI, spec: StepOutputToolSp
 			description:
 				"Ask the user for information instead of submitting a result. Batch every question you need into one call. The run pauses until the answers come back.",
 			parameters: submitQuestionsParameters(),
-			execute: async () => ({
+			execute: async (_toolCallId, params) => ({
 				content: [{ type: "text", text: "Questions submitted. The run will resume with the answers." }],
-				details: undefined,
+				details: submissionDetails(spec, "questions", params),
 				terminate: true,
 			}),
 		}),

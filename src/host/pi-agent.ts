@@ -1,8 +1,9 @@
 /**
  * Real PI-harness implementation of the engine's agent seam (`HostPort.startAgent`, spec §2.2).
  *
- * A session records per-loop output on `agent_end` and completes on `agent_settled`, so automatic
- * retries and queued continuations retain the session-scoped output tools until the run is finished.
+ * A session records narrow terminal metadata on `agent_end` and completes on `agent_settled`, so
+ * automatic retries and queued continuations retain the session-scoped output tools until the run is
+ * finished. Structured submissions are recovered from attributed PI tool-result session entries.
  *
  * One shared set of stream/lifecycle listeners is registered per bridge (the extension holds one bridge
  * for its lifetime) — `pi.on` exposes no unsubscribe, so `dispose()` clears the bridge's OWN in-flight
@@ -94,7 +95,7 @@ import {
 	lastAssistantText,
 	lastAssistantUsage,
 	lastAssistantWasAborted,
-	lastSubmittedOutput,
+	latestSubmissionAfterCursor,
 	type ModelRegistry,
 	resolveModel,
 	seedHistory,
@@ -116,6 +117,8 @@ export type PiAgentControl = Pick<
 	"abort" | "hasPendingMessages" | "isIdle" | "waitForIdle"
 > & {
 	readonly ui?: Pick<ExtensionCommandContext["ui"], "onTerminalInput">
+	/** The invoking command supplies this so queued prompts have a boundary even without agent_start. */
+	readonly sessionManager?: Pick<ExtensionCommandContext["sessionManager"], "getLeafId">
 }
 
 /** Framework-owned model input: participates in context, but is never rendered as user-authored chat. */
@@ -268,11 +271,14 @@ export function createPiAgentBridge(
 				readonly sessionToken: object
 				readonly turnToken: object
 				readonly stepName: string
+				readonly identity: { readonly runId: string; readonly path: string; readonly attempt: number }
 				readonly resolve: (turn: AgentTurn) => void
 				readonly cleanup: () => void
 				readonly onUsage: AgentTurnOptions["onUsage"]
 				readonly recordConversation: (messages: AgentMessages) => void
-				messages: AgentMessages
+				cursorCaptured: boolean
+				sessionCursor: string | null
+				terminal: AgentTurn
 				awaitingRetry: boolean
 				retryInterrupted: boolean
 				cancelled: boolean
@@ -299,36 +305,49 @@ export function createPiAgentBridge(
 		}
 	})
 
-	pi.on("agent_start", () => {
-		if (!inFlight) return
-		inFlight.awaitingRetry = false
+	pi.on("agent_start", (_event, ctx) => {
+		const turn = inFlight
+		if (!turn) return
+		// Fallback for callers without a command session manager. Production captures before enqueueing;
+		// retries must keep that original boundary, including when it was the empty session's null leaf.
+		if (!turn.cursorCaptured) {
+			turn.sessionCursor = ctx.sessionManager.getLeafId()
+			turn.cursorCaptured = true
+		}
+		turn.awaitingRetry = false
 		// Input may have dismissed an editor popup instead of cancelling backoff. A continuation
 		// starting confirms that PI did not honour it as a retry interruption.
-		inFlight.retryInterrupted = false
+		turn.retryInterrupted = false
 	})
 
 	pi.on("agent_end", (event) => {
 		const turn = inFlight
 		if (!turn) return
-		// Continuation loops contain only new messages; keep the prompt and earlier tool results.
-		turn.messages = [...turn.messages, ...event.messages]
 		turn.recordConversation(event.messages)
-		turn.awaitingRetry = lastAssistantError(event.messages) !== undefined
+		const error = lastAssistantError(event.messages)
+		turn.terminal = {
+			text: lastAssistantText(event.messages),
+			usage: lastAssistantUsage(event.messages),
+			...(lastAssistantWasAborted(event.messages) ? { cancelled: true } : {}),
+			...(error ? { error } : {}),
+		}
+		turn.awaitingRetry = error !== undefined
 		// A loop may be followed by an automatic retry, so settlement happens in `agent_settled`.
 	})
 
-	pi.on("agent_settled", () => {
+	pi.on("agent_settled", (_event, ctx) => {
 		const turn = inFlight
 		if (!turn) return // no in-session turn was awaiting this event (only background/isolated steps ran)
 		inFlight = undefined
 		turn.cleanup()
-		const messages = turn.messages
-		const submitted = lastSubmittedOutput(messages)
-		const cancelled = turn.cancelled || turn.retryInterrupted || lastAssistantWasAborted(messages)
-		const error = cancelled ? undefined : lastAssistantError(messages)
+		const submitted = turn.cursorCaptured
+			? latestSubmissionAfterCursor(ctx.sessionManager.getBranch(), turn.sessionCursor, turn.identity)
+			: undefined
+		const cancelled = turn.cancelled || turn.retryInterrupted || turn.terminal.cancelled === true
+		const error = cancelled ? undefined : turn.terminal.error
 		turn.resolve({
-			text: lastAssistantText(messages),
-			usage: lastAssistantUsage(messages),
+			text: turn.terminal.text,
+			usage: turn.terminal.usage,
 			...(cancelled ? { cancelled: true } : {}),
 			...(submitted ? { submitted } : {}),
 			...(error ? { error } : {}),
@@ -396,7 +415,10 @@ export function createPiAgentBridge(
 				// load from the env handoff and its process ends with the step; an in-session one shares a
 				// process with every other step, so the schema is re-registered per turn AND the ACTIVE set
 				// narrowed — registration alone leaks, since pi has no unregister.
-				const spec = request.outputSchema ? { outputSchema: request.outputSchema, asks: request.asks } : undefined
+				const identity = { runId: request.runId, path: request.path, attempt: request.attempt }
+				const spec = request.outputSchema
+					? { outputSchema: request.outputSchema, asks: request.asks, identity }
+					: undefined
 				if (spec) {
 					registerStepOutputTools(pi, spec)
 					// Filtered on capture: pi ACTIVATES a tool when it is registered, and a previous step in this
@@ -426,17 +448,23 @@ export function createPiAgentBridge(
 						reject(error)
 					}
 
+					// A prompt steered into an already-running PI loop has no agent_start of its own.
+					// Read the live leaf for EVERY send, not at bind time, so a repair cannot reuse prior output.
+					const sessionCursor = control?.sessionManager?.getLeafId()
 					inFlight = {
 						sessionToken,
 						turnToken,
 						stepName: request.stepName,
+						identity,
 						resolve,
 						cleanup,
 						onUsage: options?.onUsage,
 						recordConversation: (messages) => {
 							conversation = [...conversation, ...messages]
 						},
-						messages: [],
+						cursorCaptured: sessionCursor !== undefined,
+						sessionCursor: sessionCursor ?? null,
+						terminal: { text: "" },
 						awaitingRetry: false,
 						retryInterrupted: false,
 						cancelled: false,
@@ -603,6 +631,7 @@ function backgroundSession(
 				? writeStepOutputToolSpec(sessionsDir, stepOutputToolsStem(request), {
 						outputSchema: request.outputSchema,
 						asks: request.asks,
+						identity: { runId: request.runId, path: request.path, attempt: request.attempt },
 					})
 				: undefined
 			const env: NodeJS.ProcessEnv = {
