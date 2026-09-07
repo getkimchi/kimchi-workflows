@@ -1,9 +1,9 @@
 /**
  * Real PI-harness implementation of the engine's agent seam (`HostPort.startAgent`, spec §2.2).
  *
- * A session: resolve + `setModel(model)`, inject a hidden custom message that triggers a turn, await
- * the `agent_end` event, and return the last assistant message's text. Compiles against the real
- * `@earendil-works/pi-coding-agent` types (`AgentEndEvent = { messages }`).
+ * A session records narrow terminal metadata on `agent_end` and completes on `agent_settled`, so
+ * automatic retries and queued continuations retain the session-scoped output tools until the run is
+ * finished. Structured submissions are recovered from attributed PI tool-result session entries.
  *
  * One shared set of stream/lifecycle listeners is registered per bridge (the extension holds one bridge
  * for its lifetime) — `pi.on` exposes no unsubscribe, so `dispose()` clears the bridge's OWN in-flight
@@ -19,7 +19,7 @@
  * at `.commit()`) that is now supposed to keep it from happening at all, and `AgentRequest.isolated`'s
  * doc (engine/types.ts) for the seam.
  *
- * `getConversation()` returns the last `agent_end` messages so a blocked Q&A step can be resumed
+ * `getConversation()` returns the session's accumulated loop messages so a blocked Q&A step can be resumed
  * (spec §8.4). Within one live PI process that alone is enough — PI's own session already has the
  * context. Across a harness restart it is not: the fresh process's PI session starts with none of the
  * pre-restart turns, so `AgentRequest.history` (the stored conversation) must be seeded back in, or the
@@ -85,7 +85,9 @@
  */
 import { existsSync, mkdirSync } from "node:fs"
 import path from "node:path"
-import type { ContextEvent, ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
+import { getKeybindings } from "@earendil-works/pi-tui"
+import type { StepSubmissionIdentity } from "../engine/output-tools.ts"
 import type { AgentRequest, AgentSession, AgentTurn, AgentTurnOptions, ConversationMessage } from "../engine/types.ts"
 import { resumeSessionFile, stepSessionName, traceSessionFile } from "./naming.ts"
 import {
@@ -94,7 +96,7 @@ import {
 	lastAssistantText,
 	lastAssistantUsage,
 	lastAssistantWasAborted,
-	lastSubmittedOutput,
+	latestSubmissionAfterCursor,
 	type ModelRegistry,
 	resolveModel,
 	seedHistory,
@@ -111,7 +113,14 @@ import { runSubagent, type SubagentSpawner, subagentSpawner } from "./subagent-p
 export type AgentStarter = (request: AgentRequest) => AgentSession
 
 /** Public PI lifecycle controls needed to supervise an in-session turn. */
-export type PiAgentControl = Pick<ExtensionCommandContext, "abort" | "hasPendingMessages" | "isIdle" | "waitForIdle">
+export type PiAgentControl = Pick<
+	ExtensionCommandContext,
+	"abort" | "hasPendingMessages" | "isIdle" | "waitForIdle"
+> & {
+	readonly ui?: Pick<ExtensionCommandContext["ui"], "onTerminalInput">
+	/** The invoking command supplies this so queued prompts have a boundary even without agent_start. */
+	readonly sessionManager?: Pick<ExtensionCommandContext["sessionManager"], "getLeafId">
+}
 
 /** Framework-owned model input: participates in context, but is never rendered as user-authored chat. */
 const WORKFLOW_AGENT_MESSAGE = "kimchi-workflow-agent"
@@ -257,23 +266,26 @@ export function createPiAgentBridge(
 	invocationResolver: PiInvocationResolver = resolvePiInvocation,
 	spawnSubagent: SubagentSpawner = subagentSpawner,
 ): (modelRegistry: ModelRegistry, sessionsDir: string, control?: PiAgentControl) => AgentStarter {
-	// The ONE in-session turn currently awaiting the shared `agent_end` listener, if any (see the header
-	// comment). `sessionToken` is an identity private to the session that started the turn — not the step
-	// name, since the SAME step name can legitimately open several sessions across retries/repairs.
-	// `turnToken` is finer-grained: a repair prompt can start from the previous `agent_end` handler before
-	// PI's just-finished run has become idle, so that OLD turn's idle watcher must never settle the NEW one.
+	// Tokens distinguish sessions and individual turns so a late lifecycle event cannot settle a newer call.
 	let inFlight:
 		| {
 				readonly sessionToken: object
 				readonly turnToken: object
 				readonly stepName: string
+				readonly identity: StepSubmissionIdentity
 				readonly resolve: (turn: AgentTurn) => void
 				readonly cleanup: () => void
 				readonly onUsage: AgentTurnOptions["onUsage"]
+				readonly recordConversation: (messages: AgentMessages) => void
+				cursorCaptured: boolean
+				sessionCursor: string | null
+				terminal: AgentTurn
+				awaitingRetry: boolean
+				retryInterrupted: boolean
+				cancelled: boolean
 				lastReportedTokens: number | undefined
 		  }
 		| undefined
-	let lastConversation: AgentMessages = []
 	// The one answer-resumed session (spec §8.4) currently entitled to have its stored `history` seeded
 	// into every outgoing LLM call — see the header comment. Token-guarded exactly like `inFlight`, so a
 	// session can only ever clear the seed IT set (never a sibling's), and cleared in `dispose()`.
@@ -284,38 +296,68 @@ export function createPiAgentBridge(
 	pi.on("message_update", (event) => {
 		const turn = inFlight
 		if (!turn?.onUsage) return
-		const usage = lastAssistantUsage([event.message] as AgentMessages)
+		const usage = lastAssistantUsage([event.message])
 		if (!usage || usage.totalTokens <= 0 || usage.totalTokens === turn.lastReportedTokens) return
 		turn.lastReportedTokens = usage.totalTokens
 		try {
 			turn.onUsage(usage)
 		} catch {
-			// A transient display callback must never interrupt the agent stream. Final usage still arrives
-			// through `agent_end` and remains the durable source of truth.
+			// Display callbacks must not interrupt the agent stream.
 		}
 	})
 
+	pi.on("agent_start", (_event, ctx) => {
+		const turn = inFlight
+		if (!turn) return
+		// Fallback for callers without a command session manager. Production captures before enqueueing;
+		// retries must keep that original boundary, including when it was the empty session's null leaf.
+		if (!turn.cursorCaptured) {
+			turn.sessionCursor = ctx.sessionManager.getLeafId()
+			turn.cursorCaptured = true
+		}
+		turn.awaitingRetry = false
+		// Input may have dismissed an editor popup instead of cancelling backoff. A continuation
+		// starting confirms that PI did not honour it as a retry interruption.
+		turn.retryInterrupted = false
+	})
+
 	pi.on("agent_end", (event) => {
-		lastConversation = event.messages
+		const turn = inFlight
+		if (!turn) return
+		turn.recordConversation(event.messages)
+		const error = lastAssistantError(event.messages)
+		turn.terminal = {
+			text: lastAssistantText(event.messages),
+			usage: lastAssistantUsage(event.messages),
+			...(lastAssistantWasAborted(event.messages) ? { cancelled: true } : {}),
+			...(error ? { error } : {}),
+		}
+		turn.awaitingRetry = error !== undefined
+		// A loop may be followed by an automatic retry, so settlement happens in `agent_settled`.
+	})
+
+	pi.on("agent_settled", (_event, ctx) => {
 		const turn = inFlight
 		if (!turn) return // no in-session turn was awaiting this event (only background/isolated steps ran)
 		inFlight = undefined
 		turn.cleanup()
-		const submitted = lastSubmittedOutput(event.messages)
-		const error = lastAssistantError(event.messages)
-		const cancelled = lastAssistantWasAborted(event.messages)
+		const submitted = turn.cursorCaptured
+			? latestSubmissionAfterCursor(ctx.sessionManager.getBranch(), turn.sessionCursor, turn.identity)
+			: undefined
+		const cancelled = turn.cancelled || turn.retryInterrupted || turn.terminal.cancelled === true
+		const error = cancelled ? undefined : turn.terminal.error
 		turn.resolve({
-			text: lastAssistantText(event.messages),
-			usage: lastAssistantUsage(event.messages),
+			text: turn.terminal.text,
+			usage: turn.terminal.usage,
 			...(cancelled ? { cancelled: true } : {}),
 			...(submitted ? { submitted } : {}),
 			...(error ? { error } : {}),
 		})
 	})
 
-	pi.on("context", (event: ContextEvent) => {
+	pi.on("context", (event) => {
 		if (!activeHistory) return // the common case: no resumed session is currently in flight
-		const seeded = seedHistory(activeHistory.history, event.messages as AgentMessages)
+		const seeded = seedHistory(activeHistory.history, event.messages)
 		return seeded ? { messages: seeded } : undefined
 	})
 
@@ -329,6 +371,7 @@ export function createPiAgentBridge(
 		}
 
 		const sessionToken = {} // this session's own identity — see `inFlight`'s doc above
+		let conversation: AgentMessages = []
 		// Captured per SESSION, not per bridge. extension.ts builds ONE bridge at extension load, so a
 		// baseline held there freezes whatever the user's tools were during the FIRST run and silently
 		// reverts anything they enable afterwards. Set only once this session actually narrows the set,
@@ -373,7 +416,10 @@ export function createPiAgentBridge(
 				// load from the env handoff and its process ends with the step; an in-session one shares a
 				// process with every other step, so the schema is re-registered per turn AND the ACTIVE set
 				// narrowed — registration alone leaks, since pi has no unregister.
-				const spec = request.outputSchema ? { outputSchema: request.outputSchema, asks: request.asks } : undefined
+				const identity = { runId: request.runId, path: request.path, attempt: request.attempt }
+				const spec = request.outputSchema
+					? { outputSchema: request.outputSchema, asks: request.asks, identity }
+					: undefined
 				if (spec) {
 					registerStepOutputTools(pi, spec)
 					// Filtered on capture: pi ACTIVATES a tool when it is registered, and a previous step in this
@@ -391,7 +437,11 @@ export function createPiAgentBridge(
 				return new Promise<AgentTurn>((resolve, reject) => {
 					const turnToken = {}
 					let removeAbortListener = () => {}
-					const cleanup = () => removeAbortListener()
+					let removeTerminalListener = () => {}
+					const cleanup = () => {
+						removeAbortListener()
+						removeTerminalListener()
+					}
 					const fail = (error: Error): void => {
 						if (inFlight?.turnToken !== turnToken) return
 						inFlight = undefined
@@ -399,21 +449,43 @@ export function createPiAgentBridge(
 						reject(error)
 					}
 
+					// A prompt steered into an already-running PI loop has no agent_start of its own.
+					// Read the live leaf for EVERY send, not at bind time, so a repair cannot reuse prior output.
+					const sessionCursor = control?.sessionManager?.getLeafId()
 					inFlight = {
 						sessionToken,
 						turnToken,
 						stepName: request.stepName,
+						identity,
 						resolve,
 						cleanup,
 						onUsage: options?.onUsage,
+						recordConversation: (messages) => {
+							conversation = [...conversation, ...messages]
+						},
+						cursorCaptured: sessionCursor !== undefined,
+						sessionCursor: sessionCursor ?? null,
+						terminal: { text: "" },
+						awaitingRetry: false,
+						retryInterrupted: false,
+						cancelled: false,
 						lastReportedTokens: undefined,
 					}
 
+					// PI's retry-backoff Escape path emits no aborted assistant message, and its
+					// auto_retry_end event is not exposed to extensions. Observe the configured interrupt
+					// key between a failed loop and its continuation, leaving normal input handling intact.
+					removeTerminalListener =
+						control?.ui?.onTerminalInput((data) => {
+							if (inFlight?.turnToken !== turnToken || !inFlight.awaitingRetry) return
+							if (getKeybindings().matches(data, "app.interrupt")) inFlight.retryInterrupted = true
+						}) ?? (() => {})
+
 					if (request.signal) {
 						const abortTurn = () => {
-							// Releasing `inFlight` here would let a later workflow turn enter the same PI session
-							// while this one may still be streaming. Ask PI to stop, then let `agent_end` or the
-							// idle watcher below settle and release the turn safely.
+							if (inFlight?.turnToken !== turnToken) return
+							inFlight.cancelled = true
+							// Keep the guard until PI confirms the run has settled or become idle.
 							try {
 								control?.abort()
 							} catch {
@@ -447,16 +519,14 @@ export function createPiAgentBridge(
 									await control.waitForIdle()
 									if (inFlight?.turnToken !== turnToken) return
 
-									// A repair/answer sent from the preceding `agent_end` handler is queued while PI is
-									// technically still finishing that run. Let PI's post-run continuation start before
-									// deciding that this turn became idle without its own `agent_end`.
+									// Give a new run scheduled from the settlement handler one task to start.
 									await new Promise<void>((settle) => setTimeout(settle, 0))
 									if (inFlight?.turnToken !== turnToken) return
 									if (!control.isIdle() || control.hasPendingMessages()) continue
 
 									fail(
 										new Error(
-											`pi-agent bridge: step "${request.stepName}" became idle without emitting agent_end; ` +
+											`pi-agent bridge: step "${request.stepName}" became idle without the run settling; ` +
 												"the PI turn failed before its completion event. PI reports the underlying " +
 												"send_message failure separately through its extension-error output",
 										),
@@ -477,7 +547,7 @@ export function createPiAgentBridge(
 				})
 			},
 			getConversation(): readonly ConversationMessage[] {
-				return lastConversation
+				return conversation
 			},
 			dispose(): void {
 				// Only clear OUR OWN pending turn — never one a differently-identified session left in flight
@@ -562,6 +632,7 @@ function backgroundSession(
 				? writeStepOutputToolSpec(sessionsDir, stepOutputToolsStem(request), {
 						outputSchema: request.outputSchema,
 						asks: request.asks,
+						identity: { runId: request.runId, path: request.path, attempt: request.attempt },
 					})
 				: undefined
 			const env: NodeJS.ProcessEnv = {

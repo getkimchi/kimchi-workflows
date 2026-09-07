@@ -8,9 +8,9 @@ import path from "node:path"
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 import { describe, expect, it, vi } from "vitest"
-import { SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "../src/engine/output-tools.ts"
+import { readSubmittedPayload, SUBMIT_QUESTIONS_TOOL, SUBMIT_RESULT_TOOL } from "../src/engine/output-tools.ts"
 import { createPiAgentBridge, inheritedExtensionArgs } from "../src/host/pi-agent.ts"
-import type { ModelRegistry } from "../src/host/pi-agent-messages.ts"
+import { latestSubmissionAfterCursor, type ModelRegistry } from "../src/host/pi-agent-messages.ts"
 import {
 	readStepOutputToolSpec,
 	registerStepOutputTools,
@@ -18,14 +18,17 @@ import {
 	STEP_OUTPUT_TOOLS_ENV,
 	writeStepOutputToolSpec,
 } from "../src/host/step-output-tools.ts"
+import { fakeSessionManager } from "./fake-session-manager.ts"
 import { assistantLine, fakeSubagentSpawner, scriptedSubagent } from "./fake-subagent.ts"
 import { agentRequest, tempSessionsDir } from "./helpers.ts"
 
 const outputSchema = Type.Object({ grade: Type.String() })
+const identity = { runId: "run-1", path: "grade", attempt: 1 }
+const outputToolSpec = { outputSchema, identity }
 const scratch = () => mkdtempSync(path.join(tmpdir(), "step-output-tools-"))
 
 function fakePi() {
-	const registerTool = vi.fn()
+	const registerTool = vi.fn<(tool: ToolDefinition) => void>()
 	return { pi: { registerTool, on: () => {} } as unknown as ExtensionAPI, registerTool }
 }
 
@@ -34,9 +37,9 @@ function fakePi() {
 describe("the schema handoff a spawned step is given", () => {
 	it("round-trips the step's schema through the file", () => {
 		const dir = scratch()
-		const file = writeStepOutputToolSpec(dir, "step", { outputSchema, asks: true })
+		const file = writeStepOutputToolSpec(dir, "step", { ...outputToolSpec, asks: true })
 
-		expect(readStepOutputToolSpec(file)).toEqual({ outputSchema, asks: true })
+		expect(readStepOutputToolSpec(file)).toEqual({ ...outputToolSpec, asks: true })
 	})
 
 	it("returns undefined rather than throwing on a missing or corrupt handoff", () => {
@@ -49,6 +52,9 @@ describe("the schema handoff a spawned step is given", () => {
 		// A handoff that parses but carries no schema is not a handoff.
 		writeFileSync(corrupt, JSON.stringify({ asks: true }), "utf8")
 		expect(readStepOutputToolSpec(corrupt)).toBeUndefined()
+		// A schema without framework attribution cannot produce a safely correlated submission.
+		writeFileSync(corrupt, JSON.stringify({ outputSchema }), "utf8")
+		expect(readStepOutputToolSpec(corrupt)).toBeUndefined()
 	})
 })
 
@@ -57,36 +63,32 @@ describe("the schema handoff a spawned step is given", () => {
 describe("registration inside a spawned step", () => {
 	it("registers workflow_submit_result typed by the step's own schema", () => {
 		const { pi, registerTool } = fakePi()
-		registerStepOutputTools(pi, { outputSchema })
+		registerStepOutputTools(pi, outputToolSpec)
 
 		expect(registerTool).toHaveBeenCalledTimes(1)
-		const tool = registerTool.mock.calls[0]?.[0] as {
-			name: string
-			parameters: { properties: Record<string, unknown> }
-		}
-		expect(tool.name).toBe(SUBMIT_RESULT_TOOL)
-		expect(tool.parameters.properties.result).toEqual(outputSchema)
+		const tool = registerTool.mock.calls[0]?.[0]
+		expect(tool?.name).toBe(SUBMIT_RESULT_TOOL)
+		expect(tool?.parameters).toEqual(Type.Object({ result: outputSchema }))
 	})
 
 	it("offers workflow_submit_questions only to a step that can block", () => {
 		const asking = fakePi()
-		registerStepOutputTools(asking.pi, { outputSchema, asks: true })
-		expect(asking.registerTool.mock.calls.map((c) => (c[0] as { name: string }).name)).toEqual([
+		registerStepOutputTools(asking.pi, { ...outputToolSpec, asks: true })
+		expect(asking.registerTool.mock.calls.map(([tool]) => tool.name)).toEqual([
 			SUBMIT_RESULT_TOOL,
 			SUBMIT_QUESTIONS_TOOL,
 		])
 
 		const plain = fakePi()
-		registerStepOutputTools(plain.pi, { outputSchema })
-		expect(plain.registerTool.mock.calls.map((c) => (c[0] as { name: string }).name)).toEqual([SUBMIT_RESULT_TOOL])
+		registerStepOutputTools(plain.pi, outputToolSpec)
+		expect(plain.registerTool.mock.calls.map(([tool]) => tool.name)).toEqual([SUBMIT_RESULT_TOOL])
 	})
 
 	it("requests no visible PI rendering for either internal output tool", () => {
 		const { pi, registerTool } = fakePi()
-		registerStepOutputTools(pi, { outputSchema, asks: true })
+		registerStepOutputTools(pi, { ...outputToolSpec, asks: true })
 
-		for (const call of registerTool.mock.calls) {
-			const tool = call[0] as ToolDefinition
+		for (const [tool] of registerTool.mock.calls) {
 			expect(tool.renderShell).toBe("self")
 			const callComponent = tool.renderCall?.({}, {} as never, {} as never)
 			const resultComponent = tool.renderResult?.(
@@ -100,25 +102,61 @@ describe("registration inside a spawned step", () => {
 		}
 	})
 
-	it("terminates PI after either submission without carrying the payload — the transcript does that", async () => {
+	it("terminates PI and persists each attributed submission in tool-result details", async () => {
 		const { pi, registerTool } = fakePi()
-		registerStepOutputTools(pi, { outputSchema, asks: true })
-		const tools = new Map(
-			registerTool.mock.calls.map((call) => {
-				const tool = call[0] as {
-					name: string
-					execute: () => Promise<{ content: unknown[]; terminate?: boolean }>
-				}
-				return [tool.name, tool] as const
-			}),
-		)
+		registerStepOutputTools(pi, { ...outputToolSpec, asks: true })
+		const tools = new Map(registerTool.mock.calls.map(([tool]) => [tool.name, tool]))
 
-		for (const name of [SUBMIT_RESULT_TOOL, SUBMIT_QUESTIONS_TOOL]) {
-			await expect(tools.get(name)?.execute()).resolves.toMatchObject({
-				content: [{ type: "text" }],
-				terminate: true,
-			})
-		}
+		const result = { result: { grade: "A" } }
+		await expect(
+			tools.get(SUBMIT_RESULT_TOOL)?.execute("result-call", result, undefined, undefined, {} as never),
+		).resolves.toMatchObject({
+			content: [{ type: "text" }],
+			details: { type: "kimchi-workflow-step-submission", kind: "result", ...identity, payload: result },
+			terminate: true,
+		})
+
+		const questions = { questions: [{ key: "scope", header: "Scope", question: "Which scope?", kind: "text" }] }
+		await expect(
+			tools.get(SUBMIT_QUESTIONS_TOOL)?.execute("questions-call", questions, undefined, undefined, {} as never),
+		).resolves.toMatchObject({
+			content: [{ type: "text" }],
+			details: { type: "kimchi-workflow-step-submission", kind: "questions", ...identity, payload: questions },
+			terminate: true,
+		})
+	})
+
+	it.each([
+		{
+			toolName: SUBMIT_RESULT_TOOL,
+			args: { result: { grade: "A" } },
+			decoded: { kind: "result", value: { grade: "A" } },
+		},
+		{
+			toolName: SUBMIT_QUESTIONS_TOOL,
+			args: { questions: [{ key: "scope", header: "Scope", question: "Which scope?", kind: "text" }] },
+			decoded: {
+				kind: "questions",
+				value: { questions: [{ key: "scope", header: "Scope", question: "Which scope?", kind: "text" }] },
+			},
+		},
+	])("round-trips $toolName through persisted details into the engine payload", async ({ toolName, args, decoded }) => {
+		const { pi, registerTool } = fakePi()
+		registerStepOutputTools(pi, { ...outputToolSpec, asks: true })
+		const tool = registerTool.mock.calls.map(([tool]) => tool).find((tool) => tool.name === toolName)
+		if (!tool) throw new Error(`test bug: ${toolName} was not registered`)
+		const manager = fakeSessionManager()
+		const cursor = manager.getLeafId()
+		const result = await tool.execute("call-1", args, undefined, undefined, {} as never)
+		// PI persists the handler's result, not the assistant's proposed call. Exercise the JSON
+		// boundary too, so recovery cannot accidentally rely on shared object references.
+		manager.appendMessage(
+			JSON.parse(JSON.stringify({ role: "toolResult", toolCallId: "call-1", toolName, ...result, isError: false })),
+		)
+		const submitted = latestSubmissionAfterCursor(manager.getBranch(), cursor, identity)
+
+		expect(submitted).toEqual({ tool: toolName, arguments: args })
+		expect(readSubmittedPayload(submitted)).toEqual(decoded)
 	})
 
 	it("registers nothing in an ordinary session, which is not a step", () => {
@@ -143,14 +181,14 @@ describe("registration inside a spawned step", () => {
 
 	it("registers from the environment when this process IS a spawned step", () => {
 		const { pi, registerTool } = fakePi()
-		const file = writeStepOutputToolSpec(scratch(), "step", { outputSchema })
+		const file = writeStepOutputToolSpec(scratch(), "step", outputToolSpec)
 
 		expect(registerStepOutputToolsFromEnv(pi, { [STEP_OUTPUT_TOOLS_ENV]: file })).toBe(true)
 		expect(registerTool).toHaveBeenCalledTimes(1)
 	})
 
 	it("consumes the handoff, so a process the step itself launches does not inherit it", () => {
-		const file = writeStepOutputToolSpec(scratch(), "step", { outputSchema })
+		const file = writeStepOutputToolSpec(scratch(), "step", outputToolSpec)
 		const env = { [STEP_OUTPUT_TOOLS_ENV]: file }
 
 		expect(registerStepOutputToolsFromEnv(fakePi().pi, env)).toBe(true)
@@ -212,7 +250,11 @@ describe("the background bridge hands the contract to the child", () => {
 		const startAgent = createPiAgentBridge(noopPi, fixedResolver, spawn)(registry, sessionsDir)
 		await startAgent(agentRequest({ stepName: "bg", background: true, outputSchema, asks: true })).sendAndAwaitEnd("go")
 
-		expect(seen).toEqual({ outputSchema, asks: true })
+		expect(seen).toEqual({
+			outputSchema,
+			asks: true,
+			identity: { runId: "workflow-test-1a2b3c4d", path: "bg", attempt: 1 },
+		})
 		expect(calls[0]?.env?.[STEP_OUTPUT_TOOLS_ENV]).toBeTruthy()
 	})
 

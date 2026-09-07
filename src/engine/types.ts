@@ -380,7 +380,7 @@ export interface AgentTurn {
  * step's schema and sums against `maxTokens`). All network and PI coupling lives behind this seam.
  */
 export interface AgentSession {
-	/** Send `message`, observe confirmed cumulative usage when available, and resolve at `agent_end`. */
+	/** Send `message`, observe confirmed cumulative usage, and resolve once the run settles. */
 	sendAndAwaitEnd(message: string, options?: AgentTurnOptions): Promise<AgentTurn>
 	/** The full conversation after the last turn — captured when a Q&A step blocks, to resume it (spec §8.4). */
 	getConversation(): readonly ConversationMessage[]
