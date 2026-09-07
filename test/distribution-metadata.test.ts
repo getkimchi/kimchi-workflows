@@ -36,6 +36,7 @@ describe("distribution metadata", () => {
 
 		await exec("bun", ["build", entryPath, "--compile", `--outfile=${executablePath}`], {
 			cwd: fixture.root,
+			env: { ...process.env, NODE_PATH: path.join(repoRoot, "node_modules") },
 			timeout: 30_000,
 		})
 		await Promise.all([

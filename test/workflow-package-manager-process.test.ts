@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process"
 import { existsSync } from "node:fs"
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
@@ -99,7 +99,7 @@ console.log(manifest.packageManager?.replace("pnpm@", "") ?? "10.33.0");
 			expect(JSON.parse(stdout)).toEqual({ command: launcher, args })
 			const probe = JSON.parse(await readFile(log, "utf8")) as { cwd: string; directory: string; args: string[] }
 			expect(probe.args).toEqual([...args, "--version", "--dir", probe.directory])
-			expect(probe.cwd).toBe(application)
+			expect(probe.cwd).toBe(await realpath(application))
 			expect(probe.directory).not.toBe(application)
 			expect(existsSync(probe.directory)).toBe(false)
 		},
