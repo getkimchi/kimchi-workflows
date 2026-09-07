@@ -21,6 +21,7 @@ import type { RunStore } from "../types.ts"
 import { resolveWorkflow } from "../workflow-catalog.ts"
 import { handleAttendedInput, humanInputOf } from "./attended.ts"
 import { type CommandCtx, describe, reportResult, runTracked, type StartAgent } from "./context.ts"
+import { preflightCreateWorkflow } from "./create-preflight.ts"
 
 /** A parsed `/workflow run` argument line (spec §6.1): the target, plus `--input`'s raw, unparsed payload. */
 export interface ParsedRunArgs {
@@ -176,6 +177,7 @@ export async function handleCreate(
 	startAgent: StartAgent,
 	progressFor: ProgressFor = noProgressFor,
 ): Promise<void> {
+	if (!(await preflightCreateWorkflow(ctx))) return
 	// The built-in ships with the extension, so it is imported directly and recorded by registry ID.
 	// `workflowsDir` rides the initial input: the built-in cannot derive it itself (createInputSchema).
 	const input = { projectRoot: ctx.cwd, workflowsDir: workflowsDir(ctx.cwd) }

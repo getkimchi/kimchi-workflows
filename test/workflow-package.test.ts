@@ -42,12 +42,37 @@ function successfulInstaller(): WorkflowPackageInstaller {
 }
 
 describe("workflow package preparation", () => {
+	it.each([
+		{ command: "corepack", args: ["pnpm@10.33.0"] },
+		{ command: "npm", args: ["exec", "--yes", "--package=pnpm@10.33.0", "--", "pnpm"] },
+	])("retains the $command verification launcher when installation is skipped", async (packageManager) => {
+		const directory = await temporaryWorkflowDirectory()
+		const install = successfulInstaller()
+		const resolvePackageManager = vi.fn(async () => packageManager)
+
+		const prepared = await prepareWorkflowPackage({
+			directory,
+			install,
+			resolvePackageManager,
+		})
+		const unchanged = await prepareWorkflowPackage({ directory, resolvePackageManager })
+
+		expect(install).toHaveBeenCalledWith(path.resolve(directory), undefined)
+		expect(install).toHaveBeenCalledTimes(1)
+		expect(prepared.verifyCommand).toBe(
+			`${[packageManager.command, ...packageManager.args].join(" ")} run verify:workflow -- --entry "<workflow.ts>" --test "<workflow.test.ts>"`,
+		)
+		expect(unchanged.installed).toBe(false)
+		expect(unchanged.verifyCommand).toBe(prepared.verifyCommand)
+		expect(resolvePackageManager).toHaveBeenCalledTimes(2)
+	})
+
 	it("creates one private package with a reproducible verifier and lockfile", async () => {
 		const directory = await temporaryWorkflowDirectory()
 		const install = successfulInstaller()
-		const checkPrerequisites = vi.fn(async () => {})
+		const resolvePackageManager = vi.fn(async () => ({ command: "pnpm", args: [] }))
 
-		const prepared = await prepareWorkflowPackage({ directory, install, checkPrerequisites })
+		const prepared = await prepareWorkflowPackage({ directory, install, resolvePackageManager })
 		const manifest = JSON.parse(await readFile(prepared.manifestPath, "utf8")) as {
 			private: boolean
 			packageManager: string
@@ -70,10 +95,13 @@ describe("workflow package preparation", () => {
 		})
 		expect(install).toHaveBeenCalledTimes(1)
 
-		const unchanged = await prepareWorkflowPackage({ directory, install, checkPrerequisites })
+		const unchanged = await prepareWorkflowPackage({ directory, install, resolvePackageManager })
 		expect(unchanged.installed).toBe(false)
 		expect(install).toHaveBeenCalledTimes(1)
-		expect(checkPrerequisites).toHaveBeenCalledTimes(1)
+		expect(resolvePackageManager).toHaveBeenCalledTimes(2)
+		expect(unchanged.verifyCommand).toBe(
+			'pnpm run verify:workflow -- --entry "<workflow.ts>" --test "<workflow.test.ts>"',
+		)
 	})
 
 	it("preserves user dependencies and scripts while restoring the managed verification contract", async () => {
@@ -197,14 +225,14 @@ describe("workflow package preparation", () => {
 		)
 	})
 
-	it("rejects failed prerequisites before touching the project package", async () => {
+	it("rejects package-manager resolution before touching the project package", async () => {
 		const directory = await temporaryWorkflowDirectory()
-		const checkPrerequisites = vi.fn(async () => {
+		const resolvePackageManager = vi.fn(async () => {
 			throw new Error("workflow packages require external Node.js 22.19+")
 		})
 
 		await expect(
-			prepareWorkflowPackage({ directory, install: successfulInstaller(), checkPrerequisites }),
+			prepareWorkflowPackage({ directory, install: successfulInstaller(), resolvePackageManager }),
 		).rejects.toEqual(
 			expect.objectContaining<Partial<WorkflowPackagePreparationError>>({
 				name: "WorkflowPackagePreparationError",

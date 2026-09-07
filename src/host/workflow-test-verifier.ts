@@ -1,9 +1,12 @@
-import { spawn } from "node:child_process"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { isWorkflowVerificationResult, type WorkflowVerificationSuccess } from "../verification/protocol.ts"
-import { checkWorkflowPrerequisites } from "./workflow-prerequisites.ts"
+import {
+	resolveWorkflowPackageManager,
+	runWorkflowPackageManager,
+	type WorkflowPackageManagerCommand,
+} from "./workflow-package-manager.ts"
 
 const OUTPUT_LIMIT = 64 * 1024
 const VERIFICATION_TIMEOUT_MS = 90_000
@@ -37,12 +40,13 @@ export async function verifyWorkflowTest(options: {
 	readonly testPath: string
 	readonly packageRoot: string
 	readonly signal?: AbortSignal
-	/** Test seam; production probes the external Node and pnpm commands. */
-	readonly checkPrerequisites?: (signal: AbortSignal | undefined) => Promise<void>
+	/** Test seam; production resolves the pinned pnpm launcher. */
+	readonly resolvePackageManager?: (signal: AbortSignal | undefined) => Promise<WorkflowPackageManagerCommand>
 }): Promise<WorkflowVerificationSuccess> {
 	const packageRoot = path.resolve(options.packageRoot)
+	let packageManager: WorkflowPackageManagerCommand
 	try {
-		await (options.checkPrerequisites ?? checkWorkflowPrerequisites)(options.signal)
+		packageManager = await (options.resolvePackageManager ?? resolveWorkflowPackageManager)(options.signal)
 	} catch (error) {
 		throw new WorkflowTestInfrastructureError(describe(error))
 	}
@@ -50,6 +54,7 @@ export async function verifyWorkflowTest(options: {
 	const resultPath = path.join(resultDirectory, "result.json")
 	try {
 		const command = await runCommand(
+			packageManager,
 			[
 				"--dir",
 				packageRoot,
@@ -101,88 +106,32 @@ export async function verifyWorkflowTest(options: {
 	}
 }
 
-function runCommand(args: readonly string[], cwd: string, signal: AbortSignal | undefined): Promise<CommandResult> {
-	return new Promise((resolve, reject) => {
-		if (signal?.aborted) {
-			reject(abortReason(signal))
-			return
-		}
-		const ownsProcessGroup = process.platform !== "win32"
-		const child = spawn("pnpm", [...args], {
+async function runCommand(
+	packageManager: WorkflowPackageManagerCommand,
+	args: readonly string[],
+	cwd: string,
+	signal: AbortSignal | undefined,
+): Promise<CommandResult> {
+	try {
+		return await runWorkflowPackageManager(packageManager, args, {
 			cwd,
-			detached: ownsProcessGroup,
-			shell: false,
-			stdio: ["ignore", "pipe", "pipe"],
-			env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+			signal,
+			timeoutMs: VERIFICATION_TIMEOUT_MS,
+			timeoutError: () =>
+				new WorkflowTestInfrastructureError(`workflow verification exceeded ${VERIFICATION_TIMEOUT_MS}ms`),
+			abortError: () => new WorkflowTestInfrastructureError("workflow verification aborted"),
+			outputLimit: OUTPUT_LIMIT,
 		})
-		let stdout = ""
-		let stderr = ""
-		let settled = false
-		let terminationError: Error | undefined
-		let forceKill: ReturnType<typeof setTimeout> | undefined
-		const timeout = setTimeout(() => {
-			terminate(new WorkflowTestInfrastructureError(`workflow verification exceeded ${VERIFICATION_TIMEOUT_MS}ms`))
-		}, VERIFICATION_TIMEOUT_MS)
-		const onAbort = () => terminate(abortReason(signal))
-		signal?.addEventListener("abort", onAbort, { once: true })
-
-		child.stdout.on("data", (chunk: Buffer) => {
-			stdout = appendBounded(stdout, chunk.toString())
-		})
-		child.stderr.on("data", (chunk: Buffer) => {
-			stderr = appendBounded(stderr, chunk.toString())
-		})
-		child.once("error", (error) => finish(terminationError ?? error))
-		child.once("close", (code) => {
-			if (terminationError) finish(terminationError)
-			else finish(undefined, { code: code ?? 1, stdout, stderr })
-		})
-
-		function terminate(error: Error): void {
-			if (settled || terminationError) return
-			terminationError = error
-			killChild("SIGTERM")
-			forceKill = setTimeout(() => killChild("SIGKILL"), 1_000)
-		}
-
-		function killChild(signalName: NodeJS.Signals): void {
-			try {
-				if (ownsProcessGroup && child.pid) process.kill(-child.pid, signalName)
-				else child.kill(signalName)
-			} catch {
-				// The process may have exited between the close check and signal delivery.
-			}
-		}
-
-		function finish(error?: Error, result?: CommandResult): void {
-			if (settled) return
-			settled = true
-			clearTimeout(timeout)
-			if (forceKill) clearTimeout(forceKill)
-			signal?.removeEventListener("abort", onAbort)
-			if (error) {
-				reject(
-					error instanceof WorkflowTestInfrastructureError
-						? error
-						: new WorkflowTestInfrastructureError(`could not start workflow verifier: ${describe(error)}`),
-				)
-			} else if (result) resolve(result)
-			else reject(new WorkflowTestInfrastructureError("workflow verifier ended without a process result"))
-		}
-	})
+	} catch (error) {
+		throw error instanceof WorkflowTestInfrastructureError
+			? error
+			: new WorkflowTestInfrastructureError(`could not start workflow verifier: ${describe(error)}`)
+	}
 }
 
 function commandDiagnostic(command: CommandResult): string {
 	const diagnostic = [command.stderr.trim(), command.stdout.trim()].filter(Boolean).join("\n")
 	return diagnostic ? `\n${diagnostic}` : ""
-}
-
-function appendBounded(current: string, addition: string): string {
-	return (current + addition).slice(-OUTPUT_LIMIT)
-}
-
-function abortReason(signal: AbortSignal | undefined): Error {
-	return signal?.reason instanceof Error ? signal.reason : new Error("workflow test verification aborted")
 }
 
 function describe(error: unknown): string {

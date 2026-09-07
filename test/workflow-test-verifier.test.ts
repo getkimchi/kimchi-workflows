@@ -226,7 +226,7 @@ describe("workflow package verification", () => {
 				entryPath: project.entryPath,
 				testPath: project.testPath,
 				packageRoot: project.root,
-				checkPrerequisites: async () => {
+				resolvePackageManager: async () => {
 					throw new Error("pnpm is required. Install it with: npm install --global pnpm@10.33.0")
 				},
 			}),

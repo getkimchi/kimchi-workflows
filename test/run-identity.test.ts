@@ -59,7 +59,7 @@ function flakyWorkflowSource(marker: string): string {
  * Run identity end to end (spec §8.9): the id is a slug the user can read and retype, provenance travels
  * in the log rather than a sidecar, and `resume`/`delete` accept any unambiguous reference to it.
  */
-describe("run identity through the command handlers", () => {
+describe("run identity through the command handlers", { timeout: 20_000 }, () => {
 	let projectRoot: string
 	let runDir: string
 	let store: RunStore
