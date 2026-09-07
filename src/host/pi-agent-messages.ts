@@ -67,7 +67,7 @@ export function latestSubmissionAfterCursor(
 	for (let index = branch.length - 1; index >= start; index--) {
 		const entry = branch[index]
 		if (entry?.type !== "message") continue
-		const message = entry.message as { role?: unknown; isError?: unknown; details?: unknown }
+		const message = entry.message
 		if (message.role !== "toolResult" || message.isError === true) continue
 		const details = readSubmissionDetails(message.details)
 		if (!details || !isSubmissionForIdentity(details, identity)) continue

@@ -1,4 +1,4 @@
-import type { AgentEndEvent, ExtensionAPI, TerminalInputHandler } from "@earendil-works/pi-coding-agent"
+import type { AgentEndEvent, ExtensionAPI, TerminalInputHandler, ToolDefinition } from "@earendil-works/pi-coding-agent"
 import { getKeybindings, KeybindingsManager, setKeybindings } from "@earendil-works/pi-tui"
 import { Type } from "typebox"
 import { describe, expect, it, vi } from "vitest"
@@ -34,16 +34,7 @@ type SentMessage = {
 	options: SendMessageArgs[1]
 }
 type UserMessage = Parameters<ExtensionAPI["sendUserMessage"]>[0]
-type TestTool = {
-	name: string
-	execute: (
-		toolCallId: string,
-		params: never,
-		signal: undefined,
-		onUpdate: undefined,
-		ctx: never,
-	) => Promise<{ content: unknown; details?: unknown }>
-}
+type TestTool = Pick<ToolDefinition, "name" | "execute">
 
 function fakePi(scriptedTurns: readonly unknown[] = []): {
 	pi: ExtensionAPI
@@ -98,20 +89,15 @@ function fakePi(scriptedTurns: readonly unknown[] = []): {
 				if (!part || typeof part !== "object") continue
 				const call = part as { type?: unknown; id?: unknown; name?: unknown; arguments?: unknown }
 				if (call.type !== "toolCall" || typeof call.id !== "string" || typeof call.name !== "string") continue
-				const tool = toolDefinitions.get(call.name)
+				const { id, name, arguments: args } = call
+				const tool = toolDefinitions.get(name)
 				if (!tool) continue
 				pendingToolResults = pendingToolResults.then(async () => {
-					const result = await tool.execute(
-						call.id as string,
-						call.arguments as never,
-						undefined,
-						undefined,
-						eventContext as never,
-					)
+					const result = await tool.execute(id, args, undefined, undefined, eventContext as never)
 					appendMessage({
 						role: "toolResult",
-						toolCallId: call.id,
-						toolName: call.name,
+						toolCallId: id,
+						toolName: name,
 						content: result.content,
 						details: result.details,
 						isError: false,

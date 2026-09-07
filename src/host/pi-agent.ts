@@ -85,8 +85,9 @@
  */
 import { existsSync, mkdirSync } from "node:fs"
 import path from "node:path"
-import type { ContextEvent, ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
 import { getKeybindings } from "@earendil-works/pi-tui"
+import type { StepSubmissionIdentity } from "../engine/output-tools.ts"
 import type { AgentRequest, AgentSession, AgentTurn, AgentTurnOptions, ConversationMessage } from "../engine/types.ts"
 import { resumeSessionFile, stepSessionName, traceSessionFile } from "./naming.ts"
 import {
@@ -271,7 +272,7 @@ export function createPiAgentBridge(
 				readonly sessionToken: object
 				readonly turnToken: object
 				readonly stepName: string
-				readonly identity: { readonly runId: string; readonly path: string; readonly attempt: number }
+				readonly identity: StepSubmissionIdentity
 				readonly resolve: (turn: AgentTurn) => void
 				readonly cleanup: () => void
 				readonly onUsage: AgentTurnOptions["onUsage"]
@@ -295,7 +296,7 @@ export function createPiAgentBridge(
 	pi.on("message_update", (event) => {
 		const turn = inFlight
 		if (!turn?.onUsage) return
-		const usage = lastAssistantUsage([event.message] as AgentMessages)
+		const usage = lastAssistantUsage([event.message])
 		if (!usage || usage.totalTokens <= 0 || usage.totalTokens === turn.lastReportedTokens) return
 		turn.lastReportedTokens = usage.totalTokens
 		try {
@@ -354,9 +355,9 @@ export function createPiAgentBridge(
 		})
 	})
 
-	pi.on("context", (event: ContextEvent) => {
+	pi.on("context", (event) => {
 		if (!activeHistory) return // the common case: no resumed session is currently in flight
-		const seeded = seedHistory(activeHistory.history, event.messages as AgentMessages)
+		const seeded = seedHistory(activeHistory.history, event.messages)
 		return seeded ? { messages: seeded } : undefined
 	})
 

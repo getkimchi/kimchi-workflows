@@ -28,7 +28,7 @@ const outputToolSpec = { outputSchema, identity }
 const scratch = () => mkdtempSync(path.join(tmpdir(), "step-output-tools-"))
 
 function fakePi() {
-	const registerTool = vi.fn()
+	const registerTool = vi.fn<(tool: ToolDefinition) => void>()
 	return { pi: { registerTool, on: () => {} } as unknown as ExtensionAPI, registerTool }
 }
 
@@ -66,33 +66,29 @@ describe("registration inside a spawned step", () => {
 		registerStepOutputTools(pi, outputToolSpec)
 
 		expect(registerTool).toHaveBeenCalledTimes(1)
-		const tool = registerTool.mock.calls[0]?.[0] as {
-			name: string
-			parameters: { properties: Record<string, unknown> }
-		}
-		expect(tool.name).toBe(SUBMIT_RESULT_TOOL)
-		expect(tool.parameters.properties.result).toEqual(outputSchema)
+		const tool = registerTool.mock.calls[0]?.[0]
+		expect(tool?.name).toBe(SUBMIT_RESULT_TOOL)
+		expect(tool?.parameters).toEqual(Type.Object({ result: outputSchema }))
 	})
 
 	it("offers workflow_submit_questions only to a step that can block", () => {
 		const asking = fakePi()
 		registerStepOutputTools(asking.pi, { ...outputToolSpec, asks: true })
-		expect(asking.registerTool.mock.calls.map((c) => (c[0] as { name: string }).name)).toEqual([
+		expect(asking.registerTool.mock.calls.map(([tool]) => tool.name)).toEqual([
 			SUBMIT_RESULT_TOOL,
 			SUBMIT_QUESTIONS_TOOL,
 		])
 
 		const plain = fakePi()
 		registerStepOutputTools(plain.pi, outputToolSpec)
-		expect(plain.registerTool.mock.calls.map((c) => (c[0] as { name: string }).name)).toEqual([SUBMIT_RESULT_TOOL])
+		expect(plain.registerTool.mock.calls.map(([tool]) => tool.name)).toEqual([SUBMIT_RESULT_TOOL])
 	})
 
 	it("requests no visible PI rendering for either internal output tool", () => {
 		const { pi, registerTool } = fakePi()
 		registerStepOutputTools(pi, { ...outputToolSpec, asks: true })
 
-		for (const call of registerTool.mock.calls) {
-			const tool = call[0] as ToolDefinition
+		for (const [tool] of registerTool.mock.calls) {
 			expect(tool.renderShell).toBe("self")
 			const callComponent = tool.renderCall?.({}, {} as never, {} as never)
 			const resultComponent = tool.renderResult?.(
@@ -109,28 +105,21 @@ describe("registration inside a spawned step", () => {
 	it("terminates PI and persists each attributed submission in tool-result details", async () => {
 		const { pi, registerTool } = fakePi()
 		registerStepOutputTools(pi, { ...outputToolSpec, asks: true })
-		const tools = new Map(
-			registerTool.mock.calls.map((call) => {
-				const tool = call[0] as {
-					name: string
-					execute: (
-						toolCallId: string,
-						params: unknown,
-					) => Promise<{ content: unknown[]; details: unknown; terminate?: boolean }>
-				}
-				return [tool.name, tool] as const
-			}),
-		)
+		const tools = new Map(registerTool.mock.calls.map(([tool]) => [tool.name, tool]))
 
 		const result = { result: { grade: "A" } }
-		await expect(tools.get(SUBMIT_RESULT_TOOL)?.execute("result-call", result)).resolves.toMatchObject({
+		await expect(
+			tools.get(SUBMIT_RESULT_TOOL)?.execute("result-call", result, undefined, undefined, {} as never),
+		).resolves.toMatchObject({
 			content: [{ type: "text" }],
 			details: { type: "kimchi-workflow-step-submission", kind: "result", ...identity, payload: result },
 			terminate: true,
 		})
 
 		const questions = { questions: [{ key: "scope", header: "Scope", question: "Which scope?", kind: "text" }] }
-		await expect(tools.get(SUBMIT_QUESTIONS_TOOL)?.execute("questions-call", questions)).resolves.toMatchObject({
+		await expect(
+			tools.get(SUBMIT_QUESTIONS_TOOL)?.execute("questions-call", questions, undefined, undefined, {} as never),
+		).resolves.toMatchObject({
 			content: [{ type: "text" }],
 			details: { type: "kimchi-workflow-step-submission", kind: "questions", ...identity, payload: questions },
 			terminate: true,
@@ -154,7 +143,7 @@ describe("registration inside a spawned step", () => {
 	])("round-trips $toolName through persisted details into the engine payload", async ({ toolName, args, decoded }) => {
 		const { pi, registerTool } = fakePi()
 		registerStepOutputTools(pi, { ...outputToolSpec, asks: true })
-		const tool = registerTool.mock.calls.map(([tool]) => tool as ToolDefinition).find((tool) => tool.name === toolName)
+		const tool = registerTool.mock.calls.map(([tool]) => tool).find((tool) => tool.name === toolName)
 		if (!tool) throw new Error(`test bug: ${toolName} was not registered`)
 		const manager = fakeSessionManager()
 		const cursor = manager.getLeafId()
