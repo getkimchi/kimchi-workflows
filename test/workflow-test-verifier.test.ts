@@ -132,7 +132,9 @@ it("runs outside the central workflow package", async () => {
 	return { root, packageRoot, entryPath, testPath }
 }
 
-describe("workflow package verification", () => {
+// These tests probe pnpm and spawn TypeScript plus a nested Vitest run. Allow cold CI startup
+// without raising the default timeout for ordinary unit tests or changing production deadlines.
+describe("workflow package verification", { timeout: 20_000 }, () => {
 	it("runs one focused test with package-owned dependencies", async () => {
 		const project = await projectWithTest('expect(run.output).toBe("hello")')
 		await writeFile(
