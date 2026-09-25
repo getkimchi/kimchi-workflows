@@ -7,6 +7,7 @@ import fanOutWorkflow from "./fan-out.workflow.ts"
 import foreachConcurrentWorkflow from "./foreach-concurrent.workflow.ts"
 import helloWorkflow from "./hello.workflow.ts"
 import bugInvestigationWorkflow from "./kimchi-bug-investigation.workflow.ts"
+import localCodeReviewWorkflow, { renderLocalReview } from "./local-code-review.workflow.ts"
 import pipelineWorkflow from "./pipeline.workflow.ts"
 import planningWorkflow from "./planning.workflow.ts"
 import reviewLoopWorkflow from "./review-loop.workflow.ts"
@@ -178,6 +179,73 @@ describe("example workflows (offline)", () => {
 		expect(run.status).toBe("completed")
 		expect(run.stepOutput("render-report")).toMatchObject({ markdown: expect.stringContaining("**Verdict:** Approve") })
 		expect(run.stepOutput("save-report")).toEqual({ markdown: "# Code review", reportPath })
+	})
+
+	it("local-code-review: reviews the current changes without asking for an MR", async () => {
+		const changes = {
+			repositoryRoot: "/repo",
+			branch: "feature",
+			baseRef: "origin/master",
+			mergeBase: "1111111111111111111111111111111111111111",
+			head: "2222222222222222222222222222222222222222",
+			diff: "### main.go (modified)\n```diff\n@@ -1 +1 @@\n-old\n+new\n```",
+			changedFiles: 1,
+			untrackedFiles: 0,
+			truncated: false,
+		}
+		const result = {
+			estimated_effort_to_review: 2,
+			score: 85,
+			relevant_tests: { present: "yes", details: "Focused tests cover the changed behavior." },
+			security_concerns: { found: "no", details: "No security concerns found." },
+			key_issues: [
+				{
+					type: "bug",
+					severity: "warning" as const,
+					file: "main.go",
+					line_start: 1,
+					line_end: 1,
+					description: "`main` returns the old value.",
+					suggestion: "Return the new value from `main`.",
+				},
+			],
+		}
+		const done = await createTestRun(localCodeReviewWorkflow, {
+			steps: { "collect-changes": () => changes },
+			agents: {
+				"review-changes": [reply(result)],
+				"present-report": [raw("Review presented")],
+			},
+		})
+		expect(done.status).toBe("completed")
+		expect(done.stepOutput("render-report")).toMatchObject({
+			markdown: expect.stringContaining("⚠️ Bug — main.go:1"),
+		})
+	})
+
+	it("local-code-review: discloses a truncated diff", () => {
+		const report = renderLocalReview(
+			{
+				estimated_effort_to_review: 1,
+				score: 90,
+				relevant_tests: { present: "no", details: "No tests changed." },
+				security_concerns: { found: "no", details: "No security concerns found." },
+				key_issues: [],
+			},
+			{
+				repositoryRoot: "/repo",
+				branch: "feature",
+				baseRef: "origin/main",
+				mergeBase: "1111111111111111111111111111111111111111",
+				head: "2222222222222222222222222222222222222222",
+				diff: "partial diff",
+				changedFiles: 2,
+				untrackedFiles: 1,
+				truncated: true,
+			},
+		)
+		expect(report).toContain("including 1 untracked files")
+		expect(report).toContain("Diff truncated at 100000 characters")
 	})
 
 	it("kimchi-bug-investigation: completes with agent and write steps stubbed", async () => {

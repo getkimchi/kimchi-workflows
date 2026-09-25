@@ -349,16 +349,12 @@ function stringValue(value: unknown): string | undefined {
  * names the Kimchi CLI itself; passing `--project` to it fails before TypeScript ever sees the candidate.
  */
 function typeScriptCompiler(packageManifest: string): string {
-	// npm commonly hoists optional platform packages, while pnpm links them beside TypeScript in its
-	// content-addressed store. Resolving from the real package location lets Node support both layouts.
-	const packageRequire = createRequire(realpathSync(packageManifest))
+	// npm hoists this optional package and pnpm links it beside the real TypeScript package.
+	// Resolve the file path directly: Bun's compiled executable cannot reliably use createRequire here.
 	const nativePackage = `@typescript/typescript-${process.platform}-${process.arch}`
-	let nativeManifest: string
-	try {
-		nativeManifest = packageRequire.resolve(`${nativePackage}/package.json`)
-	} catch {
-		throw new Error(`TypeScript compiler package ${nativePackage} is unavailable`)
-	}
+	const nodeModules = path.dirname(path.dirname(realpathSync(packageManifest)))
+	const nativeManifest = path.join(nodeModules, ...nativePackage.split("/"), "package.json")
+	if (!existsSync(nativeManifest)) throw new Error(`TypeScript compiler package ${nativePackage} is unavailable`)
 	const executable = path.join(path.dirname(nativeManifest), "lib", process.platform === "win32" ? "tsc.exe" : "tsc")
 	if (!existsSync(executable)) throw new Error(`TypeScript compiler executable is unavailable at ${executable}`)
 	return executable

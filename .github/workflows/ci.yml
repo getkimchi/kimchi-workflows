@@ -75,6 +75,11 @@ jobs:
           go-version-file: kimchi/tools/proxy-helper/go.mod
           cache-dependency-path: kimchi/tools/proxy-helper/go.sum
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          version: '1.4.0'
+
       - name: Install kimchi-workflows dependencies
         working-directory: kimchi-workflows
         run: pnpm install --frozen-lockfile
@@ -82,11 +87,6 @@ jobs:
       - name: Install Kimchi dependencies
         working-directory: kimchi
         run: pnpm install --frozen-lockfile
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          version: '1.4.0'
 
       - name: Build Kimchi proxy helper
         working-directory: kimchi
