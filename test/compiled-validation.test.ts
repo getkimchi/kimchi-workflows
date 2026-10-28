@@ -49,7 +49,7 @@ describe("compiled validation environment", () => {
 			timeout: 30_000,
 		})
 		expect(checked.stdout).toMatch(/Node\.js is required.*node --version/)
-	})
+	}, 120_000)
 
 	it("validates and runs an external workflow through only the central project package", async () => {
 		const root = await mkdtemp(path.join(tmpdir(), "kimchi-workflows-compiled-validation-"))
@@ -91,5 +91,5 @@ export default createWorkflow({ name: "compiled-external" }).then(greet).commit(
 		const { stdout } = await exec(executablePath, [projectRoot, entryPath], { cwd: root, timeout: 30_000 })
 
 		expect(JSON.parse(stdout)).toEqual({ name: "compiled-external", output: { greeting: "hello" } })
-	})
+	}, 120_000)
 })

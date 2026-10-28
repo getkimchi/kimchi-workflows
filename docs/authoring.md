@@ -3,6 +3,13 @@
 Workflows are ordinary TypeScript modules that default-export a committed `WorkflowDefinition`. Put project
 workflows in `.kimchi/workflows/*.workflow.ts`, or pass a workflow file directly to `/workflow run`.
 
+Workflows can also live once for every project in the harness's user-level workflows directory — `~/.pi/agent/workflows/`
+under PI, `~/.config/kimchi/harness/agent/workflows/` under Kimchi. `/workflow list` and completion merge both
+layers (global rows are marked `(global)`), and a project file of the same filename shadows the global one.
+Global files type-check against the project's prepared workflows package, so bare imports (`typebox`,
+`@kimchi-dev/kimchi-workflows`) need that package prepared in the project they run from (`/workflow create` does
+it); relative imports stay inside the global directory.
+
 The filename without `.workflow.ts` is the installed identity used by completion, commands, run IDs, progress,
 and `ctx.workflowName`. The definition's `name` remains required for composition, nested workflows, diagnostics,
 and direct in-memory execution; when the file is loaded as a top-level installed workflow, the host binds the

@@ -31,10 +31,10 @@ interface PickerItem {
 export async function pickWorkflowInTui(
 	ctx: PickerCtx,
 	entries: readonly WorkflowEntry[],
-	directory: string,
+	locations: string,
 ): Promise<WorkflowWelcomeAction> {
 	return ctx.ui.custom<WorkflowWelcomeAction>((tui, theme, _keybindings, done) =>
-		createWorkflowPicker(tui, theme, entries, directory, done),
+		createWorkflowPicker(tui, theme, entries, locations, done),
 	)
 }
 
@@ -43,7 +43,7 @@ export function createWorkflowPicker(
 	tui: TUI,
 	theme: Theme,
 	entries: readonly WorkflowEntry[],
-	directory: string,
+	locations: string,
 	done: (selection: WorkflowWelcomeAction) => void,
 ): Component {
 	const items = pickerItems(entries)
@@ -63,7 +63,7 @@ export function createWorkflowPicker(
 
 	return {
 		render: (width) =>
-			renderPicker(theme, items, selectedIndex, directory, entries.length === 0, width, tui.terminal.rows),
+			renderPicker(theme, items, selectedIndex, locations, entries.length === 0, width, tui.terminal.rows),
 		invalidate: () => {},
 		handleInput: (data) => {
 			try {
@@ -106,7 +106,7 @@ function renderPicker(
 	theme: Theme,
 	items: readonly PickerItem[],
 	selectedIndex: number,
-	directory: string,
+	locations: string,
 	empty: boolean,
 	width: number,
 	terminalRows: number,
@@ -116,7 +116,7 @@ function renderPicker(
 	const add = (text: string) => lines.push(...wrapTextWithAnsi(text, renderWidth))
 
 	add(theme.fg("success", theme.bold("~ Kimchi Workflows ~")))
-	add(theme.fg("muted", `Run structured long running tasks. Workflows are stored in ${directory}.`))
+	add(theme.fg("muted", `Run structured long running tasks. Workflows are stored in ${locations}.`))
 	lines.push("")
 	add(theme.fg("text", empty ? "No workflows found." : "Which workflow do you want to run?"))
 	lines.push("")

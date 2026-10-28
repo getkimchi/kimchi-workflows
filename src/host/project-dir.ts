@@ -22,7 +22,7 @@
  */
 import { readFileSync } from "node:fs"
 import path from "node:path"
-import { getPackageDir } from "@earendil-works/pi-coding-agent"
+import { getAgentDir, getPackageDir } from "@earendil-works/pi-coding-agent"
 
 /** What a harness with no `piConfig.name` of its own is called (vanilla `pi` — see the module header). */
 const DEFAULT_APP_NAME = "pi"
@@ -77,6 +77,19 @@ export function projectDir(projectRoot: string, app: string = appName()): string
 /** The directory containing a project's authored workflows (spec §6.8). */
 export function workflowsDir(projectRoot: string, app: string = appName()): string {
 	return path.join(projectDir(projectRoot, app), "workflows")
+}
+
+/**
+ * The user-level workflows directory: `<agentDir>/workflows/` — the same root the harness uses for
+ * its own user-level state (`settings.json`, `auth.json`) and for global extension discovery
+ * (`agentDir/extensions/`). Workflows here are available from every project; a project's own file
+ * shadows a global one of the same installed identity (workflow-catalog.ts).
+ *
+ * `agentDir` is injectable for tests; production callers resolve it from the harness, which honours
+ * its own `<APP>_CODING_AGENT_DIR` override for free.
+ */
+export function globalWorkflowsDir(agentDir: string = getAgentDir()): string {
+	return path.join(agentDir, "workflows")
 }
 
 /**

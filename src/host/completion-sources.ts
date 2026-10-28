@@ -14,8 +14,8 @@
  * The location is captured rather than resolved per call because the completion callback is handed no
  * context at all — no `cwd`, no session manager, no store (spec §14.2). It captures BOTH values the
  * command handler builds its store from (spec §14.7): authored workflows are keyed by project root
- * (§6.8) and a run's artifacts by the harness's session directory (§8.9), and `runArtifactsDir` needs
- * the pair to resolve either way. The extension re-captures them from every `session_start`; this copy
+ * plus the global layer (§6.8), and a run's artifacts by the harness's session directory (§8.9), and
+ * `runArtifactsDir` needs the pair to resolve either way. The extension re-captures them from every `session_start`; this copy
  * exists for completion only, and the handlers keep resolving from their own invocation's context.
  */
 import type { CompletionSources } from "./completions.ts"

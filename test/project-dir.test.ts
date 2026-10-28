@@ -1,8 +1,15 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { appName, projectDir, readAppName, runArtifactsDir, workflowsDir } from "../src/host/project-dir.ts"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import {
+	appName,
+	globalWorkflowsDir,
+	projectDir,
+	readAppName,
+	runArtifactsDir,
+	workflowsDir,
+} from "../src/host/project-dir.ts"
 
 /**
  * Where this package writes, derived from the HARNESS rather than hardcoded (spec §6.8/§8.9's
@@ -10,6 +17,23 @@ import { appName, projectDir, readAppName, runArtifactsDir, workflowsDir } from 
  * built on the same agent — owns a directory of its own, and a workflow run scattering `.pi/` into such
  * a project would be writing under a name that product does not recognise.
  */
+
+/**
+ * The harness this suite runs under may point the pi module at ITS OWN package dir (kimchi sets
+ * PI_PACKAGE_DIR), which would leak that harness's piConfig.name into every default-resolution
+ * assertion below. Stub it to a package.json that declares no name, so this file tests the
+ * fallback itself no matter which harness runs it.
+ */
+let vanillaPackageDir: string
+beforeEach(async () => {
+	vanillaPackageDir = await mkdtemp(path.join(tmpdir(), "pi-workflows-vanilla-"))
+	await writeFile(path.join(vanillaPackageDir, "package.json"), JSON.stringify({ name: "pi" }), "utf8")
+	vi.stubEnv("PI_PACKAGE_DIR", vanillaPackageDir)
+})
+afterEach(() => {
+	vi.unstubAllEnvs()
+})
+
 describe("app name resolution", () => {
 	let packageDir: string
 
@@ -47,9 +71,10 @@ describe("app name resolution", () => {
 		expect(readAppName(packageDir)).toBe("pi")
 	})
 
-	it("resolves to `.pi` under the harness this suite actually runs against", () => {
-		// The dev dependency is vanilla pi, which sets no piConfig.name — so the whole default path
-		// (getPackageDir → package.json → fallback) is exercised end to end here.
+	it("resolves to `.pi` when the harness declares no name of its own", () => {
+		// PI_PACKAGE_DIR is stubbed above to a package.json without piConfig, so the whole default path
+		// (getPackageDir → package.json → fallback) is exercised end to end — even under a harness
+		// (kimchi) whose own override would otherwise leak its name into this assertion.
 		expect(appName()).toBe("pi")
 		expect(projectDir("/proj")).toBe(path.join("/proj", ".pi"))
 		expect(workflowsDir("/proj")).toBe(path.join("/proj", ".pi", "workflows"))
@@ -60,6 +85,26 @@ describe("app name resolution", () => {
 		// HOME-relative path that joined onto a cwd would bury a project's workflows three levels deep.
 		expect(projectDir("/proj", "kimchi")).toBe(path.join("/proj", ".kimchi"))
 		expect(workflowsDir("/proj", "kimchi")).toBe(path.join("/proj", ".kimchi", "workflows"))
+	})
+})
+
+describe("global workflows directory", () => {
+	it("joins the workflows directory onto an injected agent dir", () => {
+		expect(globalWorkflowsDir("/home/u/.pi/agent")).toBe(path.join("/home/u/.pi/agent", "workflows"))
+	})
+
+	// The default resolves from the harness's own user-level root, whose <APP>_CODING_AGENT_DIR
+	// override the harness applies for free — no env parsing of our own (spec §6.8's global layer).
+	it("defaults to the harness agent dir, honouring its env override", () => {
+		// Which override NAME applies is frozen by the harness at import time (pi → PI_CODING_AGENT_DIR,
+		// kimchi → KIMCHI_CODING_AGENT_DIR), so stub both spellings to land on the fixture regardless.
+		vi.stubEnv("PI_CODING_AGENT_DIR", "/home/u/env-agent")
+		vi.stubEnv("KIMCHI_CODING_AGENT_DIR", "/home/u/env-agent")
+		try {
+			expect(globalWorkflowsDir()).toBe(path.join("/home/u/env-agent", "workflows"))
+		} finally {
+			vi.unstubAllEnvs()
+		}
 	})
 })
 

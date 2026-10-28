@@ -4,6 +4,10 @@ Project workflows share one private pnpm package at `.kimchi/workflows/`. `/work
 maintains its `package.json`, `pnpm-lock.yaml`, verification scripts, and development toolchain. It does not create
 one package per workflow.
 
+The package stays project-scoped on purpose: workflows are authored and versioned with the project. A workflow in
+the user-level global directory (see [Authoring](authoring.md)) owns no package of its own — its bare imports
+resolve against whichever project it runs from, so that project's package must be prepared.
+
 The managed development dependencies include the matching workflow framework, TypeBox, TypeScript, Vitest, and
 the PI types needed by workflow authoring. The harness still supplies its own framework, TypeBox, and PI modules
 when it loads a workflow through Jiti; the package copies exist for editor support and verification, not to replace

@@ -14,8 +14,9 @@ function entry(
 	description?: string,
 	filePath = `/project/.kimchi/workflows/${identity}.workflow.ts`,
 	name = identity,
+	scope: WorkflowEntry["scope"] = "project",
 ) {
-	return { identity, name, description, filePath } satisfies WorkflowEntry
+	return { identity, name, description, filePath, scope } satisfies WorkflowEntry
 }
 
 function picker(entries: readonly WorkflowEntry[]) {
@@ -43,6 +44,17 @@ describe("workflow welcome quick-pick", () => {
 
 		press(component, "\r")
 		expect(done).toHaveBeenCalledWith({ kind: "create" })
+	})
+
+	// The global layer is the exception worth naming: its rows must be identifiable wherever they
+	// render, without disturbing the project rows that stay unmarked (spec §6.8).
+	it("marks global workflows so the two catalog layers stay distinguishable", () => {
+		const { component } = picker([
+			entry("deploy", "ship it", "/home/u/.pi/agent/workflows/deploy.workflow.ts", "deploy", "global"),
+		])
+		const rendered = component.render(100).join("\n")
+
+		expect(rendered).toContain("❯ 1 · deploy (global) — ship it")
 	})
 
 	it("renders numbered workflow rows, wraps descriptions, and keeps creation last", () => {

@@ -6,7 +6,7 @@
  * talk to the user and are unit-testable with a notify spy.
  */
 import path from "node:path"
-import { workflowsDir } from "../project-dir.ts"
+import { globalWorkflowsDir, workflowsDir } from "../project-dir.ts"
 import { projectRunSummaries } from "../reconcile-runs.ts"
 import type { RunStore } from "../types.ts"
 import { type BrokenWorkflow, discoverWorkflows } from "../workflow-catalog.ts"
@@ -31,23 +31,31 @@ export async function handleListRuns(
 }
 
 /**
- * `/workflow list` — the workflows this project defines, by name and description. Files that fail to
+ * `/workflow list` — the workflows the project and the user's global directory define (spec
+ * §6.7/§6.8), by name and description. Files that fail to
  * load are reported separately rather than omitted silently, so a broken workflow is visible.
  */
 export async function handleListWorkflows(ctx: NotifyCtx & { cwd: string }): Promise<void> {
 	const { entries, broken } = await discoverWorkflows(ctx.cwd)
 
 	if (entries.length === 0 && broken.length === 0) {
-		ctx.ui.notify(`No workflows found in ${workflowsDir(ctx.cwd)}. Create one with "/workflow create".`, "info")
+		ctx.ui.notify(
+			`No workflows found in ${workflowsDir(ctx.cwd)} or ${globalWorkflowsDir()}. Create one with "/workflow create".`,
+			"info",
+		)
 		return
 	}
 
 	if (entries.length > 0) {
-		// Keep the full source filename visible beside its suffix-free installed identity.
-		const width = Math.max(...entries.map((entry) => entry.identity.length))
-		const lines = entries.map(
-			(entry) => `${entry.identity.padEnd(width)}  ${path.basename(entry.filePath)}  ${entry.description ?? "-"}`,
-		)
+		// The first column stays the runnable identity; a global row carries its scope marker inside
+		// that column so the file column never shifts under it.
+		const rows = entries.map((entry) => ({
+			selector: entry.scope === "global" ? `${entry.identity} (global)` : entry.identity,
+			file: path.basename(entry.filePath),
+			description: entry.description ?? "-",
+		}))
+		const width = Math.max(...rows.map((row) => row.selector.length))
+		const lines = rows.map((row) => `${row.selector.padEnd(width)}  ${row.file}  ${row.description}`)
 		ctx.ui.notify(lines.join("\n"), "info")
 	}
 

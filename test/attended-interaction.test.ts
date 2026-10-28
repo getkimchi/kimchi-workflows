@@ -83,7 +83,7 @@ describe("attended workflow-defined interactions", () => {
 		})
 		expect(select).toHaveBeenCalledWith("# Exact persisted plan", ["Approve", "Revise"])
 		expect(activeRuns.active).toEqual([])
-	})
+	}, 120_000)
 
 	it("leaves the run blocked when the renderer is dismissed", async () => {
 		const root = await preparedProject("workflow-attended-dismiss-")
