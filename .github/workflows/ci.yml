@@ -79,14 +79,16 @@ jobs:
         working-directory: kimchi-workflows
         run: pnpm install --frozen-lockfile
 
-      - name: Install Kimchi dependencies
-        working-directory: kimchi
-        run: pnpm install --frozen-lockfile
-
+      # Kimchi's postinstall bundles the document-skill CLIs with bun, so bun must be on PATH
+      # BEFORE the Kimchi install — not just for the later binary build.
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           version: '1.4.0'
+
+      - name: Install Kimchi dependencies
+        working-directory: kimchi
+        run: pnpm install --frozen-lockfile
 
       - name: Build Kimchi proxy helper
         working-directory: kimchi
