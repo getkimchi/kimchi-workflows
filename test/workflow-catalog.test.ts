@@ -2,11 +2,11 @@ import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createCompletionSources } from "../src/host/completion-sources.ts"
 import { completeWorkflowArgument } from "../src/host/completions.ts"
 import { workflowsDir } from "../src/host/project-dir.ts"
-import { discoverWorkflows, resolveWorkflow } from "../src/host/workflow-catalog.ts"
+import { discoverWorkflows, listWorkflowIdentities, resolveWorkflow } from "../src/host/workflow-catalog.ts"
 import { prepareWorkflowPackageFixture } from "./workflow-package-fixture.ts"
 
 /**
@@ -45,6 +45,36 @@ async function preparedProject(files: Record<string, string>): Promise<string> {
 	const root = await project(files)
 	await prepareWorkflowPackageFixture({ directory: workflowsDir(root) })
 	return root
+}
+
+/**
+ * The global layer defaults to the harness's real agent dir. Tests stub its env override to an empty
+ * directory so a developer's own global workflows can never leak into a run of this suite; the
+ * global-layer tests below pass their fixture directory explicitly. Which override NAME applies is
+ * frozen by the harness at import time (pi → PI_CODING_AGENT_DIR, kimchi → KIMCHI_CODING_AGENT_DIR),
+ * so both spellings are stubbed.
+ */
+function stubEmptyAgentDir(dir: string): void {
+	vi.stubEnv("PI_CODING_AGENT_DIR", dir)
+	vi.stubEnv("KIMCHI_CODING_AGENT_DIR", dir)
+}
+
+let emptyAgentDir: string
+beforeEach(async () => {
+	emptyAgentDir = await mkdtemp(path.join(tmpdir(), "pi-catalog-agent-empty-"))
+	stubEmptyAgentDir(emptyAgentDir)
+})
+afterEach(() => {
+	vi.unstubAllEnvs()
+})
+
+/** A global-layer fixture: a plain directory of workflow files handed to the catalog directly. */
+async function globalWorkflows(files: Record<string, string>): Promise<string> {
+	const dir = await mkdtemp(path.join(tmpdir(), "pi-catalog-global-"))
+	for (const [name, content] of Object.entries(files)) {
+		await writeFile(path.join(dir, name), content, "utf8")
+	}
+	return dir
 }
 
 describe("discoverWorkflows", () => {
@@ -332,5 +362,182 @@ describe("resolveWorkflow does not execute unrelated workflows (adversarial regr
 		expect(resolved.ok).toBe(false)
 		if (!resolved.ok) expect(resolved.error).toContain("Known workflows: alpha, beta")
 		expect(await imported(log)).toEqual([])
+	})
+})
+
+describe("listWorkflowIdentities across layers", () => {
+	it("merges and dedupes identities, project shadowing global", async () => {
+		const root = await project({ "deploy.workflow.ts": workflowSource("deploy") })
+		const global = await globalWorkflows({
+			"deploy.workflow.ts": workflowSource("deploy-again"),
+			"notify.workflow.ts": workflowSource("notify-internal"),
+		})
+
+		expect(await listWorkflowIdentities(root, global)).toEqual(["deploy", "notify"])
+	})
+
+	it("reads the global layer from the harness agent dir by default", async () => {
+		const global = path.join(emptyAgentDir, "workflows")
+		await mkdir(global, { recursive: true })
+		await writeFile(path.join(global, "notify.workflow.ts"), workflowSource("notify-internal"), "utf8")
+
+		const root = await project({})
+
+		expect(await listWorkflowIdentities(root)).toEqual(["notify"])
+	})
+})
+
+describe("discoverWorkflows global layer", () => {
+	it("discovers global workflows when the project defines none", async () => {
+		const root = await project({})
+		const global = await globalWorkflows({ "deploy.workflow.ts": workflowSource("deploy-internal") })
+
+		const { entries, broken } = await discoverWorkflows(root, global)
+
+		expect(broken).toEqual([])
+		expect(entries).toHaveLength(1)
+		expect(entries[0]?.identity).toBe("deploy")
+		expect(entries[0]?.scope).toBe("global")
+		expect(entries[0]?.filePath).toBe(path.join(global, "deploy.workflow.ts"))
+	})
+
+	it("lets the project shadow a global file of the same identity", async () => {
+		const root = await project({ "deploy.workflow.ts": workflowSource("project-deploy") })
+		const global = await globalWorkflows({ "deploy.workflow.ts": workflowSource("global-deploy") })
+
+		const { entries } = await discoverWorkflows(root, global)
+
+		expect(entries).toHaveLength(1)
+		expect(entries[0]?.scope).toBe("project")
+		expect(entries[0]?.filePath).toBe(path.join(workflowsDir(root), "deploy.workflow.ts"))
+	})
+
+	it("merges both layers sorted by identity", async () => {
+		const root = await project({ "zeta.workflow.ts": workflowSource("z") })
+		const global = await globalWorkflows({ "alpha.workflow.ts": workflowSource("a") })
+
+		const { entries } = await discoverWorkflows(root, global)
+
+		expect(entries.map((entry) => [entry.identity, entry.scope])).toEqual([
+			["alpha", "global"],
+			["zeta", "project"],
+		])
+	})
+
+	// A shadowed global file that fails to load is still reported: broken files are never hidden,
+	// whatever layer they live in.
+	it("reports broken files from both layers", async () => {
+		const root = await project({ "bad.workflow.ts": "export default { not: 'a workflow' };" })
+		const global = await globalWorkflows({ "worse.workflow.ts": "export default const nope = ;" })
+
+		const { entries, broken } = await discoverWorkflows(root, global)
+
+		expect(entries).toEqual([])
+		expect(broken.map((entry) => path.basename(entry.filePath))).toEqual(["bad.workflow.ts", "worse.workflow.ts"])
+	})
+})
+
+describe("resolveWorkflow global layer", () => {
+	it("resolves a global identity when the project does not define it", async () => {
+		const root = await preparedProject({})
+		const global = await globalWorkflows({ "deploy.workflow.ts": workflowSource("deploy-internal") })
+
+		const resolved = await resolveWorkflow(root, "deploy", global)
+
+		expect(resolved.ok).toBe(true)
+		if (resolved.ok) {
+			expect(resolved.filePath).toBe(path.join(global, "deploy.workflow.ts"))
+			expect(resolved.workflow.name).toBe("deploy")
+		}
+	})
+
+	it("a project file shadows the same global identity", async () => {
+		const root = await preparedProject({ "deploy.workflow.ts": workflowSource("project-deploy") })
+		const global = await globalWorkflows({ "deploy.workflow.ts": workflowSource("global-deploy") })
+
+		const resolved = await resolveWorkflow(root, "deploy", global)
+
+		expect(resolved.ok).toBe(true)
+		if (resolved.ok) expect(resolved.filePath).toBe(path.join(workflowsDir(root), "deploy.workflow.ts"))
+	})
+
+	it("lists global identities in the unknown-name hint", async () => {
+		const root = await preparedProject({ "deploy.workflow.ts": workflowSource("deploy") })
+		const global = await globalWorkflows({ "notify.workflow.ts": workflowSource("notify-internal") })
+
+		const resolved = await resolveWorkflow(root, "nope", global)
+
+		expect(resolved.ok).toBe(false)
+		if (!resolved.ok) expect(resolved.error).toContain("Known workflows: deploy, notify")
+	})
+
+	// Completion resolves the global layer from the harness agent dir — the env override is how the
+	// suite points it at a fixture without touching a real user directory.
+	it("completes global identities", async () => {
+		const agentDir = await mkdtemp(path.join(tmpdir(), "pi-catalog-agent-"))
+		const global = path.join(agentDir, "workflows")
+		await mkdir(global, { recursive: true })
+		await writeFile(path.join(global, "notify.workflow.ts"), workflowSource("notify-internal"), "utf8")
+		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir)
+		vi.stubEnv("KIMCHI_CODING_AGENT_DIR", agentDir)
+		try {
+			const root = await project({})
+			const sources = createCompletionSources()
+			sources.setProject(root, "")
+
+			const items = await completeWorkflowArgument("run notify", sources)
+
+			expect(items).toEqual([{ value: "run notify", label: "notify" }])
+		} finally {
+			vi.unstubAllEnvs()
+		}
+	})
+
+	// Documented caveat (docs/authoring.md, docs/dependencies.md): a global file's bare imports
+	// type-check against the project's prepared workflows package — the same anchoring an explicit
+	// absolute path gets — so an unprepared project surfaces the file as broken instead.
+	const bareImportSource = [
+		`import { Type } from "typebox"`,
+		`import { createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows"`,
+		`const step = createStep({ name: "notify-step", output: Type.String(), run: () => "ok" })`,
+		`export default createWorkflow({ name: "notify" }).then(step).commit()`,
+	].join("\n")
+
+	it("resolves a global file's bare imports against the project's prepared package", async () => {
+		const root = await preparedProject({})
+		const global = await globalWorkflows({ "notify.workflow.ts": bareImportSource })
+
+		const resolved = await resolveWorkflow(root, "notify", global)
+
+		expect(resolved.ok).toBe(true)
+		if (resolved.ok) expect(resolved.workflow.name).toBe("notify")
+	})
+
+	// The run gate type-checks the global file against the project's prepared package (same anchoring
+	// an explicit absolute path gets) — without it, bare imports cannot be verified and the run is
+	// rejected with the type error.
+	it("rejects a global file's bare imports when the project has no prepared package", async () => {
+		const root = await project({}) // deliberately NOT prepared
+		const global = await globalWorkflows({ "notify.workflow.ts": bareImportSource })
+
+		const resolved = await resolveWorkflow(root, "notify", global)
+
+		expect(resolved.ok).toBe(false)
+		if (!resolved.ok) {
+			expect(resolved.error).toContain('workflow "notify" could not load')
+			expect(resolved.error).toMatch(/is missing @kimchi-dev\/kimchi-workflows/)
+		}
+	})
+
+	// Listing stays load-based: the harness supplies framework modules through Jiti at load time
+	// (docs/dependencies.md), so the file is discoverable even where its verification would fail.
+	it("still lists a global file whose bare imports the runtime supplies at load time", async () => {
+		const root = await project({}) // deliberately NOT prepared
+		const global = await globalWorkflows({ "notify.workflow.ts": bareImportSource })
+
+		const { entries, broken } = await discoverWorkflows(root, global)
+
+		expect(entries.map((entry) => entry.identity)).toEqual(["notify"])
+		expect(broken).toEqual([])
 	})
 })

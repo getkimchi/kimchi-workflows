@@ -148,7 +148,7 @@ An executing run can be cancelled only by the process that owns its live lease. 
 
 ## Writing a workflow
 
-Store project workflows as `*.workflow.ts` files in `.kimchi/workflows/`. The filename without `.workflow.ts` is the installed workflow identity used by commands, run IDs, progress, and step context. `WorkflowDefinition.name` remains required for definition composition and nested workflows, but a top-level file-loaded workflow is bound to its filename identity. You may also pass a TypeScript file path directly to `/workflow run`; its basename becomes the identity.
+Store project workflows as `*.workflow.ts` files in `.kimchi/workflows/`. The filename without `.workflow.ts` is the installed workflow identity used by commands, run IDs, progress, and step context. `WorkflowDefinition.name` remains required for definition composition and nested workflows, but a top-level file-loaded workflow is bound to its filename identity. You may also pass a TypeScript file path directly to `/workflow run`; its basename becomes the identity. Workflows can also live once for every project in the harness's user-level workflows directory (`~/.config/kimchi/harness/agent/workflows/` under Kimchi): `/workflow list` merges both layers with global rows marked, and a project file of the same filename shadows the global one.
 
 A minimal function-step workflow:
 

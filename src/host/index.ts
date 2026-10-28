@@ -72,5 +72,11 @@ export type {
 } from "./telemetry-events.ts"
 export { MAX_ERROR_LENGTH, truncateError, WORKFLOW_TELEMETRY_CHANNEL } from "./telemetry-events.ts"
 export type { RunStore, RunSummary } from "./types.ts"
-export type { BrokenWorkflow, WorkflowCatalog, WorkflowEntry, WorkflowResolution } from "./workflow-catalog.ts"
+export type {
+	BrokenWorkflow,
+	WorkflowCatalog,
+	WorkflowEntry,
+	WorkflowResolution,
+	WorkflowScope,
+} from "./workflow-catalog.ts"
 export { discoverWorkflows, listWorkflowIdentities, resolveWorkflow, WORKFLOW_SUFFIX } from "./workflow-catalog.ts"

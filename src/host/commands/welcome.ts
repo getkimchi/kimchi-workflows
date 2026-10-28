@@ -3,7 +3,7 @@
  * ordinary plain catalog listing in headless modes.
  */
 import path from "node:path"
-import { workflowsDir } from "../project-dir.ts"
+import { globalWorkflowsDir, workflowsDir } from "../project-dir.ts"
 import { discoverWorkflows, type WorkflowEntry } from "../workflow-catalog.ts"
 import { workflowOptionLabel } from "../workflow-display.ts"
 import type { CommandCtx } from "./context.ts"
@@ -30,18 +30,18 @@ export async function chooseWorkflowWelcomeAction(ctx: WelcomeCtx): Promise<Work
 	const { entries, broken } = await discoverWorkflows(ctx.cwd)
 	if (broken.length > 0) notifyBrokenWorkflows(ctx, broken)
 
-	const directory = workflowDirectoryLabel(ctx.cwd)
+	const locations = workflowLocationsLabel(ctx.cwd)
 	if (ctx.mode === "tui") {
 		const { pickWorkflowInTui } = await import("../workflow-picker.ts")
-		return pickWorkflowInTui(ctx, entries, directory)
+		return pickWorkflowInTui(ctx, entries, locations)
 	}
-	return chooseViaDialog(ctx, entries, directory)
+	return chooseViaDialog(ctx, entries, locations)
 }
 
 async function chooseViaDialog(
 	ctx: Pick<WelcomeCtx, "ui">,
 	entries: readonly WorkflowEntry[],
-	directory: string,
+	locations: string,
 ): Promise<WorkflowWelcomeAction> {
 	const createLabel = entries.length === 0 ? "Create a workflow" : "Create new workflow"
 	const labels = dialogLabels(entries, createLabel)
@@ -49,7 +49,7 @@ async function chooseViaDialog(
 	const state = entries.length === 0 ? "No workflows found." : "Which workflow do you want to run?"
 	const title = [
 		"Kimchi Workflows",
-		`Run structured long running tasks. Workflows are stored in ${directory}.`,
+		`Run structured long running tasks. Workflows are stored in ${locations}.`,
 		"",
 		state,
 	].join("\n")
@@ -77,4 +77,9 @@ export function workflowDirectoryLabel(projectRoot: string): string {
 	const directory = workflowsDir(projectRoot)
 	const relative = path.relative(projectRoot, directory)
 	return relative && !relative.startsWith("..") ? relative : directory
+}
+
+/** Both catalog locations, legible: the project's relative directory plus the absolute global one. */
+export function workflowLocationsLabel(projectRoot: string): string {
+	return `${workflowDirectoryLabel(projectRoot)} and ${globalWorkflowsDir()}`
 }

@@ -424,10 +424,11 @@ candidate on unresolvable imports. Loading proves the module imports and commits
 whatever tooling the project has (TypeScript, Biome) and to report plainly when
 none is available rather than claim a check it did not run. *(decision)*
 
-6.7. `/workflow list` — list the project's workflows: installed identity, file, and
-description. The identity is the filename stem, so every row is directly runnable and
-unique within the directory. Declared-name duplicates create no ambiguity. Files that
-fail to load are reported rather than omitted. *(decision)*
+6.7. `/workflow list` — list the workflows the project and the user's global directory
+define (§6.8's two layers): installed identity, file, and description, with rows from
+the global layer marked `(global)`. The identity is the filename stem, so every row is
+directly runnable and unique across the merged catalog. Declared-name duplicates create
+no ambiguity. Files that fail to load are reported rather than omitted. *(decision)*
 
 6.8. **Workflow catalog.** A project's workflows live in
 `<project>/.<app>/workflows/` as `*.workflow.ts`, where `<app>` is the running
@@ -435,11 +436,19 @@ harness's own name (§8.9); discovery filters on the suffix. The directory holds
 authored sources, never a run's own records, which live with the harness's sessions
 (§8.9).
 
+A user-level layer sits beside the project's: the harness's agent directory also hosts
+`<agentDir>/workflows/` as `*.workflow.ts` — the same root the harness uses for its own
+user-level state and for global extension discovery. Discovery merges both layers; the
+project's file shadows a global one of the same installed identity, and a shadowed file
+is unreachable by identity lookup (an explicit path still runs it). Broken files are
+reported from both layers, shadowed or not. *(decision)*
+
 `discoverWorkflows()` imports every candidate to load it and read catalog metadata,
 so workflow modules must have no import-time side effects. Its public entries expose
 both `identity` (the filename stem used by commands) and `name` (the authored definition
-name retained for compatibility and composition metadata), plus `description` and
-`filePath`. Entries sort by `identity`; duplicate declared names are valid.
+name retained for compatibility and composition metadata), plus `description`,
+`filePath`, and `scope` (which layer installed the file). Entries sort by `identity`;
+duplicate declared names are valid.
 
 Completion and run resolution do not use discovery. They enumerate matching filenames
 without importing modules. Resolution selects exactly one filename or explicit path,

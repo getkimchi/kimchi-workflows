@@ -4,7 +4,7 @@ import path from "node:path"
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent"
 import type { Component, TUI } from "@earendil-works/pi-tui"
 import { Type } from "typebox"
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { resumeWithAnswer, resumeWorkflow } from "../src/engine/resume-workflow.ts"
 import { runWorkflow } from "../src/engine/run-workflow.ts"
 import type { RunResult } from "../src/engine/types.ts"
@@ -27,6 +27,21 @@ function notifySpy() {
 	const notes: [string, NoteType][] = []
 	return { notes, notify: (message: string, type?: Exclude<NoteType, undefined>) => void notes.push([message, type]) }
 }
+
+/**
+ * The global catalog layer defaults to the harness's real agent dir; stub its env override to an
+ * empty directory so a developer's own global workflows can never leak into these assertions. Both
+ * override spellings are stubbed because which NAME applies is frozen by the harness at import time
+ * (pi vs kimchi) — the global test below re-points the stub at its own fixture.
+ */
+beforeEach(async () => {
+	const empty = await mkdtemp(path.join(tmpdir(), "pi-ext-agent-empty-"))
+	vi.stubEnv("PI_CODING_AGENT_DIR", empty)
+	vi.stubEnv("KIMCHI_CODING_AGENT_DIR", empty)
+})
+afterEach(() => {
+	vi.unstubAllEnvs()
+})
 
 // -- runTracked (per-run exclusive execution lifecycle, spec §7) ------------------------------------
 
@@ -195,6 +210,27 @@ describe("handleListWorkflows", () => {
 		expect(spy.notes[1]?.[0]).toMatch(/1 file\(s\) failed to load/)
 		expect(spy.notes[1]?.[0]).toMatch(/bad\.workflow\.ts/)
 	})
+
+	// The handler resolves the global layer from the harness agent dir, so the fixture is wired in
+	// through the env override rather than an argument.
+	it("marks rows from the global workflows directory", async () => {
+		const agentDir = await mkdtemp(path.join(tmpdir(), "pi-ext-agent-"))
+		const global = path.join(agentDir, "workflows")
+		await mkdir(global, { recursive: true })
+		await writeFile(path.join(global, "notify.workflow.ts"), workflowSource("notify", "from the global dir"), "utf8")
+		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir)
+		vi.stubEnv("KIMCHI_CODING_AGENT_DIR", agentDir)
+		try {
+			const root = await projectWith({})
+			const spy = notifySpy()
+
+			await handleListWorkflows({ ui: { notify: spy.notify }, cwd: root })
+
+			expect(spy.notes).toEqual([["notify (global)  notify.workflow.ts  from the global dir", "info"]])
+		} finally {
+			vi.unstubAllEnvs()
+		}
+	})
 })
 
 // -- bare /workflow welcome and picker -------------------------------------------------------------
@@ -223,7 +259,7 @@ describe("chooseWorkflowWelcomeAction", () => {
 		const [title, options] = ui.select.mock.calls[0] as [string, string[]]
 		expect(title).toContain("Kimchi Workflows")
 		expect(title).toContain("No workflows found.")
-		expect(title).toContain(`${path.relative(root, workflowsDir(root))}.`)
+		expect(title).toContain(path.relative(root, workflowsDir(root)))
 		expect(options).toEqual(["Create a workflow"])
 		expect(ui.customMock).not.toHaveBeenCalled()
 	})

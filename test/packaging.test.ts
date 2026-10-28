@@ -124,74 +124,78 @@ console.log(JSON.stringify(results))
 		expect(existsSync(path.join(packedRoot, "bin/kimchi-workflows.mjs"))).toBe(true)
 	})
 
-	it("runs built-in create, answered resume, and status through the compiled host", async () => {
-		const commandsModule = pathToFileURL(path.join(packedRoot, "dist/host/commands/index.js")).href
-		const storeModule = pathToFileURL(path.join(packedRoot, "dist/host/memory-store.js")).href
-		const [{ handleCreate, handleResume, handleStatus }, { createMemoryStore }] = await Promise.all([
-			import(commandsModule),
-			import(storeModule),
-		])
-		const store = createMemoryStore()
-		const activeRuns = createFakeActiveRuns()
-		const notes: [string, string | undefined][] = []
-		const inputs: (string | undefined)[] = [undefined]
-		const ctx = {
-			cwd: workDir,
-			mode: "print",
-			hasUI: false,
-			modelRegistry: {},
-			ui: {
-				notify: (message: string, type?: string) => void notes.push([message, type]),
-				input: async () => inputs.shift(),
-				select: async () => undefined,
-				confirm: async () => false,
-				setWidget: () => {},
-				setWorkingMessage: () => {},
-			},
-		}
-		const agent = scriptedAgent([
-			[
-				JSON.stringify({
-					questions: {
-						title: "Clarify delivery",
-						questions: [
-							{
-								key: "delivery",
-								header: "Delivery",
-								question: "How should the release notes be delivered?",
-								kind: "text",
-							},
-						],
-					},
-				}),
-			],
-		])
+	it(
+		"runs built-in create, answered resume, and status through the compiled host",
+		async () => {
+			const commandsModule = pathToFileURL(path.join(packedRoot, "dist/host/commands/index.js")).href
+			const storeModule = pathToFileURL(path.join(packedRoot, "dist/host/memory-store.js")).href
+			const [{ handleCreate, handleResume, handleStatus }, { createMemoryStore }] = await Promise.all([
+				import(commandsModule),
+				import(storeModule),
+			])
+			const store = createMemoryStore()
+			const activeRuns = createFakeActiveRuns()
+			const notes: [string, string | undefined][] = []
+			const inputs: (string | undefined)[] = [undefined]
+			const ctx = {
+				cwd: workDir,
+				mode: "print",
+				hasUI: false,
+				modelRegistry: {},
+				ui: {
+					notify: (message: string, type?: string) => void notes.push([message, type]),
+					input: async () => inputs.shift(),
+					select: async () => undefined,
+					confirm: async () => false,
+					setWidget: () => {},
+					setWorkingMessage: () => {},
+				},
+			}
+			const agent = scriptedAgent([
+				[
+					JSON.stringify({
+						questions: {
+							title: "Clarify delivery",
+							questions: [
+								{
+									key: "delivery",
+									header: "Delivery",
+									question: "How should the release notes be delivered?",
+									kind: "text",
+								},
+							],
+						},
+					}),
+				],
+			])
 
-		await handleCreate(ctx, store, activeRuns, agent.startAgent)
-		const runId = (await store.list())[0]?.runId as string
-		expect((await store.list())[0]?.status).toBe("blocked")
+			await handleCreate(ctx, store, activeRuns, agent.startAgent)
+			const runId = (await store.list())[0]?.runId as string
+			expect((await store.list())[0]?.status).toBe("blocked")
 
-		inputs.push("Build a release-notes workflow", undefined)
-		await handleResume(ctx, store, activeRuns, agent.startAgent, runId)
+			inputs.push("Build a release-notes workflow", undefined)
+			await handleResume(ctx, store, activeRuns, agent.startAgent, runId)
 
-		const events = await store.loadEvents(runId)
-		const provenance = events.find((event: { type: string }) => event.type === "run-meta") as
-			| { workflowSource: { kind: string; id: string } }
-			| undefined
-		expect(provenance?.workflowSource).toEqual({ kind: "builtin", id: "create" })
-		expect(provenance).not.toHaveProperty("workflowFilePath")
-		expect(events).toContainEqual(expect.objectContaining({ type: "step-completed", path: "goal" }))
-		expect(events.filter((event: { type: string }) => event.type === "questionnaire-asked")).toHaveLength(2)
-		expect(agent.opened).toBe(1)
+			const events = await store.loadEvents(runId)
+			const provenance = events.find((event: { type: string }) => event.type === "run-meta") as
+				| { workflowSource: { kind: string; id: string } }
+				| undefined
+			expect(provenance?.workflowSource).toEqual({ kind: "builtin", id: "create" })
+			expect(provenance).not.toHaveProperty("workflowFilePath")
+			expect(events).toContainEqual(expect.objectContaining({ type: "step-completed", path: "goal" }))
+			expect(events.filter((event: { type: string }) => event.type === "questionnaire-asked")).toHaveLength(2)
+			expect(agent.opened).toBe(1)
 
-		notes.length = 0
-		await handleStatus(ctx, store, { activeRunIds: () => [], width: 76 }, runId)
-		expect(notes).toHaveLength(1)
-		expect(notes[0]?.[0]).toContain("builtin:create")
-		expect(notes[0]?.[0]).toContain("goal")
-		expect(notes[0]?.[0]).toContain("design")
-		expect(notes[0]?.[1]).toBe("info")
-	})
+			notes.length = 0
+			await handleStatus(ctx, store, { activeRunIds: () => [], width: 76 }, runId)
+			expect(notes).toHaveLength(1)
+			expect(notes[0]?.[0]).toContain("builtin:create")
+			expect(notes[0]?.[0]).toContain("goal")
+			expect(notes[0]?.[0]).toContain("design")
+			expect(notes[0]?.[1]).toBe("info")
+		},
+		PACKAGING_TIMEOUT_MS,
+	)
 
 	it("prepares a project workflow package from the packed install", async () => {
 		const workflowDirectory = path.join(workDir, "prepared-project/.kimchi/workflows")
