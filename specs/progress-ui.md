@@ -740,6 +740,21 @@ by a crash report and a dead-keys report, not by the suite — the test
 fake now mirrors the real shape: a class whose `matches` reads
 `this.keysById`, keyed by binding names)*
 
+14.11. **The step view is COMPACT by default — detail is a bounded drill-down.**
+The full-transcript replay answered a question nobody asked at open time:
+"what is this step doing?" The default view is an ACTIVITY FEED — the
+prompt's first line, the tail of the tool activity (last 6 lines, with
+durations paired from the two entries' timestamps), the last 4 lines of
+the latest assistant text, and a counts footer that names the keys.
+`Enter` drills down to the full view, itself bounded (the prompt keeps
+its head at 10 lines, each assistant text its tail at 8) — detail stays
+reachable, walls don't. `Enter` again returns to the feed; Escape's
+meaning (back, or out) is never overloaded. Both surfaces share the
+rendering: the direct overlay and the navigator's transcript pane are
+the same view of the same sidecar, so live and post-hoc stay one code
+path. The panel's inline hint is deliberately untouched — it was already
+the right size. *(decision)*
+
 ## Open questions
 
 *None outstanding.* What remains is implementation-level: the exact braille frame set,

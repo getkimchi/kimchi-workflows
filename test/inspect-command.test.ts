@@ -318,6 +318,56 @@ describe("handleInspect — live (executing runs)", () => {
 		await inspecting
 	})
 
+	it("opens on the compact feed and drills down to the bounded transcript behind Enter", async () => {
+		const { store, dir, sessionDir, writer } = await liveRun()
+		const bus = createActivityBus()
+		const h = fakeCtx("tui", { cwd: dir, sessionDir })
+
+		const inspecting = handleInspect(
+			h.ctx,
+			store,
+			{ activeRunIds: () => [RUN_ID], activityBus: bus, width: 80 },
+			undefined,
+			"collect", // explicit target: the DIRECT overlay (bare inspect now opens the navigator)
+		)
+		await vi.waitFor(() => expect(h.custom).toHaveLength(1), { timeout: 10_000 })
+		const { component, draw, last } = mount(h.custom[0] as TestFactory)
+
+		writer.appendMessage({
+			role: "custom",
+			customType: "kimchi-workflow-agent",
+			content: "first line of the brief\nand the second line",
+			display: false,
+		})
+		bus.publish({
+			runId: RUN_ID,
+			path: "collect",
+			attempt: 1,
+			at: new Date().toISOString(),
+			kind: "tool-start",
+			toolName: "read",
+			summary: "src/x.ts",
+		})
+		draw()
+
+		// Compact by default (§14.11): the prompt's FIRST line, and the footer names the keys.
+		expect(last().some((line) => line.includes("first line of the brief"))).toBe(true)
+		expect(last().some((line) => line.includes("and the second line"))).toBe(false) // one Enter away
+		expect(last().some((line) => line.includes("enter: full detail · esc: close"))).toBe(true)
+
+		component.handleInput?.("\r") // Enter: drill down
+		draw()
+		expect(last().some((line) => line.includes("and the second line"))).toBe(true)
+
+		component.handleInput?.("\r") // Enter again: back to the compact feed
+		draw()
+		expect(last().some((line) => line.includes("and the second line"))).toBe(false)
+		expect(last().some((line) => line.includes("enter: full detail · esc: close"))).toBe(true)
+
+		component.handleInput?.("\x1b") // Escape still closes — Enter never stole it
+		await inspecting
+	})
+
 	it("RPC pushes the same lines as a widget, refreshed per activity event", async () => {
 		const { store, dir, sessionDir, writer } = await liveRun()
 		const bus = createActivityBus()
@@ -459,6 +509,15 @@ describe("the navigator (inspection §14.9): bare inspect on a live run", () => 
 		draw()
 		expect(last().some((line) => line.includes("step collect"))).toBe(true)
 		expect(last().some((line) => line.includes("collect the audit facts"))).toBe(true)
+
+		// The pane opens COMPACT (§14.11) — the feed, with the drill-down keys in its header.
+		expect(last().some((line) => line.includes("enter: full detail"))).toBe(true)
+		expect(last().some((line) => line.includes("enter: summary"))).toBe(false)
+
+		component.handleInput?.("\r") // Enter: drill down — the same bounded view the overlay shows
+		draw()
+		expect(last().some((line) => line.includes("enter: summary"))).toBe(true)
+		expect(last().some((line) => line.includes("enter: full detail"))).toBe(false)
 
 		// Escape goes BACK to the list, not out of the view; a second escape closes it.
 		component.handleInput?.("\x1b")

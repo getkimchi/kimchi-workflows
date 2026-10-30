@@ -22,7 +22,12 @@ import { isDownKey, isEnterKey, isEscapeKey, isUpKey } from "./inspect-view.ts"
 import { runIdHash } from "./naming.ts"
 import { runArtifactsDir } from "./project-dir.ts"
 import { projectRunEvents } from "./reconcile-runs.ts"
-import { loadStepTranscript, renderStepTranscript, type StepTranscriptLoad } from "./step-transcript.ts"
+import {
+	loadStepTranscript,
+	renderStepSummary,
+	renderStepTranscript,
+	type StepTranscriptLoad,
+} from "./step-transcript.ts"
 import type { RunStore } from "./types.ts"
 
 /** The slice of the command context the navigator needs — narrow enough for a fake in a test. */
@@ -115,6 +120,7 @@ export async function showNavigator(args: {
 	let selected = -1 // index into `rows`, always a selectable row while the list is non-empty
 	let touched = false // set by the first manual move: after that, the selection is the user's
 	let mode: "list" | "transcript" = "list"
+	let detail = false // the step view starts COMPACT (§14.11); Enter drills down, per step
 	let transcript: StepTranscriptLoad | undefined
 	let closed = false
 	let requestRender: (() => void) | undefined
@@ -189,6 +195,7 @@ export async function showNavigator(args: {
 	const enterTranscript = (): void => {
 		if (selected < 0) return
 		mode = "transcript"
+		detail = false
 		reloadTranscript()
 		requestRender?.()
 	}
@@ -215,12 +222,14 @@ export async function showNavigator(args: {
 		const facts = stepFacts(row.path, events)
 		const header = [
 			`  step ${row.name} (${row.path}) · attempt ${facts.attempt}${facts.dynamic ? " · resume key dynamic" : ""}`,
-			`  esc back · transcript: ${transcript.ok ? transcript.file : "none recorded"}`,
+			`  ${detail ? "enter: summary" : "enter: full detail"} · esc back · transcript: ${transcript.ok ? transcript.file : "none recorded"}`,
 			"",
 		]
 		const body =
 			transcript.ok && transcript.entries.length > 0
-				? renderStepTranscript(transcript.entries, { width: Math.max(20, width - 2) })
+				? detail
+					? renderStepTranscript(transcript.entries, { width: Math.max(20, width - 2), bounded: true })
+					: renderStepSummary(transcript.entries, { width: Math.max(20, width - 2) })
 				: ["  (no transcript recorded for this execution)"]
 		return [...header, ...body]
 	}
@@ -251,6 +260,9 @@ export async function showNavigator(args: {
 							else if (isDownKey(data, matches)) move(1)
 							else if (isEnterKey(data, matches)) enterTranscript()
 							else if (isEscapeKey(data, matches)) done(undefined)
+						} else if (isEnterKey(data, matches)) {
+							detail = !detail // the drill-down toggle — the pane header restates the keys
+							requestRender?.()
 						} else if (isEscapeKey(data, matches)) {
 							mode = "list" // back to the list, not out of the view
 							requestRender?.()

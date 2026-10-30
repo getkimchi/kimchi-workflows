@@ -85,15 +85,19 @@ export function inspectOverlay(args: {
 	read: (width: number) => string[]
 	/** PI's render request — the signal that makes a refresh visible. */
 	requestRender: () => void
-	/** Keybinding matcher from the component factory (raw bytes in, key id match out). */
-	matches?: (data: string, keyId: string) => boolean
+	/** Keybinding matcher from the component factory (raw bytes in, binding-name match out). */
+	matches?: BindingMatcher
+	/** Toggles the step view's detail level (progress §14.11): Enter is the drill-down key. */
+	onDetail?: () => void
 	/** Closes the overlay. */
 	done: () => void
 }): OverlayComponent {
 	return {
 		render: (width: number) => args.read(width),
 		handleInput: (data: string) => {
-			if (isDismissKey(data, args.matches ?? defaultMatches)) args.done()
+			const matches = args.matches ?? defaultMatches
+			if (isDismissKey(data, matches)) args.done()
+			else if (isEnterKey(data, matches)) args.onDetail?.()
 		},
 		invalidate: () => {},
 		dispose: () => {},

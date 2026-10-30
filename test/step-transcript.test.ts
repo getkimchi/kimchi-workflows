@@ -13,6 +13,7 @@ import { traceSessionFile } from "../src/host/naming.ts"
 import {
 	createStepTranscriptWriter,
 	loadStepTranscript,
+	renderStepSummary,
 	renderStepTranscript,
 	stepTranscriptFile,
 } from "../src/host/step-transcript.ts"
@@ -285,6 +286,184 @@ describe("renderStepTranscript (inspection §14)", () => {
 		// The LABEL column too — a tool name read back off disk is as untrusted as its output: the
 		// ESC is gone, the printable remains.
 		expect(lines.some((line) => line.includes("ba[2Jsh") && line.includes("echo"))).toBe(true)
+	})
+})
+
+describe("renderStepSummary — the step view's default (inspection §14.11)", () => {
+	/** The same complete execution as the full view's fixture, plus a longer history to tail. */
+	const entry = (body: Record<string, unknown>, id: string, parentId: string, at: string): SessionEntry =>
+		({ type: "message", message: body, id, parentId, timestamp: at }) as unknown as SessionEntry
+
+	const prompt = {
+		type: "custom_message",
+		customType: "kimchi-workflow-agent",
+		content: "Run the audit and collect the facts\nwith care",
+		display: false,
+		id: "1",
+		parentId: null,
+		timestamp: "2026-10-30T00:00:00.000Z",
+	} as unknown as SessionEntry
+
+	it("shows the prompt's first line, the tool tail with paired durations, and the assistant tail", () => {
+		const feed = renderStepSummary(
+			[
+				prompt,
+				entry(
+					{
+						role: "assistant",
+						content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "npm test" } }],
+					},
+					"2",
+					"1",
+					"2026-10-30T00:00:01.000Z",
+				),
+				entry(
+					{ role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "12 passed" }] },
+					"3",
+					"2",
+					"2026-10-30T00:00:05.000Z",
+				),
+				entry(
+					{ role: "assistant", content: [{ type: "text", text: "All green." }] },
+					"4",
+					"3",
+					"2026-10-30T00:00:06.000Z",
+				),
+			],
+			{ width: 60, hint: "enter: full detail · esc: close" },
+		)
+		expect(feed).toEqual([
+			"  ● prompt     Run the audit and collect the facts", // first line only — the rest is a drill-down away
+			"  → bash       npm test",
+			"  ← bash       12 passed · 4.0s", // paired from the two entries' timestamps
+			"  ● assistant  All green.",
+			"enter: full detail · esc: close",
+		])
+	})
+
+	it("keeps the tail of long tool activity and reports the calls behind it", () => {
+		const busy = [prompt]
+		let id = 1
+		let parent = "1"
+		let at = 1
+		for (let call = 1; call <= 5; call++) {
+			const callId = `c${call}`
+			busy.push(
+				entry(
+					{
+						role: "assistant",
+						content: [{ type: "toolCall", id: callId, name: "bash", arguments: { command: `cmd-${call}` } }],
+					},
+					`${++id}`,
+					parent,
+					new Date(Date.parse("2026-10-30T00:00:00.000Z") + at++ * 1000).toISOString(),
+				),
+			)
+			parent = String(id)
+			busy.push(
+				entry(
+					{ role: "toolResult", toolCallId: callId, content: [{ type: "text", text: `out-${call}` }] },
+					`${++id}`,
+					parent,
+					new Date(Date.parse("2026-10-30T00:00:00.000Z") + at++ * 1000).toISOString(),
+				),
+			)
+			parent = String(id)
+		}
+		busy.push(
+			entry(
+				{ role: "assistant", content: [{ type: "text", text: "done" }] },
+				`${++id}`,
+				parent,
+				"2026-10-30T00:00:59.000Z",
+			),
+		)
+
+		const feed = renderStepSummary(busy as unknown as SessionEntry[], { width: 60 })
+		expect(feed).toHaveLength(6 /* default toolLines */ + 2 /* prompt + assistant */ + 1 /* counts */)
+		expect(feed.some((line) => line.includes("cmd-1"))).toBe(false) // the oldest call fell out of the tail
+		expect(feed.some((line) => line.includes("cmd-5"))).toBe(true) // the newest stayed
+		expect(feed.at(-1)).toContain("+2 more tool calls") // two calls dropped, in calls — not lines
+	})
+
+	it("bounds the assistant tail and marks the cut", () => {
+		const chatty = [
+			prompt,
+			entry(
+				{
+					role: "assistant",
+					content: [
+						{ type: "text", text: ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine"].join("\n") },
+					],
+				},
+				"2",
+				"1",
+				"2026-10-30T00:00:01.000Z",
+			),
+		]
+		const feed = renderStepSummary(chatty as unknown as SessionEntry[], { width: 60 })
+		expect(feed.some((line) => line.includes("one"))).toBe(false) // the head is gone
+		expect(feed.some((line) => line.includes("… six"))).toBe(true) // the tail begins, marked
+		expect(feed.some((line) => line.includes("nine"))).toBe(true)
+	})
+
+	it("says so when nothing was recorded", () => {
+		expect(renderStepSummary([], { width: 60 })).toEqual(["(nothing recorded yet)"])
+	})
+})
+
+describe("bounded full view (inspection §14.11)", () => {
+	const long = (lines: number, prefix: string): string =>
+		Array.from({ length: lines }, (_, index) => `${prefix}-${index + 1}`).join("\n")
+
+	it("bounds the prompt's head and the assistant text's tail with honest markers", () => {
+		const bounded = renderStepTranscript(
+			[
+				{
+					type: "custom_message",
+					customType: "kimchi-workflow-agent",
+					content: long(14, "line"),
+					display: false,
+					id: "1",
+					parentId: null,
+					timestamp: "2026-10-30T00:00:00.000Z",
+				},
+				{
+					type: "message",
+					message: { role: "assistant", content: [{ type: "text", text: long(14, "note") }] },
+					id: "2",
+					parentId: "1",
+					timestamp: "2026-10-30T00:00:01.000Z",
+				},
+			] as unknown as SessionEntry[],
+			{ width: 60, bounded: true },
+		)
+		// The prompt keeps its head (the instruction) and says what was cut.
+		expect(bounded.some((line) => /\bline-1\b/.test(line))).toBe(true)
+		expect(bounded.some((line) => /\bline-11\b/.test(line))).toBe(false)
+		expect(bounded.some((line) => line.includes("+4 more lines"))).toBe(true)
+		// The assistant text keeps its tail (the latest state) and says what is above.
+		expect(bounded.some((line) => /\bnote-1\b/.test(line))).toBe(false)
+		expect(bounded.some((line) => /\bnote-14\b/.test(line))).toBe(true)
+		expect(bounded.some((line) => line.includes("+6 lines above"))).toBe(true)
+	})
+
+	it("leaves short blocks whole — a bound must not cut what fits", () => {
+		const bounded = renderStepTranscript(
+			[
+				{
+					type: "custom_message",
+					customType: "kimchi-workflow-agent",
+					content: "short prompt",
+					display: false,
+					id: "1",
+					parentId: null,
+					timestamp: "2026-10-30T00:00:00.000Z",
+				},
+			],
+			{ width: 60, bounded: true },
+		)
+		expect(bounded).toEqual(["  ● prompt     short prompt"])
 	})
 })
 

@@ -197,7 +197,17 @@ export interface StepTranscriptRenderOptions {
 	readonly width?: number
 	/** Cap on rendered lines; the remainder is summarized in one final line. Uncapped by default. */
 	readonly maxLines?: number
+	/** Bound the blocks instead of replaying them whole: the prompt keeps its head (≤10 lines) and
+	 * every assistant text its tail (≤8 lines) — the drill-down stays detailed without being a wall. */
+	readonly bounded?: boolean
 }
+
+/** Compact-view bounds (progress §14.11): how much of the tail the activity feed shows. */
+const SUMMARY_TOOL_LINES = 6
+const SUMMARY_TEXT_TAIL = 4
+/** Bounded full-view caps: how many lines each block keeps in drill-down mode. */
+const BOUNDED_PROMPT_LINES = 10
+const BOUNDED_TEXT_TAIL = 8
 
 /** The label column's width — `assistant` is the longest role word and sets it. */
 const LABEL_WIDTH = 9
@@ -226,9 +236,12 @@ export function renderStepTranscript(
 	const lines: string[] = []
 	const toolNames = new Map<string, string>()
 
+	const bounded = options.bounded === true
 	for (const entry of entries) {
 		if (entry.type === "custom_message") {
-			pushMessage(lines, "prompt", textOfContent(entry.content), contentWidth)
+			bounded
+				? pushHeadBounded(lines, "prompt", textOfContent(entry.content), contentWidth, BOUNDED_PROMPT_LINES)
+				: pushMessage(lines, "prompt", textOfContent(entry.content), contentWidth)
 			continue
 		}
 		if (entry.type !== "message") continue
@@ -238,7 +251,9 @@ export function renderStepTranscript(
 			usage?: { totalTokens?: number }
 		}
 		if (message.role === "user") {
-			pushMessage(lines, "prompt", textOfContent(message.content), contentWidth)
+			bounded
+				? pushHeadBounded(lines, "prompt", textOfContent(message.content), contentWidth, BOUNDED_PROMPT_LINES)
+				: pushMessage(lines, "prompt", textOfContent(message.content), contentWidth)
 			continue
 		}
 		if (message.role === "assistant") {
@@ -251,7 +266,10 @@ export function renderStepTranscript(
 					lines.push(prefixed("→", call.name ?? "tool", summarizeToolArguments(call.arguments) ?? "", contentWidth))
 				} else if (part?.type === "text") {
 					const text = (part as { text?: string }).text ?? ""
-					if (text) pushMessage(lines, "assistant", text, contentWidth)
+					if (text)
+						bounded
+							? pushTailBounded(lines, "assistant", text, contentWidth, BOUNDED_TEXT_TAIL)
+							: pushMessage(lines, "assistant", text, contentWidth)
 				}
 			}
 			const tokens = message.usage?.totalTokens
@@ -285,11 +303,165 @@ function pushMessage(lines: string[], label: string, text: string, contentWidth:
 	}
 }
 
-/** A tool line: arrow marker, tool name in the label column, one bounded summary. The label is
+/** A head-bounded block: the first `max` lines, then how many were cut — for text whose BEGINNING
+ * is the point (a prompt's instruction). */
+function pushHeadBounded(lines: string[], label: string, text: string, contentWidth: number, max: number): void {
+	const wrapped = wrap(terminalSafe(text) || "(empty)", contentWidth)
+	if (wrapped.length <= max) {
+		pushMessage(lines, label, text, contentWidth)
+		return
+	}
+	for (const [index, line] of wrapped.slice(0, max).entries()) {
+		lines.push(index === 0 ? `  ● ${label.padEnd(LABEL_WIDTH)}  ${line}` : `${" ".repeat(4 + LABEL_WIDTH + 2)}${line}`)
+	}
+	lines.push(`${" ".repeat(4 + LABEL_WIDTH + 2)}… +${wrapped.length - max} more lines`)
+}
+
+/** A tail-bounded block: how many lines were cut, then the last `max` — for text whose END is the
+ * point (an assistant message's latest state). */
+function pushTailBounded(lines: string[], label: string, text: string, contentWidth: number, max: number): void {
+	const wrapped = wrap(terminalSafe(text) || "(empty)", contentWidth)
+	if (wrapped.length <= max) {
+		pushMessage(lines, label, text, contentWidth)
+		return
+	}
+	lines.push(`${" ".repeat(4 + LABEL_WIDTH + 2)}… +${wrapped.length - max} lines above`)
+	for (const [index, line] of wrapped.slice(-max).entries()) {
+		lines.push(index === 0 ? `  ● ${label.padEnd(LABEL_WIDTH)}  ${line}` : `${" ".repeat(4 + LABEL_WIDTH + 2)}${line}`)
+	}
+}
+
+export interface StepSummaryOptions {
+	/** Total columns; lines ellipsize to the content column. Default 100, like `/workflow status`. */
+	readonly width?: number
+	/** Tool lines kept in the feed's tail. Default 6. */
+	readonly toolLines?: number
+	/** Wrapped lines kept of the latest assistant text. Default 4. */
+	readonly textTail?: number
+	/** Appended to the counts footer — each surface states its own keys. */
+	readonly hint?: string
+}
+
+/** The step view's DEFAULT (progress §14.11): what the step is doing, at a glance — the prompt's
+ * first line, the tail of the tool activity with durations, the latest assistant text's tail, and
+ * a counts footer. One pass over the same entries the full view renders, so live and post-hoc are
+ * the same function of the same input. Pure: entries in, strings out. */
+export function renderStepSummary(entries: readonly SessionEntry[], options: StepSummaryOptions = {}): string[] {
+	const width = options.width ?? 100
+	const toolLines = options.toolLines ?? SUMMARY_TOOL_LINES
+	const textTail = options.textTail ?? SUMMARY_TEXT_TAIL
+	const contentWidth = Math.max(20, width - 4 - LABEL_WIDTH - 2)
+
+	let prompt: string | undefined
+	type ToolLine = { marker: string; name: string; summary: string; suffix: string }
+	const toolHistory: ToolLine[] = []
+	const toolNames = new Map<string, string>() // toolCallId → name, so a result line can carry its call's name
+	const callAt = new Map<string, string>() // toolCallId → the call entry's timestamp, for pairing a duration
+	let lastText = ""
+
+	for (const entry of entries) {
+		if (entry.type === "custom_message") {
+			if (prompt === undefined) prompt = firstLine(textOfContent(entry.content), contentWidth)
+			continue
+		}
+		if (entry.type !== "message") continue
+		const message = (entry as SessionMessageEntry).message as { role?: string; content?: unknown }
+		if (message.role === "user") {
+			if (prompt === undefined) prompt = firstLine(textOfContent(message.content), contentWidth)
+			continue
+		}
+		if (message.role === "assistant") {
+			const parts = Array.isArray(message.content) ? (message.content as { type?: string }[]) : []
+			for (const part of parts) {
+				if (part?.type === "toolCall") {
+					const call = part as unknown as { id?: string; name?: string; arguments?: unknown }
+					if (call.id && call.name) {
+						toolNames.set(call.id, call.name)
+						callAt.set(call.id, entry.timestamp)
+					}
+					toolHistory.push({
+						marker: "→",
+						name: call.name ?? "tool",
+						summary: summarizeToolArguments(call.arguments) ?? "",
+						suffix: "",
+					})
+				} else if (part?.type === "text") {
+					const text = (part as { text?: string }).text ?? ""
+					if (text) lastText = text
+				}
+			}
+		}
+		if (message.role === "toolResult") {
+			const result = message as { toolCallId?: string; isError?: boolean }
+			const startedAt = result.toolCallId ? callAt.get(result.toolCallId) : undefined
+			const duration = startedAt !== undefined ? durationBetween(startedAt, entry.timestamp) : undefined
+			toolHistory.push({
+				marker: result.isError === true ? "←!" : "←",
+				name: (result.toolCallId ? toolNames.get(result.toolCallId) : undefined) ?? "tool",
+				summary: summarizeToolResult(textOfContent(message.content)) ?? "",
+				suffix: duration !== undefined ? ` · ${duration}` : "",
+			})
+		}
+	}
+
+	const lines: string[] = []
+	if (prompt !== undefined) lines.push(`  ● ${"prompt".padEnd(LABEL_WIDTH)}  ${prompt}`)
+	// The feed keeps the TAIL of the tool activity — what the step is doing NOW — and reports how
+	// much older activity is behind it, in calls (a call implies its result, so the count is honest).
+	const toolTail = toolHistory.slice(-toolLines)
+	for (const toolLine of toolTail)
+		lines.push(prefixed(toolLine.marker, toolLine.name, toolLine.summary, contentWidth, toolLine.suffix))
+	if (lastText) {
+		const wrapped = wrap(terminalSafe(lastText), contentWidth)
+		const tail = wrapped.slice(-textTail)
+		for (const [index, line] of tail.entries()) {
+			const prefix =
+				index === 0
+					? `  ● ${"assistant".padEnd(LABEL_WIDTH)}  ${wrapped.length > textTail ? "… " : ""}`
+					: `${" ".repeat(4 + LABEL_WIDTH + 2)}`
+			lines.push(`${prefix}${line}`)
+		}
+	}
+
+	const counts: string[] = []
+	if (toolHistory.length > toolLines) {
+		const callsDropped = toolHistory
+			.slice(0, toolHistory.length - toolLines)
+			.filter((line) => line.marker === "→").length
+		if (callsDropped > 0) counts.push(`… +${callsDropped} more tool calls`)
+	}
+	if (options.hint) counts.push(options.hint)
+	if (counts.length > 0) lines.push(counts.join(" · "))
+	return lines.length > 0 ? lines : ["(nothing recorded yet)"]
+}
+
+/** The first line of a text, ellipsized to the content column — a prompt's first line is the
+ * instruction; the rest is one Enter away. */
+function firstLine(text: string, contentWidth: number): string {
+	const line = terminalSafe(text).split("\n")[0] ?? ""
+	return line.length > contentWidth ? `${line.slice(0, contentWidth - 1)}…` : line
+}
+
+/** A duration between two entry timestamps, the way a progress clock would show it: one decimal
+ * under a minute, minutes-and-seconds above. Malformed timestamps render nothing (degrade, never
+ * fail) — the caller treats undefined as "no duration to show". */
+function durationBetween(from: string, to: string): string | undefined {
+	const start = Date.parse(from)
+	const end = Date.parse(to)
+	if (Number.isNaN(start) || Number.isNaN(end) || end < start) return undefined
+	const seconds = (end - start) / 1000
+	if (seconds < 60) return `${seconds.toFixed(1)}s`
+	const minutes = Math.floor(seconds / 60)
+	return `${minutes}m${Math.round(seconds - minutes * 60)}s`
+}
+
+/** A tool line: arrow marker, tool name in the label column, one bounded summary — and optionally a
+ * trailing suffix (a paired duration), which reserves its own columns before truncation. The label is
  * stripped too — it is read back off disk, same as the content (security-fix-001). */
-function prefixed(marker: string, label: string, content: string, contentWidth: number): string {
-	const truncated = content.length > contentWidth ? `${content.slice(0, contentWidth - 1)}…` : content
-	return `  ${marker} ${terminalSafe(label).padEnd(LABEL_WIDTH)}  ${truncated}`.replace(/\s+$/, "")
+function prefixed(marker: string, label: string, content: string, contentWidth: number, suffix = ""): string {
+	const budget = Math.max(20, contentWidth - suffix.length)
+	const truncated = content.length > budget ? `${content.slice(0, budget - 1)}…` : content
+	return `  ${marker} ${terminalSafe(label).padEnd(LABEL_WIDTH)}  ${truncated}${suffix}`.replace(/\s+$/, "")
 }
 
 /** A message's text: a bare string, or the concatenation of its text parts — control bytes stripped,

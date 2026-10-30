@@ -30,7 +30,7 @@ import { runArtifactsDir } from "../project-dir.ts"
 import { projectRunEvents } from "../reconcile-runs.ts"
 import { loadRecordedWorkflow, workflowSourceOf } from "../recorded-workflow.ts"
 import { type ActivityBus, type StepActivity, terminalSafe } from "../step-activity.ts"
-import { loadStepTranscript, renderStepTranscript, stepTranscriptFile } from "../step-transcript.ts"
+import { loadStepTranscript, renderStepSummary, renderStepTranscript, stepTranscriptFile } from "../step-transcript.ts"
 import type { RunStore } from "../types.ts"
 import { type CommandCtx, describe, resolveRunRef } from "./context.ts"
 
@@ -172,6 +172,7 @@ export async function handleInspect(
 	const transcriptFile = stepTranscriptFile(dir, transcriptRef)
 	let lastSize = sizeOf(transcriptFile)
 	let transcriptState = loadStepTranscript({ dir, ...transcriptRef })
+	let expanded = false // the drill-down state — Enter toggles it, and each surface states its keys
 	const reload = (): void => {
 		const size = sizeOf(transcriptFile)
 		if (size === lastSize) return // nothing new landed — the poke was for an unchanged file
@@ -179,17 +180,26 @@ export async function handleInspect(
 		transcriptState = loadStepTranscript({ dir, ...transcriptRef })
 	}
 
-	const assemble = (width: number): readonly string[] => {
+	const assemble = (width: number, hint?: string): readonly string[] => {
 		const header = [
 			`workflow ${workflow.name} · run ${runIdHash(runId)}`,
 			`step ${target.name} (${target.path}) · attempt ${attempt}${resumeKey.dynamic ? " · resume key dynamic" : ""}`,
 		]
+		// The step view's default is the COMPACT feed (§14.11); the full transcript is a bounded
+		// drill-down behind Enter. The hint names the keys only where keys exist — an overlay.
 		const body =
 			transcriptState.ok && transcriptState.entries.length > 0
-				? renderStepTranscript(transcriptState.entries, { width })
+				? expanded
+					? renderStepTranscript(transcriptState.entries, { width, bounded: true })
+					: renderStepSummary(transcriptState.entries, { width, ...(hint ? { hint } : {}) })
 				: liveBody(width)
 		const footer = transcriptState.ok ? `transcript: ${transcriptState.file}` : undefined
 		return [header, "", body, footer].flat().filter((line) => line !== undefined)
+	}
+
+	/** The drill-down toggle the overlay's Enter key drives. */
+	const toggleDetail = (): void => {
+		expanded = !expanded
 	}
 
 	/** What a live step shows before its transcript has anything in it: the bus's ring is the earliest
@@ -203,7 +213,14 @@ export async function handleInspect(
 
 	if (live && ctx.mode === "tui" && typeof (ctx.ui as { custom?: unknown }).custom === "function") {
 		try {
-			await showOverlay(ctx.ui.custom.bind(ctx.ui) as ShowCustom, deps, runId, assemble, reload)
+			await showOverlay(
+				ctx.ui.custom.bind(ctx.ui) as ShowCustom,
+				deps,
+				runId,
+				(width: number) => assemble(width, "enter: full detail · esc: close"),
+				reload,
+				toggleDetail,
+			)
 		} catch (error) {
 			// A surface failure must not fail the command — the §7.6.1 lesson: degrade, never take /workflow down.
 			ctx.ui.notify(`workflow: could not open the inspect overlay: ${describe(error)}`, "warning")
@@ -461,6 +478,7 @@ async function showOverlay(
 	runId: string,
 	assemble: (width: number) => readonly string[],
 	reload: () => void,
+	onDetail: () => void,
 ): Promise<void> {
 	let requestRender: (() => void) | undefined
 	const unsubscribe = deps.activityBus?.subscribe(runId, () => {
@@ -476,6 +494,10 @@ async function showOverlay(
 				read: (width: number) => [...assemble(width)],
 				requestRender: () => requestRender?.(),
 				matches: (data, binding) => keybindings.matches(data, binding),
+				onDetail: () => {
+					onDetail()
+					requestRender?.()
+				},
 				done: () => done(undefined),
 			})
 		})
