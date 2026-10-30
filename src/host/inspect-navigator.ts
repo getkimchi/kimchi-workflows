@@ -235,15 +235,23 @@ export async function showNavigator(args: {
 				done: (result: unknown) => void,
 			): FocusedComponent => {
 				requestRender = () => tui.requestRender()
+				// `matches` is a method on the harness's Keybindings instance: pass the BARE function on and
+				// its receiver is gone (`this.keysById` is then undefined and every keypress crashes — the
+				// crash report that found this). An arrow wrapper keeps the receiver; a harness without
+				// `matches` at all means "not bound", and the helpers fall back to comparing raw bytes.
+				const matches =
+					typeof keybindings.matches === "function"
+						? (data: string, keyId: string) => keybindings.matches(data, keyId)
+						: undefined
 				return {
 					render: (width: number): string[] => (mode === "transcript" ? transcriptPane(width) : listPane()),
 					handleInput: (data: string): void => {
 						if (mode === "list") {
-							if (isUpKey(data, keybindings.matches)) move(-1)
-							else if (isDownKey(data, keybindings.matches)) move(1)
-							else if (isEnterKey(data, keybindings.matches)) enterTranscript()
-							else if (isEscapeKey(data, keybindings.matches)) done(undefined)
-						} else if (isEscapeKey(data, keybindings.matches)) {
+							if (isUpKey(data, matches)) move(-1)
+							else if (isDownKey(data, matches)) move(1)
+							else if (isEnterKey(data, matches)) enterTranscript()
+							else if (isEscapeKey(data, matches)) done(undefined)
+						} else if (isEscapeKey(data, matches)) {
 							mode = "list" // back to the list, not out of the view
 							requestRender?.()
 						}

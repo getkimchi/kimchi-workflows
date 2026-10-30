@@ -109,20 +109,20 @@ afterEach(() => {
 	pendingClose.length = 0
 })
 
-/** The fake keybinding matcher: the raw terminal bytes each key id arrives as. A switch, because
- * the navigator drives five of them and a ternary chain reads like line noise. */
-function fakeMatches(data: string, keyId: string): boolean {
-	switch (keyId) {
-		case "escape":
-			return data === "\x1b"
-		case "up":
-			return data === "\x1b[A"
-		case "down":
-			return data === "\x1b[B"
-		case "enter":
-			return data === "\r"
-		default:
-			return data === keyId
+/** The harness's Keybindings shape, faithfully: `matches` reads per-id key lists off `this`.
+ * A factory that passes the BARE method on loses the receiver — `this.keysById` is then undefined
+ * and every keypress crashes the process (the crash report that found this). Mounting with a
+ * class instance is the regression guard: detached calls blow up right here in the test. */
+class FakeKeybindings {
+	private readonly keysById = new Map<string, string[]>([
+		["escape", ["\x1b"]],
+		["up", ["\x1b[A"]],
+		["down", ["\x1b[B"]],
+		["enter", ["\r"]],
+	])
+
+	matches(data: string, keyId: string): boolean {
+		return (this.keysById.get(keyId) ?? []).includes(data)
 	}
 }
 
@@ -255,7 +255,7 @@ async function liveRun() {
 function mount(factory: TestFactory) {
 	const rendered: string[][] = []
 	const close = pendingClose.shift()
-	const component = factory({ requestRender: () => {} }, {}, { matches: fakeMatches }, () => close?.(undefined)) as {
+	const component = factory({ requestRender: () => {} }, {}, new FakeKeybindings(), () => close?.(undefined)) as {
 		render(width: number): string[]
 		handleInput?(data: string): void
 	}
