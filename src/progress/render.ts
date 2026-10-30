@@ -49,6 +49,14 @@ export interface RenderOptions {
 	 * id's trailing 8 characters, which is the same string.
 	 */
 	readonly runLabel?: string
+	/**
+	 * The panel's tree-row budget (progress §6.7): at or below it the tree renders whole; above it the
+	 * panel folds to its ONE-LINE summary — a widget gets no keyboard input (§6.6), so the fold
+	 * breathes with the tree instead of waiting for a keypress. Defaults to {@link DEFAULT_MAX_TREE_ROWS}.
+	 * `/workflow status` opts out (its whole point is the fully expanded tree); tests raise it to
+	 * assert tree layout below the fold.
+	 */
+	readonly maxTreeRows?: number
 }
 
 /** The frame's own left margin (progress §4.1) — no side borders, so this is the only horizontal inset. */
@@ -67,8 +75,52 @@ const MIN_NAME_FIELD = 12
 const TRACK_SEGMENTS = 10
 const ELLIPSIS = "…"
 
-/** PI's own default braille spinner (progress §4.4) — the only animation in the panel. */
+/** PI's own default braille spinner (progress §4.4) — the only animation in the panel, and the only
+ * animation in the FOLD: a tall run's one-line form keeps breathing at the same 120 ms (§6.7). */
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const
+
+/**
+ * The folded one-line panel (progress §6.7): `⠋ fix-until-green · 2 of 5 · 01:12 · 12.4k tok`.
+ *
+ * It carries the footer's facts (tally, cost) plus the header's (name, live clock) so nothing the
+ * panel was telling the user is lost to the fold — the TREE is what folds, not the run. The glyph is
+ * the RUN's state (the spinner while in progress, so the fold keeps breathing at 120 ms), and every
+ * live value stays whole-second (§4.8): a folded line inside one second is byte-identical.
+ */
+function foldedLine(view: ProgressView, options: RenderOptions): string {
+	const { width, theme } = options
+	const glyph =
+		view.status === "in_progress"
+			? (SPINNER[(options.frame ?? 0) % SPINNER.length] as string)
+			: view.status === "completed"
+				? "✓"
+				: view.status === "crashed"
+					? "✗"
+					: view.status === "cancelled"
+						? "■"
+						: "?"
+	const glyphColour: ProgressColour =
+		view.status === "in_progress"
+			? "accent"
+			: view.status === "completed"
+				? "success"
+				: view.status === "crashed"
+					? "error"
+					: "dim"
+	// The clock is the one LIVE value in the fold — whole seconds (§4.8), advanced by the frame delta.
+	const elapsed =
+		view.live && view.status === "in_progress" ? (view.elapsedMs ?? 0) + frameElapsed(options) : (view.elapsedMs ?? 0)
+	const rest = dotted([
+		`${view.stepsSettled} of ${view.stepsTotal}`,
+		formatClock(elapsed),
+		view.tokens > 0 ? `${formatTokens(view.tokens)} tok` : undefined,
+	])
+	const name = truncate(view.workflowName, Math.max(1, width - GUTTER - 2 - rest.length - 1))
+	return `${" ".repeat(GUTTER)}${theme.fg(glyphColour, glyph)} ${theme.fg("accent", name)}${theme.fg("dim", ` ${rest}`)}`.replace(
+		/\s+$/,
+		"",
+	)
+}
 
 /** One glyph per `StepState` (progress §4.4). `crashed` splits on `optional`, which is the whole point of the flag. */
 const STATE_GLYPHS: Readonly<Record<Exclude<StepState, "in_progress">, readonly [string, ProgressColour]>> = {
@@ -111,14 +163,22 @@ interface Layout {
 	readonly tokenField: number
 }
 
+/** The default tree-row budget before the panel folds to its one-line summary (progress §6.7). */
+export const DEFAULT_MAX_TREE_ROWS = 4
+
 /**
  * Draw the panel: a blank line, the header rule, the tree, and the footer rule that IS the progress bar
  * (progress §4.1). `rows` comes from `collapse` — this module decides nothing about which rows exist,
- * only how they look.
+ * only how they look. A tree taller than the row budget (§6.7) draws as ONE folded line instead: the
+ * same run facts the footer would have carried, spinner and live clock included, so a tall run costs
+ * the panel nothing while everything stays reachable — the tree via `/workflow status` (§11.4).
  */
 export function render(view: ProgressView, rows: readonly ProgressRow[], options: RenderOptions): string[] {
 	const { width, theme } = options
 	const elapsedDelta = frameElapsed(options)
+	if (rows.length > (options.maxTreeRows ?? DEFAULT_MAX_TREE_ROWS)) {
+		return ["", foldedLine(view, options), ""]
+	}
 	const cells = rows.map((row) => rowCells(row, options.frame ?? 0, elapsedDelta))
 	const layout = planLayout(cells, width)
 

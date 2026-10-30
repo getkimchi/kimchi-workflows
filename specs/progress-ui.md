@@ -413,6 +413,16 @@ focused component; a widget is not one), so there is no expand/collapse key. The
 fully expanded tree is reachable through `/workflow status` (§11.4) and through the
 `/workflow status` output (§11.4). *(decision)*
 
+6.7. **The panel folds to ONE line when its tree exceeds four rows** — the default tree-row
+budget (`DEFAULT_MAX_TREE_ROWS`, raised by tests, opted out of only by `/workflow status`, whose
+whole point is the full tree). The folded line carries the run's facts — `⠋ fix-until-green ·
+2 of 5 · 01:12 · 12.4k tok` — spinner animating at the same 120 ms, live clock whole-second, name
+truncated first — so the TREE is what folds, not the run. It breathes: constructs collapse as they
+settle (§6.1), so a tree that comes back within the budget renders whole again without anyone
+touching anything. This is §6.6's consequence made small: a widget can take no keypress, so the
+fold is either automatic or absent — and a tall panel is a cost the user pays on EVERY frame, which
+makes the fold the honest default. The tree remains one command away (§11.4). *(decision)*
+
 ## 7. Live surface
 
 7.1. **One widget, keyed `pi-workflows:progress`, placement `aboveEditor`**, installed

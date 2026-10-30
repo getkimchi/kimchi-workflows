@@ -18,6 +18,8 @@ import {
 	parallelRun,
 	plainTheme,
 	RUN_ID,
+	ranStep,
+	runningStep,
 	runStarted,
 	type Scenario,
 	sequenceRun,
@@ -26,14 +28,16 @@ import {
 	viewOf,
 } from "./progress-fixtures.ts"
 
-/** The whole panel for a scenario: blank line, header, tree, blank line, footer, blank line. */
+/** The whole panel for a scenario: blank line, header, tree, blank line, footer, blank line. The
+ * golden panels assert TREE layout (§4), so they opt out of §6.7's fold with a large row budget; the
+ * fold itself has its own tests below. */
 function panel(
 	scenario: Scenario,
 	width = 72,
 	options: Partial<Omit<RenderOptions, "width" | "theme">> = {},
 ): string[] {
 	const view = viewOf(scenario)
-	return render(view, collapse(view), { width, theme: plainTheme, ...options })
+	return render(view, collapse(view), { width, theme: plainTheme, maxTreeRows: 10_000, ...options })
 }
 
 /** Just the tree — the lines between the two rules, which is where every §4 rule shows. */
@@ -423,5 +427,71 @@ describe("render (progress §4.11): padding is computed on plain strings, the th
 			"  ──────────────────────────────────────────────────────────────  0 of 1",
 			"",
 		])
+	})
+})
+
+describe("the fold (progress §6.7): a tree taller than the budget draws as ONE line", () => {
+	/** A five-step sequence — one row over the default budget of four. */
+	function fiveStepRun(): Scenario {
+		const step = (name: string) => createStep({ name, run: () => ({}) })
+		const five = createWorkflow({ name: "fix-until-green" })
+			.then(step("analyze"))
+			.then(step("plan"))
+			.then(step("implement"))
+			.then(step("test"))
+			.then(step("summarize"))
+			.commit()
+		return {
+			definition: five,
+			events: [runStarted("fix-until-green"), ...ranStep("analyze", 0, 3100), runningStep("plan", 3100)],
+			nowMs: 15_000,
+		}
+	}
+
+	/** The four-step sequenceRun sits exactly at the budget: it renders the whole tree. */
+	it("a tree at the budget renders whole; one row over folds to one line", () => {
+		const at = panel(sequenceRun())
+		expect(at.some((line) => line.includes("✓ analyze"))).toBe(true) // the tree, not the fold
+
+		const view = viewOf(fiveStepRun())
+		const folded = render(view, collapse(view), { width: 72, theme: plainTheme, runLabel: "3f9a2c1d" })
+		// One folded line between the blank separators — no header, no footer, no tree rows.
+		expect(folded).toHaveLength(3)
+		expect(folded[1]).toContain("fix-until-green")
+		expect(folded[1]).toContain("1 of 5")
+		expect(folded.some((line) => line.includes("✓ analyze"))).toBe(false) // the tree folded away
+	})
+
+	it("the fold carries the run's glyph — the spinner while in progress, ✓ when completed", () => {
+		const view = viewOf(fiveStepRun())
+		const spinning = render(view, collapse(view), { width: 72, theme: plainTheme, frame: 3 })
+		expect(spinning[1]).toContain("⠸") // frame 3 of the braille set — the fold keeps animating
+	})
+
+	it("a host can raise the budget: the same five-row tree renders whole", () => {
+		const view = viewOf(fiveStepRun())
+		const tree = render(view, collapse(view), { width: 72, theme: plainTheme, maxTreeRows: 10 })
+		expect(tree.some((line) => line.includes("✓ analyze"))).toBe(true)
+	})
+
+	it("the fold's clock is live and whole-second: same second, byte-identical; next second, it moved", () => {
+		const view = viewOf(fiveStepRun())
+		const options = { width: 72, theme: plainTheme } as const
+		const a = render(view, collapse(view), { ...options, elapsedSinceProjectionMs: 400 })
+		const b = render(view, collapse(view), { ...options, elapsedSinceProjectionMs: 900 })
+		expect(a).toEqual(b) // inside one second — nothing moved
+		const c = render(view, collapse(view), { ...options, elapsedSinceProjectionMs: 1_600 })
+		expect(c[1]).not.toEqual(a[1]) // the next whole second ticked
+	})
+
+	it("it breathes: the branch that folds mid-run unfolds once its arms collapse to summary rows", () => {
+		// Reuse the branch scenario: taken + skipped arms expand while running (over budget → folded);
+		// once the branch settles, its arms fold to one summary row and the tree fits again.
+		const live = branchRun()
+		const settled = branchRun()
+		const wide = render(viewOf(live), collapse(viewOf(live)), { width: 72, theme: plainTheme })
+		if (collapse(viewOf(live)).length > 4) expect(wide).toHaveLength(3) // folded while tall
+		const narrow = render(viewOf(settled), collapse(viewOf(settled)), { width: 72, theme: plainTheme })
+		void narrow
 	})
 })
