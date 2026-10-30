@@ -477,6 +477,21 @@ describe("the fold (progress §6.7): a tree taller than the budget draws as ONE 
 		expect(folded[1]).not.toContain("npm test") // the message outranks the tool — subagent-view parity
 	})
 
+	it("a foreach in flight: the fold reaches THROUGH the construct to the running item (§6.7)", () => {
+		// The first in-progress row is the review-each CONSTRUCT, which carries no hints \u2014 the fold
+		// must find the running item leaf underneath it, or the line names the construct and goes quiet.
+		const view = viewOf(foreachRun())
+		const hinted = withActivity(
+			view,
+			new Map([["review-each@1/review", "bash · npm test"]]),
+			new Map([["review-each@1/review", "Comparing the diff against the schema"]]),
+		)
+		const folded = render(hinted, collapse(hinted), { width: 100, theme: plainTheme, frame: 0 })
+		expect(folded).toHaveLength(3) // still ONE line \u2014 nine rows fold
+		expect(folded[1]).toContain("review · Comparing the diff against the schema") // the ITEM, not the construct
+		expect(folded[1]).not.toContain("npm test") // the message outranks the tool
+	})
+
 	it("before any text, the fold falls back to the running step's tool hint", () => {
 		const view = viewOf(fiveStepRun())
 		const hinted = withActivity(view, new Map([["plan", "bash · npm test"]]))

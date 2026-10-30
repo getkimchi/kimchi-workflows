@@ -79,6 +79,21 @@ const ELLIPSIS = "…"
  * animation in the FOLD: a tall run's one-line form keeps breathing at the same 120 ms (§6.7). */
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const
 
+/** The first in-progress node that has something to say, DEPTH-FIRST over the tree — the row
+ * list is not enough: a foreach folds its body to one row per ITEM, so the running STEP carrying
+ * the hints may have no row of its own. Constructs and bare items carry none by construction, so
+ * they are never the match. */
+function hintedNode(nodes: readonly ProgressNode[]): ProgressNode | undefined {
+	for (const node of nodes) {
+		if (node.state === "in_progress" && (node.messageHint !== undefined || node.activityHint !== undefined)) {
+			return node
+		}
+		const child = hintedNode(node.children)
+		if (child !== undefined) return child
+	}
+	return undefined
+}
+
 /**
  * The folded one-line panel (progress §6.7): `⠋ fix-until-green · 2 of 5 · 01:12 · 12.4k tok`, and —
  * while a step is running — WHAT it is doing: `⠋ dev · collect: read · src/engine/x.ts · 37 of 79 · …`.
@@ -123,7 +138,11 @@ function foldedLine(view: ProgressView, rows: readonly ProgressRow[], options: R
 	// the run's identity and its facts are stable while the hint is the freshest, least structured one.
 	// Subagent-view parity: what the step last SAID outranks what tool it is running — the message
 	// persists while tools work and is replaced only by a newer text. Before any text, the tool hint.
-	const running = rows.find((row) => row.node.state === "in_progress")?.node
+	// The pick prefers the row that HAS something to say, wherever it sits: the first in-progress row
+	// is often a CONSTRUCT or a bare foreach ITEM, which carry no hints — the hints live on the
+	// running STEP leaf underneath them (keyed by its dynamic path, e.g. `batch@7/review`). Falling
+	// back through any in-progress leaf to any in-progress row keeps a name on the line regardless.
+	const running = hintedNode(view.nodes) ?? rows.find((row) => row.node.state === "in_progress")?.node
 	const live = running?.messageHint ?? running?.activityHint
 	const hint =
 		running !== undefined
