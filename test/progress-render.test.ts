@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest"
 import type { RunEvent } from "../src/engine/types.ts"
 import { createStep, createWorkflow } from "../src/flow/index.ts"
-import { collapse } from "../src/progress/collapse.ts"
 import { withActivity } from "../src/progress/activity.ts"
+import { collapse } from "../src/progress/collapse.ts"
 import { buildOutline } from "../src/progress/outline.ts"
 import { project } from "../src/progress/project.ts"
 import { formatTokens, type RenderOptions, render } from "../src/progress/render.ts"
@@ -471,11 +471,7 @@ describe("the fold (progress §6.7): a tree taller than the budget draws as ONE 
 
 	it("the fold prefers what the running step last SAID to what tool it is running (§6.7)", () => {
 		const view = viewOf(fiveStepRun())
-		const both = withActivity(
-			view,
-			new Map([["plan", "bash · npm test"]]),
-			new Map([["plan", "Reading the failures"]]),
-		)
+		const both = withActivity(view, new Map([["plan", "bash · npm test"]]), new Map([["plan", "Reading the failures"]]))
 		const folded = render(both, collapse(both), { width: 100, theme: plainTheme, frame: 0 })
 		expect(folded[1]).toContain("plan · Reading the failures")
 		expect(folded[1]).not.toContain("npm test") // the message outranks the tool — subagent-view parity
