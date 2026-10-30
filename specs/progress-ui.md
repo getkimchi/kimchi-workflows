@@ -710,6 +710,20 @@ does not exist until the step runs. The command recovers the RESOLVED key from a
 recorded `agent-steer`/`agent-error` when one exists, and otherwise says so in the
 header rather than guessing at a file. *(decision)*
 
+14.9. **Bare `/workflow inspect` on a live TUI run opens the NAVIGATOR** — the
+panel's step list as a focused, navigable overlay: the same projection the panel
+draws, kept live by the bus's pokes plus a one-second poll (function steps settle
+without emitting activity). Up/down or j/k move between STEP rows (constructs show
+as structural, non-selectable rows); Enter opens the selected step's transcript in
+the same overlay; Escape goes back to the list, and out from the list. This is the
+subagent-view shape, and the honest companion to §6.6/§6.7: a widget can take no
+keys, so the pinned panel folds automatically — and a focused component takes keys,
+so the interactive tree lives here. The selection FOLLOWS the run's current step
+until the user moves it, then it is the user's until the view closes. Explicit
+run/path arguments keep the direct behaviour, and so does every non-TUI mode. The
+tree can demand no path while the navigator is open — several steps running is
+what it is FOR. *(decision)*
+
 ## Open questions
 
 *None outstanding.* What remains is implementation-level: the exact braille frame set,

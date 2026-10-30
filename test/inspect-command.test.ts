@@ -109,6 +109,23 @@ afterEach(() => {
 	pendingClose.length = 0
 })
 
+/** The fake keybinding matcher: the raw terminal bytes each key id arrives as. A switch, because
+ * the navigator drives five of them and a ternary chain reads like line noise. */
+function fakeMatches(data: string, keyId: string): boolean {
+	switch (keyId) {
+		case "escape":
+			return data === "\x1b"
+		case "up":
+			return data === "\x1b[A"
+		case "down":
+			return data === "\x1b[B"
+		case "enter":
+			return data === "\r"
+		default:
+			return data === keyId
+	}
+}
+
 describe("handleInspect — post-hoc (recorded runs)", () => {
 	it("shows a step's transcript from its sidecar file, with the file named", async () => {
 		const { store, dir } = await recordedRun()
@@ -205,53 +222,51 @@ describe("handleInspect — post-hoc (recorded runs)", () => {
 	})
 })
 
+/** A run whose `collect` step is executing (re-started, as a resume or loop body would), with a
+ * sidecar being written as it goes. */
+async function liveRun() {
+	const { store, dir } = await recordedRun()
+	const at = (offset: number) => new Date(Date.parse("2026-10-30T10:00:00.000Z") + offset).toISOString()
+	await store.appendEvent({
+		type: "run-execution-started",
+		runId: RUN_ID,
+		executionId: "e1",
+		owner: { host: "h", pid: 1, processStartedAt: at(0) },
+		at: at(0),
+	})
+	// The run is executing again and `collect` is in flight: the same path re-started is what makes
+	// the run live AND gives the view a step in progress to target.
+	await store.appendEvent({ type: "run-resumed", runId: RUN_ID, fromPath: "collect", at: at(2000) })
+	await store.appendEvent({ type: "step-started", runId: RUN_ID, path: "collect", input: undefined, at: at(2100) })
+	const sessionDir = path.join(dir, "session")
+	const transcriptDir = path.join(sessionDir, "workflow")
+	const writer = createStepTranscriptWriter(transcriptDir, {
+		runId: RUN_ID,
+		workflowName: "audit",
+		path: "collect",
+		attempt: 1,
+		stepName: "collect",
+	} as Parameters<typeof createStepTranscriptWriter>[1])
+	return { store, dir, sessionDir, writer }
+}
+
+/** Mount the overlay a live TUI invocation opened: the component PI would have rendered. Closing it
+ * (a dismiss key) resolves the `ui.custom` promise the command is awaiting, exactly as PI would. */
+function mount(factory: TestFactory) {
+	const rendered: string[][] = []
+	const close = pendingClose.shift()
+	const component = factory({ requestRender: () => {} }, {}, { matches: fakeMatches }, () => close?.(undefined)) as {
+		render(width: number): string[]
+		handleInput?(data: string): void
+	}
+	return {
+		component,
+		draw: () => rendered.push(component.render(80)),
+		last: () => rendered.at(-1) ?? [],
+	}
+}
+
 describe("handleInspect — live (executing runs)", () => {
-	/** A run whose `collect` step is executing (re-started, as a resume or loop body would), with a
-	 * sidecar being written as it goes. */
-	async function liveRun() {
-		const { store, dir } = await recordedRun()
-		const at = (offset: number) => new Date(Date.parse("2026-10-30T10:00:00.000Z") + offset).toISOString()
-		await store.appendEvent({
-			type: "run-execution-started",
-			runId: RUN_ID,
-			executionId: "e1",
-			owner: { host: "h", pid: 1, processStartedAt: at(0) },
-			at: at(0),
-		})
-		// The run is executing again and `collect` is in flight: the same path re-started is what makes
-		// the run live AND gives the view a step in progress to target.
-		await store.appendEvent({ type: "run-resumed", runId: RUN_ID, fromPath: "collect", at: at(2000) })
-		await store.appendEvent({ type: "step-started", runId: RUN_ID, path: "collect", input: undefined, at: at(2100) })
-		const sessionDir = path.join(dir, "session")
-		const transcriptDir = path.join(sessionDir, "workflow")
-		const writer = createStepTranscriptWriter(transcriptDir, {
-			runId: RUN_ID,
-			workflowName: "audit",
-			path: "collect",
-			attempt: 1,
-			stepName: "collect",
-		} as Parameters<typeof createStepTranscriptWriter>[1])
-		return { store, dir, sessionDir, writer }
-	}
-
-	/** Mount the overlay a live TUI invocation opened: the component PI would have rendered. Closing it
-	 * (a dismiss key) resolves the `ui.custom` promise the command is awaiting, exactly as PI would. */
-	function mount(factory: TestFactory) {
-		const rendered: string[][] = []
-		const close = pendingClose.shift()
-		const component = factory(
-			{ requestRender: () => {} },
-			{},
-			{ matches: (data: string, keyId: string) => (keyId === "escape" ? data === "\x1b" : data === keyId) },
-			() => close?.(undefined),
-		) as { render(width: number): string[]; handleInput?(data: string): void }
-		return {
-			component,
-			draw: () => rendered.push(component.render(80)),
-			last: () => rendered.at(-1) ?? [],
-		}
-	}
-
 	it("opens a live overlay for the executing step, refreshed by activity events, closed by Escape", async () => {
 		const { store, dir, sessionDir, writer } = await liveRun()
 		const bus = createActivityBus()
@@ -262,7 +277,7 @@ describe("handleInspect — live (executing runs)", () => {
 			store,
 			{ activeRunIds: () => [RUN_ID], activityBus: bus, width: 80 },
 			undefined,
-			undefined,
+			"collect", // explicit target: the DIRECT overlay (bare inspect now opens the navigator)
 		)
 		// The command is async up to the overlay: the factory registers once its promises settle. The
 		// explicit timeout matters — `vi.waitFor` defaults to 1s, and recording the run (file + workflow
@@ -314,7 +329,7 @@ describe("handleInspect — live (executing runs)", () => {
 			store,
 			{ activeRunIds: () => [RUN_ID], activityBus: bus, width: 80 },
 			undefined,
-			undefined,
+			"collect", // explicit target: the DIRECT overlay (bare inspect now opens the navigator)
 		)
 		expect(h.widgets.length).toBeGreaterThan(0)
 		expect(h.widgets[0]?.[0]).toBe("pi-workflows:inspect")
@@ -343,7 +358,7 @@ describe("handleInspect — live (executing runs)", () => {
 			store,
 			{ activeRunIds: () => [RUN_ID], activityBus: bus, width: 80 },
 			undefined,
-			undefined,
+			"collect", // explicit target: the DIRECT overlay (bare inspect now opens the navigator)
 		)
 		await vi.waitFor(() => expect(h.custom).toHaveLength(1), { timeout: 10_000 })
 		const { component, draw, last } = mount(h.custom[0] as TestFactory)
@@ -365,13 +380,135 @@ describe("handleInspect — live (executing runs)", () => {
 		await inspecting
 	})
 
-	it("tells the user when several steps are executing and a path is needed", async () => {
-		const { store, dir } = await liveRun()
+	it("with several steps executing, bare inspect opens the navigator instead of demanding a path", async () => {
+		const { store, dir, sessionDir } = await liveRun()
 		const at = (offset: number) => new Date(Date.parse("2026-10-30T10:00:00.000Z") + offset).toISOString()
-		await store.appendEvent({ type: "step-started", runId: RUN_ID, path: "report", input: undefined, at: at(2000) })
-		const h = fakeCtx("tui", { cwd: dir })
-		await handleInspect(h.ctx, store, { activeRunIds: () => [RUN_ID], width: 80 }, undefined, undefined)
-		expect(h.notes[0]?.[0] ?? "").toContain("2 steps are executing")
+		await store.appendEvent({ type: "step-started", runId: RUN_ID, path: "report", input: undefined, at: at(2200) })
+		const bus = createActivityBus()
+		const h = fakeCtx("tui", { cwd: dir, sessionDir })
+
+		const inspecting = handleInspect(
+			h.ctx,
+			store,
+			{ activeRunIds: () => [RUN_ID], activityBus: bus, width: 80 },
+			undefined,
+			undefined,
+		)
+		await vi.waitFor(() => expect(h.custom).toHaveLength(1), { timeout: 10_000 })
+		const { component, draw, last } = mount(h.custom[0] as TestFactory)
+
+		// The list shows BOTH running steps; the cursor follows the first of them (collect) — no path
+		// demanded, no ambiguity notified: navigating is the answer to "several are running".
+		draw()
+		expect(last().some((line) => line.includes("●") && line.includes("collect"))).toBe(true)
+		expect(last().some((line) => line.includes("●") && line.includes("report"))).toBe(true)
+		expect(last().some((line) => line.includes("❯") && line.includes("collect"))).toBe(true)
+
+		component.handleInput?.("\x1b") // close — the list is the entry, nothing was demanded
+		await inspecting
+	})
+})
+
+describe("the navigator (inspection §14.9): bare inspect on a live run", () => {
+	it("opens on the running step, moves on j/k, inspects on enter, and escapes back then out", async () => {
+		const { store, dir, sessionDir, writer } = await liveRun()
+		const bus = createActivityBus()
+		const h = fakeCtx("tui", { cwd: dir, sessionDir })
+
+		const inspecting = handleInspect(
+			h.ctx,
+			store,
+			{ activeRunIds: () => [RUN_ID], activityBus: bus, width: 80 },
+			undefined,
+			undefined,
+		)
+		await vi.waitFor(() => expect(h.custom).toHaveLength(1), { timeout: 10_000 })
+		const { component, draw, last } = mount(h.custom[0] as TestFactory)
+
+		// The list: header, the key legend, and the tree with the cursor on the RUNNING step.
+		draw()
+		expect(last().some((line) => line.includes("audit"))).toBe(true) // the run header
+		expect(last().some((line) => line.includes("↑↓/jk move"))).toBe(true)
+		expect(last().some((line) => line.includes("❯") && line.includes("collect"))).toBe(true)
+
+		// Down (arrow and j both) moves to the settled step; the cursor is the user's now.
+		component.handleInput?.("\x1b[B")
+		draw()
+		expect(last().some((line) => line.includes("❯") && line.includes("report"))).toBe(true)
+		component.handleInput?.("k")
+		draw()
+		expect(last().some((line) => line.includes("❯") && line.includes("collect"))).toBe(true)
+
+		// Enter opens the selected step's transcript: the sidecar's prompt is on screen.
+		writer.appendMessage({
+			role: "custom",
+			customType: "kimchi-workflow-agent",
+			content: "collect the audit facts",
+			display: false,
+		})
+		bus.publish({
+			runId: RUN_ID,
+			path: "collect",
+			attempt: 1,
+			at: new Date().toISOString(),
+			kind: "tool-start",
+			toolName: "bash",
+			summary: "npm test",
+		})
+		component.handleInput?.("\r")
+		draw()
+		expect(last().some((line) => line.includes("step collect"))).toBe(true)
+		expect(last().some((line) => line.includes("collect the audit facts"))).toBe(true)
+
+		// Escape goes BACK to the list, not out of the view; a second escape closes it.
+		component.handleInput?.("\x1b")
+		draw()
+		expect(last().some((line) => line.includes("↑↓/jk move"))).toBe(true)
+		component.handleInput?.("\x1b")
+		await inspecting
+	})
+
+	it("follows the current step until the user moves the cursor, then it sticks", async () => {
+		const { store, dir, sessionDir } = await liveRun()
+		const bus = createActivityBus()
+		const at = (offset: number) => new Date(Date.parse("2026-10-30T10:00:00.000Z") + offset).toISOString()
+		const h = fakeCtx("tui", { cwd: dir, sessionDir })
+
+		const inspecting = handleInspect(
+			h.ctx,
+			store,
+			{ activeRunIds: () => [RUN_ID], activityBus: bus, width: 80 },
+			undefined,
+			undefined,
+		)
+		await vi.waitFor(() => expect(h.custom).toHaveLength(1), { timeout: 10_000 })
+		const { component, draw, last } = mount(h.custom[0] as TestFactory)
+		draw()
+		expect(last().some((line) => line.includes("❯") && line.includes("collect"))).toBe(true) // following the running step
+
+		// The user moves: the cursor is theirs. Then the run moves on to `report` — the cursor does NOT.
+		component.handleInput?.("k") // no selectable row above `collect`... nothing to move to
+		component.handleInput?.("j") // down to `report`
+		draw()
+		expect(last().some((line) => line.includes("❯") && line.includes("report"))).toBe(true)
+		await store.appendEvent({ type: "step-completed", runId: RUN_ID, path: "collect", output: undefined, at: at(2300) })
+		await store.appendEvent({ type: "step-started", runId: RUN_ID, path: "report", input: undefined, at: at(2400) })
+		bus.publish({
+			runId: RUN_ID,
+			path: "report",
+			attempt: 1,
+			at: new Date().toISOString(),
+			kind: "tool-start",
+			toolName: "bash",
+			summary: "npm test",
+		})
+		await new Promise((resolve) => setTimeout(resolve, 50)) // let the chained refresh settle
+		draw()
+		expect(last().some((line) => line.includes("❯") && line.includes("report"))).toBe(true) // stuck where the user put it
+		expect(last().some((line) => line.includes("✓") && line.includes("collect"))).toBe(true) // ...while the list kept updating
+
+		component.handleInput?.("\x1b")
+		await inspecting
 	})
 })
 

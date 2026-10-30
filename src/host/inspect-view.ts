@@ -47,6 +47,24 @@ export function isDismissKey(
 	return matches(data, "escape") || data === "q" || data === "Q"
 }
 
+/** The navigator's cursor keys: up/down arrows or k/j, matched through the harness keybindings. */
+export function isUpKey(data: string, matches: (data: string, keyId: string) => boolean = defaultMatches): boolean {
+	return matches(data, "up") || data === "k"
+}
+
+export function isDownKey(data: string, matches: (data: string, keyId: string) => boolean = defaultMatches): boolean {
+	return matches(data, "down") || data === "j"
+}
+
+export function isEnterKey(data: string, matches: (data: string, keyId: string) => boolean = defaultMatches): boolean {
+	return matches(data, "enter")
+}
+
+/** Whether `data` is the Escape key alone (the navigator's "go back" / close), via keybindings. */
+export function isEscapeKey(data: string, matches: (data: string, keyId: string) => boolean = defaultMatches): boolean {
+	return matches(data, "escape")
+}
+
 function defaultMatches(data: string, keyId: string): boolean {
 	return data === keyId
 }

@@ -22,6 +22,7 @@ import { buildOutline } from "../../progress/outline.ts"
 import { project } from "../../progress/project.ts"
 import type { ProgressNode } from "../../progress/types.ts"
 import { missingWorkflowProvenance, recordedWorkflowLoadFailure } from "../failure-messages.ts"
+import { showNavigator } from "../inspect-navigator.ts"
 import { inspectLines, inspectOverlay, type OverlayComponent } from "../inspect-view.ts"
 import { runIdHash } from "../naming.ts"
 import type { ProgressCtx } from "../progress-sink.ts"
@@ -106,6 +107,40 @@ export async function handleInspect(
 		)
 	}
 	const workflow = loaded.workflow
+
+	// Bare `/workflow inspect` on a live TUI run opens the NAVIGATOR (§14.9) — the panel's step list
+	// as a focused, navigable overlay (the subagent-view shape; the pinned panel cannot take keys,
+	// §6.6). Explicit run/path arguments keep today's direct behaviour, and so does every non-TUI mode.
+	if (
+		!runRef &&
+		!stepPath &&
+		activeRunIds.includes(runId) &&
+		ctx.mode === "tui" &&
+		typeof (ctx.ui as { custom?: unknown }).custom === "function"
+	) {
+		try {
+			await showNavigator({
+				ctx,
+				store,
+				deps,
+				runId,
+				workflow,
+				initialEvents: events,
+				stepFacts: (path, currentEvents) => {
+					const facts = resolveResumeKey(stepByStaticPath(workflow, path), currentEvents, path)
+					return {
+						attempt: currentAttempt(currentEvents, path),
+						...(facts.key ? { resumeKey: facts.key } : {}),
+						dynamic: facts.dynamic,
+					}
+				},
+			})
+		} catch (error) {
+			// A surface failure must not fail the command — the §7.6.1 lesson: degrade, never take /workflow down.
+			ctx.ui.notify(`workflow: could not open the inspect view: ${describe(error)}`, "warning")
+		}
+		return
+	}
 
 	// The target step: the projection's own state decides, so the choice cannot disagree with the panel.
 	const now = deps.now ?? (() => new Date())
