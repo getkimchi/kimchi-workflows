@@ -22,6 +22,7 @@
 import type { ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent"
 import type { RunEvent, RunUpdate } from "../engine/types.ts"
 import type { WorkflowDefinition } from "../flow/types.ts"
+import { withActivity } from "../progress/activity.ts"
 import { buildOutline } from "../progress/outline.ts"
 import { project } from "../progress/project.ts"
 import type { Outline, ProgressView } from "../progress/types.ts"
@@ -30,6 +31,7 @@ import { runIdHash } from "./naming.ts"
 import { runSummaryText } from "./progress-card.ts"
 import { createPlainProgress, type LineWriter } from "./progress-plain.ts"
 import { createRpcSurface, createTuiSurface, type ProgressSurface, workingMessage } from "./progress-widget.ts"
+import type { ActivityBus, StepActivity } from "./step-activity.ts"
 
 /** Progress §11.2: the escape hatch for scripted environments that want the old silence. */
 export const PROGRESS_OFF_ENV = "PI_WORKFLOWS_PROGRESS"
@@ -50,6 +52,10 @@ export interface ProgressSinkOptions {
 	readonly outline: Outline
 	/** The run's short form for the panel header (`runIdHash`, naming.ts) — this layer owns that shape. */
 	readonly runLabel: string
+	/** The run's id, to filter the activity bus's subscription to THIS run (inspection §14). */
+	readonly runId?: string
+	/** The process-wide activity bus (inspection §14): where live step activity is captured. Absent — every pre-existing test — means no hints at all. */
+	readonly activityBus?: ActivityBus
 	/** `run-meta`'s display label (spec §8.9), for the card's provenance line. */
 	readonly workflowSourceLabel?: string
 	/** Injected so a test can freeze it; the pure layer takes `now` as a parameter for the same reason. */
@@ -100,6 +106,11 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
 	const monotonicNow = options.monotonicNow ?? (() => performance.now())
 	const events: RunEvent[] = []
 	const usageByPath = new Map<string, number>()
+	// Live activity (inspection §14): the latest tool call per in-progress step, applied over the
+	// projection exactly as usage previews are — never part of the durable log, and gated by the
+	// projection's own `in_progress` state so a settled row can never carry one.
+	const hintByPath = new Map<string, string>()
+	let noticedActivityFailure = false
 
 	// `json`/`print` have no UI at all (§7.2's third row): plain lines on stderr, and nothing else.
 	const headless = ctx.mode === "json" || ctx.mode === "print"
@@ -128,8 +139,8 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
 		if (plain) return // headless already wrote its line per event; there is nothing to redraw (§8.3)
 		const projected = project(outline, events, now())
 		// A terminal summary is durable history only. Normally the engine has already settled or cleared
-		// every preview; ignoring the map here also protects the summary from a misbehaving host adapter.
-		const view = terminal ? projected : withUsagePreviews(projected, usageByPath)
+		// every preview; ignoring the maps here also protects the summary from a misbehaving host adapter.
+		const view = terminal ? projected : withActivity(withUsagePreviews(projected, usageByPath), hintByPath)
 		if (!terminal) {
 			surface?.update({ view, observedAtMs: monotonicNow() }, workingMessage(view))
 			return
@@ -137,6 +148,29 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
 		surface?.clear()
 		carded = announce(options, view) || carded
 	}
+
+	// The activity subscription (inspection §14): tool calls refresh the hint; notices surface once. A
+	// loop body's next execution starts from a clean hint (the `step-started` delete below), and a step
+	// that settles keeps whatever its last tool was — the hint dies with the row, not the tool.
+	const unsubscribeActivity =
+		surface && options.activityBus && options.runId
+			? options.activityBus.subscribe(options.runId, (activity) => {
+					if (disabled) return
+					try {
+						if (activity.kind === "tool-start") {
+							const hint = activityHint(activity)
+							if (hintByPath.get(activity.path) === hint) return
+							hintByPath.set(activity.path, hint)
+							draw(false)
+						} else if (activity.kind === "notice" && !noticedActivityFailure) {
+							noticedActivityFailure = true
+							ctx.ui.notify(`workflow: ${activity.summary ?? "live step inspection"}`, "warning")
+						}
+					} catch {
+						// Best-effort by the same rule as every other render here (§2.3).
+					}
+				})
+			: undefined
 
 	return {
 		accept(event: RunEvent): void {
@@ -146,6 +180,9 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
 				// The durable final turn usage supersedes its preview. Delete before drawing so the handoff is
 				// one logical update and can never count the same turn twice.
 				if (event.type === "agent-usage") usageByPath.delete(event.path)
+				// A new execution of a path starts with a clean slate — a loop's second iteration must not
+				// open showing the tool its first iteration ended on.
+				if (event.type === "step-started") hintByPath.delete(event.path)
 				plain?.accept(event)
 				draw(isTerminal(event))
 			} catch (err) {
@@ -186,6 +223,8 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
 
 		dispose(): void {
 			usageByPath.clear()
+			hintByPath.clear()
+			unsubscribeActivity?.()
 			try {
 				surface?.clear()
 			} catch {
@@ -213,6 +252,11 @@ function chooseSurface(ctx: ProgressCtx, runLabel: string, monotonicNow: () => n
 	return ctx.mode === "rpc" ? createRpcSurface(ctx.ui, runLabel) : createTuiSurface(ctx.ui, runLabel, monotonicNow)
 }
 
+/** The hint a tool-start becomes, in the panel's own dotted typography: `bash · npm test`. */
+function activityHint(activity: StepActivity): string {
+	return activity.summary ? `${activity.toolName ?? "tool"} · ${activity.summary}` : (activity.toolName ?? "tool")
+}
+
 function writeStderr(line: string): void {
 	process.stderr.write(`${line}\n`)
 }
@@ -234,6 +278,7 @@ export type ProgressFor = (workflow: WorkflowDefinition, runId: string, workflow
 /** Bind a factory to one invocation's context. Called once per `/workflow` command, in extension.ts. */
 export function bindProgress(
 	ctx: ProgressCtx,
+	activityBus?: ActivityBus,
 	overrides: Pick<ProgressSinkOptions, "now" | "monotonicNow" | "write" | "env"> = {},
 ): ProgressFor {
 	return (workflow, runId, workflowSourceLabel) =>
@@ -241,6 +286,8 @@ export function bindProgress(
 			ctx,
 			outline: buildOutline(workflow),
 			runLabel: runIdHash(runId),
+			runId,
+			activityBus,
 			workflowSourceLabel,
 			...overrides,
 		})

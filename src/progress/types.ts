@@ -165,6 +165,13 @@ export interface ProgressNode {
 	readonly armsTaken?: number
 	/** Sub-workflow-bodied kinds (nested workflow, branch arm, multi-step foreach item): leaf steps in the subtree — the `✓ 4 steps` of a collapsed summary (progress §6.1). */
 	readonly steps?: number
+	/**
+	 * What this in-progress step is doing right now — its current tool call, one bounded line
+	 * (inspection, specs/progress-ui.md §14). Transient presentation state, never projected from the
+	 * log: applied by `withActivity` the way usage previews are (`usage-preview.ts`), so a settled row
+	 * can never carry one (a settled row never changes, §4.8).
+	 */
+	readonly activityHint?: string
 }
 
 /**

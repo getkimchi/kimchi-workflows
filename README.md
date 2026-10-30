@@ -136,6 +136,8 @@ Once the extension is registered, these are available in any Kimchi session:
 | `/workflow create` | Turn your goal into an approved behavioral plan, a runnable workflow, and a happy-path test. |
 | `/workflow run <file-name\|file.ts>` | Start a run by `.workflow.ts` filename (without the suffix), or by an explicit TypeScript path. Other runs may execute concurrently. |
 | `/workflow run list` | List runs: id, workflow name, status, current step, pending questions, started/completed times. |
+| `/workflow status [run-id]` | Print a run's fully expanded tree — the executing one when bare. |
+| `/workflow inspect [run-id] [step-path]` | Show what a step is doing (or did): its prompt, tool calls, results, and text — live while it runs, from its recorded transcript afterwards. Bare targets the single executing step; the panel's in-progress rows also show the current tool call. |
 | `/workflow resume [run-id]` | Continue a `blocked` / `crashed` / `cancelled` run from its last checkpoint. |
 | `/workflow cancel [run-id]` | Durably stop a run: its executing runner records `cancelled` before aborting, or any runner may cancel an ownerless blocked run. Resumable either way. |
 | `/workflow delete <run-id>` | Permanently remove a **stopped** run and its events. The id is always required; a live run is rejected — cancel it first. |

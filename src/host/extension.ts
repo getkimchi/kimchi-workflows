@@ -19,6 +19,7 @@ import {
 	handleCancel,
 	handleCreate,
 	handleDelete,
+	handleInspect,
 	handleListRuns,
 	handleListWorkflows,
 	handleResume,
@@ -33,6 +34,7 @@ import { createPiAgentBridge } from "./pi-agent.ts"
 import { bindProgress } from "./progress-sink.ts"
 import { runArtifactsDir } from "./project-dir.ts"
 import { createProcessExecutionOwner } from "./run-lease.ts"
+import { createActivityBus } from "./step-activity.ts"
 import { registerStepOutputToolsFromEnv } from "./step-output-tools.ts"
 import { withTelemetry } from "./telemetry-bridge.ts"
 
@@ -42,9 +44,13 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 	// nested run inside the run it belongs to.
 	if (registerStepOutputToolsFromEnv(pi)) return
 
-	const activeRuns = createActiveRuns() // different run ids overlap; the same run id never does
+	// Live step activity (inspection, specs/progress-ui.md §14): one bus per process, cleared when a
+	// run's execution finishes here — the bridge publishes to it, the progress panel and
+	// `/workflow inspect` subscribe.
+	const activityBus = createActivityBus()
+	const activeRuns = createActiveRuns((runId) => activityBus.clear(runId)) // different run ids overlap; the same run id never does
 	const executionOwner = createProcessExecutionOwner()
-	const bindAgentStarter = createPiAgentBridge(pi) // one shared listener set for the extension's lifetime
+	const bindAgentStarter = createPiAgentBridge(pi, undefined, undefined, activityBus) // one shared listener set for the extension's lifetime
 	const completionSources = createCompletionSources()
 
 	// The completion callback is given no context of its own (spec §14.2), so the pair the store is built
@@ -53,7 +59,7 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 
 	pi.registerCommand("workflow", {
 		// An extension cannot set an `argumentHint` (spec §14.9), so the description names the verbs.
-		description: "PI workflows: run | create | list | status | resume | cancel | delete",
+		description: "PI workflows: run | create | list | status | inspect | resume | cancel | delete",
 		getArgumentCompletions: (argumentPrefix: string) => completeWorkflowArgument(argumentPrefix, completionSources),
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const trimmedArgs = args.trim()
@@ -74,7 +80,8 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 			const startAgent = bindAgentStarter(ctx.modelRegistry, runDir, ctx)
 			// The live surface, chosen per invocation from `ctx.mode` (progress §7.2) — the context is what
 			// knows whether there is a terminal to draw in, and it does not exist until a command runs.
-			const progressFor = bindProgress(ctx)
+			// The activity bus feeds its inline hints (inspection §14).
+			const progressFor = bindProgress(ctx, activityBus)
 
 			switch (sub) {
 				case "run": {
@@ -115,6 +122,26 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 						rest[0],
 					))
 
+				// `/workflow inspect [run-ref] [step-path]` (inspection §14) — what a step is DOING (or did):
+				// its prompt, tool calls, results, and text, live while it runs and from its transcript after.
+				case "inspect": {
+					// Re-sliced from the RAW remainder: the step path is the rest of the line verbatim, so a
+					// name the `\s+` split would collapse still arrives whole.
+					const restRaw = trimmedArgs.slice(sub.length).trim()
+					const [runRef, ...stepParts] = restRaw.split(/\s+/).filter(Boolean)
+					const stepPath = stepParts.length > 0 ? stepParts.join(" ") : undefined
+					return void (await handleInspect(
+						ctx,
+						store,
+						{
+							activeRunIds: () => activeRuns.active.map((run) => run.runId),
+							activityBus,
+						},
+						runRef || undefined,
+						stepPath,
+					))
+				}
+
 				case "cancel":
 					return void (await handleCancel(ctx, activeRuns, store, rest[0]))
 
@@ -138,7 +165,7 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 
 				default:
 					ctx.ui.notify(
-						`workflow: unknown subcommand "${sub}". Try run | create | list | status | resume | cancel | delete.`,
+						`workflow: unknown subcommand "${sub}". Try run | create | list | status | inspect | resume | cancel | delete.`,
 						"warning",
 					)
 			}

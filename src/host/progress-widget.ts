@@ -172,21 +172,31 @@ export function hasWorkInFlight(view: ProgressView): boolean {
 }
 
 /**
- * `workflow: test (2 of 5)` — what `setWorkingMessage` says while a run is live (§7.4). `undefined`
- * once nothing is executing, which restores PI's own message.
+ * `workflow: test (2 of 5)` — what `setWorkingMessage` says while a run is live (§7.4). With live
+ * activity (inspection §14) it becomes `workflow: test · bash npm test (2 of 5)`: the step's current
+ * tool call, where PI already draws the user's eye. `undefined` once nothing is executing, which
+ * restores PI's own message.
  */
 export function workingMessage(view: ProgressView): string | undefined {
 	const running = firstRunningLeaf(view.nodes)
 	if (!running) return undefined
-	return `workflow: ${running} (${view.stepsSettled} of ${view.stepsTotal})`
+	const hint = running.activityHint ? ` · ${shorten(running.activityHint)}` : ""
+	return `workflow: ${running.name}${hint} (${view.stepsSettled} of ${view.stepsTotal})`
 }
 
-function firstRunningLeaf(nodes: readonly ProgressNode[]): string | undefined {
+/** The working line is one status line: a hint is capped tighter here than in the panel's cell. */
+const WORKING_HINT_MAX = 32
+
+function shorten(hint: string): string {
+	return hint.length <= WORKING_HINT_MAX ? hint : `${hint.slice(0, WORKING_HINT_MAX - 1)}…`
+}
+
+function firstRunningLeaf(nodes: readonly ProgressNode[]): ProgressNode | undefined {
 	for (const node of nodes) {
 		if (node.state !== "in_progress") continue
 		const deeper = firstRunningLeaf(node.children)
 		if (deeper) return deeper
-		if (node.children.length === 0) return node.name
+		if (node.children.length === 0) return node
 	}
 	return undefined
 }

@@ -102,12 +102,21 @@ import {
 	seedHistory,
 } from "./pi-agent-messages.ts"
 import {
+	type ActivityBus,
+	activityFromStreamEvent,
+	type StepActivity,
+	summarizeTail,
+	summarizeToolArguments,
+	summarizeToolResult,
+} from "./step-activity.ts"
+import {
 	activeToolsForStep,
 	registerStepOutputTools,
 	removeStepOutputToolSpec,
 	STEP_OUTPUT_TOOLS_ENV,
 	writeStepOutputToolSpec,
 } from "./step-output-tools.ts"
+import { createStepTranscriptWriter, type StepTranscriptWriter, stepTranscriptFile } from "./step-transcript.ts"
 import { runSubagent, type SubagentSpawner, subagentSpawner } from "./subagent-process.ts"
 
 export type AgentStarter = (request: AgentRequest) => AgentSession
@@ -124,6 +133,9 @@ export type PiAgentControl = Pick<
 
 /** Framework-owned model input: participates in context, but is never rendered as user-authored chat. */
 const WORKFLOW_AGENT_MESSAGE = "kimchi-workflow-agent"
+
+/** Live text-tail cadence (inspection §14): the panel redraws at 120 ms, so a finer tail is invisible. */
+const TEXT_TAIL_INTERVAL_MS = 250
 
 /** What to spawn (the spawner's first two arguments) for a background subagent, given the CLI args after the binary name. */
 export type PiInvocationResolver = (args: readonly string[]) => { command: string; args: readonly string[] }
@@ -250,6 +262,28 @@ function claimResumeFile(file: string, request: AgentRequest): () => void {
 }
 
 /**
+ * Claim a resume-keyed file for SIDECAR WRITING (inspection §14): the same map {@link claimResumeFile}
+ * guards, but degrading instead of throwing — an inspection artifact must never fail a step, so a
+ * conflicting holder simply means no sidecar for this session. Returns the release, or `null` when
+ * the file is already claimed.
+ *
+ * Scope bound, deliberately recorded: this map (like `claimResumeFile`'s) is PROCESS-LOCAL, so two
+ * harness processes executing the same keyed step at the same time can interleave sidecar entries —
+ * the same bound the isolated subprocess path has shipped with since `claimResumeFile` landed. The
+ * artifact at stake is inspection-only: each process's REAL conversation lives in its own session,
+ * and a garbled sidecar degrades a view, never a run. A cross-process lease is the fix if that bound
+ * ever stops being acceptable.
+ */
+function claimSidecarFile(file: string, request: AgentRequest): (() => void) | null {
+	if (!request.resumeKey) return () => {}
+	if (liveResumeFiles.has(file)) return null
+	liveResumeFiles.set(file, request.path)
+	return () => {
+		if (liveResumeFiles.get(file) === request.path) liveResumeFiles.delete(file)
+	}
+}
+
+/**
  * Create the PI agent bridge. Call once per extension instance (registers shared PI event listeners),
  * then obtain a per-invocation `AgentStarter` bound to the command's model registry AND to the
  * directory that invocation's sessions belong in. The directory arrives at BIND time, not here: this
@@ -265,7 +299,23 @@ export function createPiAgentBridge(
 	pi: ExtensionAPI,
 	invocationResolver: PiInvocationResolver = resolvePiInvocation,
 	spawnSubagent: SubagentSpawner = subagentSpawner,
+	/** Live step activity (inspection, specs/progress-ui.md §14): where the bridge publishes what an executing step is doing. Absent — every pre-existing test — means no capture at all. */
+	activityBus?: ActivityBus,
 ): (modelRegistry: ModelRegistry, sessionsDir: string, control?: PiAgentControl) => AgentStarter {
+	// Live step activity (inspection §14): one publisher for both halves of the bridge. In-session turns
+	// are attributed by the same `inFlight` guard the usage preview uses — the shared listeners below
+	// fire for the user's own turns too, and only an in-flight workflow turn makes an event ours to name.
+	const publishActivity = (
+		turn: { readonly identity: StepSubmissionIdentity } | undefined,
+		activity: Omit<StepActivity, "runId" | "path" | "attempt" | "at">,
+	): void => {
+		if (!activityBus || !turn) return
+		try {
+			activityBus.publish({ ...turn.identity, at: new Date().toISOString(), ...activity })
+		} catch {
+			// Display must not interrupt the agent stream it observes.
+		}
+	}
 	// Tokens distinguish sessions and individual turns so a late lifecycle event cannot settle a newer call.
 	let inFlight:
 		| {
@@ -277,6 +327,7 @@ export function createPiAgentBridge(
 				readonly cleanup: () => void
 				readonly onUsage: AgentTurnOptions["onUsage"]
 				readonly recordConversation: (messages: AgentMessages) => void
+				readonly transcript: StepTranscriptWriter
 				cursorCaptured: boolean
 				sessionCursor: string | null
 				terminal: AgentTurn
@@ -284,6 +335,7 @@ export function createPiAgentBridge(
 				retryInterrupted: boolean
 				cancelled: boolean
 				lastReportedTokens: number | undefined
+				lastTextPublishedAt: number
 		  }
 		| undefined
 	// The one answer-resumed session (spec §8.4) currently entitled to have its stored `history` seeded
@@ -292,18 +344,57 @@ export function createPiAgentBridge(
 	let activeHistory: { readonly token: object; readonly history: AgentMessages } | undefined
 
 	// PI 0.84.1 keeps the cumulative assistant message on in-process updates. Its JSON protocol strips
-	// that message, so only this shared-session path can report confirmed usage before `agent_end`.
+	// that message, so only this shared-session path can report confirmed usage before `agent_end`. The
+	// same event is the in-session step's streaming text: the activity channel forwards a bounded tail
+	// of it (inspection §14), throttled to TEXT_TAIL_INTERVAL_MS — the panel redraws at 120 ms, so
+	// anything finer is invisible and anything coarser is a lag the reader feels.
 	pi.on("message_update", (event) => {
 		const turn = inFlight
-		if (!turn?.onUsage) return
-		const usage = lastAssistantUsage([event.message])
-		if (!usage || usage.totalTokens <= 0 || usage.totalTokens === turn.lastReportedTokens) return
-		turn.lastReportedTokens = usage.totalTokens
-		try {
-			turn.onUsage(usage)
-		} catch {
-			// Display callbacks must not interrupt the agent stream.
+		if (!turn) return
+		if (turn.onUsage) {
+			const usage = lastAssistantUsage([event.message])
+			if (usage && usage.totalTokens > 0 && usage.totalTokens !== turn.lastReportedTokens) {
+				turn.lastReportedTokens = usage.totalTokens
+				try {
+					turn.onUsage(usage)
+				} catch {
+					// Display callbacks must not interrupt the agent stream.
+				}
+			}
 		}
+		if (activityBus) {
+			const now = Date.now()
+			if (now - turn.lastTextPublishedAt >= TEXT_TAIL_INTERVAL_MS) {
+				turn.lastTextPublishedAt = now
+				const text = lastAssistantText([event.message])
+				if (text) publishActivity(turn, { kind: "assistant-text", summary: summarizeTail(text) })
+			}
+		}
+	})
+
+	// Live tool activity for an in-session step (inspection §14): the shared listeners fire for every
+	// turn this session runs, and `inFlight` is what names whose turn it is.
+	pi.on("tool_execution_start", (event) => {
+		publishActivity(inFlight, {
+			kind: "tool-start",
+			toolName: event.toolName,
+			summary: summarizeToolArguments(event.args),
+		})
+	})
+
+	pi.on("tool_execution_end", (event) => {
+		publishActivity(inFlight, {
+			kind: "tool-end",
+			toolName: event.toolName,
+			summary: summarizeToolResult(event.result),
+			isError: event.isError === true,
+		})
+	})
+
+	// The in-session step's transcript sidecar (inspection §14): every finished message — the prompt
+	// itself included, which the agent loop emits like any other — lands in the step's own file as it ends.
+	pi.on("message_end", (event) => {
+		inFlight?.transcript.appendMessage(event.message)
 	})
 
 	pi.on("agent_start", (_event, ctx) => {
@@ -367,7 +458,7 @@ export function createPiAgentBridge(
 		// `AgentRequest.isolated`'s doc), both run through the same one-shot subprocess path. Neither ever
 		// touches `inFlight` — there is no shared listener to correlate a subprocess's own reply with.
 		if (request.background || request.isolated) {
-			return backgroundSession(modelRegistry, request, invocationResolver, spawnSubagent, sessionsDir)
+			return backgroundSession(modelRegistry, request, invocationResolver, spawnSubagent, sessionsDir, activityBus)
 		}
 
 		const sessionToken = {} // this session's own identity — see `inFlight`'s doc above
@@ -384,6 +475,42 @@ export function createPiAgentBridge(
 		if (request.history) {
 			activeHistory = { token: sessionToken, history: request.history as AgentMessages }
 		}
+		// The step's transcript sidecar (inspection §14): appended message by message while the turn
+		// runs, under the same naming rule an isolated step's REAL session file follows
+		// (step-transcript.ts), so one reader covers both execution modes. A write failure is reported once
+		// as a bus activity and never fails the turn that produced the message. A KEYED sidecar shares a
+		// file with the isolated subprocess path and other executions of the same key, so its writes
+		// claim the same map — and a conflicting holder stands the sidecar down rather than interleaving
+		// two conversations into one file (or failing the step: an inspection artifact never may).
+		const releaseSidecarClaim = claimSidecarFile(stepTranscriptFile(sessionsDir, request), request)
+		if (!releaseSidecarClaim) {
+			// Not silent (review round 2): the watcher is told WHY this step has no transcript, through the
+			// same channel every other inspection problem uses.
+			if (activityBus) {
+				try {
+					activityBus.publish({
+						runId: request.runId,
+						path: request.path,
+						attempt: request.attempt,
+						at: new Date().toISOString(),
+						kind: "notice",
+						summary: "step transcript not recorded: the keyed session file is in use by another execution",
+					})
+				} catch {
+					// Display must not fail the step whose sidecar stood down.
+				}
+			}
+		}
+		const transcript: StepTranscriptWriter = releaseSidecarClaim
+			? createStepTranscriptWriter(sessionsDir, request, (error) => {
+					publishActivity(inFlight, {
+						kind: "notice",
+						summary: `step transcript not recorded: ${error instanceof Error ? error.message : String(error)}`,
+					})
+				})
+			: {
+					appendMessage: () => {}, // the keyed file is claimed elsewhere — inspection stands down
+				}
 		return {
 			async sendAndAwaitEnd(message: string, options?: AgentTurnOptions): Promise<AgentTurn> {
 				// Safety net, not the primary mechanism (spec §2.2): static isolation is what is SUPPOSED to
@@ -463,6 +590,7 @@ export function createPiAgentBridge(
 						recordConversation: (messages) => {
 							conversation = [...conversation, ...messages]
 						},
+						transcript,
 						cursorCaptured: sessionCursor !== undefined,
 						sessionCursor: sessionCursor ?? null,
 						terminal: { text: "" },
@@ -470,6 +598,7 @@ export function createPiAgentBridge(
 						retryInterrupted: false,
 						cancelled: false,
 						lastReportedTokens: undefined,
+						lastTextPublishedAt: 0,
 					}
 
 					// PI's retry-backoff Escape path emits no aborted assistant message, and its
@@ -557,6 +686,7 @@ export function createPiAgentBridge(
 					inFlight = undefined
 				}
 				if (activeHistory?.token === sessionToken) activeHistory = undefined
+				releaseSidecarClaim?.()
 				// Hand the session back as we found it — but only if THIS session narrowed it. A session
 				// rejected by the cross-talk guard never registered anything, and restoring from it would
 				// strip the tools out from under the turn that is genuinely in flight.
@@ -581,6 +711,8 @@ function backgroundSession(
 	invocationResolver: PiInvocationResolver,
 	spawnSubagent: SubagentSpawner,
 	sessionsDir: string,
+	/** Live step activity (inspection §14): the child's stream events land here under the step's identity. */
+	activityBus?: ActivityBus,
 ): AgentSession {
 	return {
 		async sendAndAwaitEnd(message: string): Promise<AgentTurn> {
@@ -647,7 +779,33 @@ function backgroundSession(
 			// default — an unresponsive subagent hangs the run with nothing able to interrupt it.
 			let result: Awaited<ReturnType<typeof runSubagent>>
 			try {
-				result = await runSubagent(spawnSubagent, invocation.command, invocation.args, message, request.signal, env)
+				result = await runSubagent(
+					spawnSubagent,
+					invocation.command,
+					invocation.args,
+					message,
+					request.signal,
+					env,
+					// The stream hook forwards the child's own NDJSON events (tool calls, assistant text) onto
+					// the activity bus under THIS step's identity (inspection §14): the one window onto an
+					// isolated step's execution, since the reader otherwise keeps only the final assistant message.
+					activityBus
+						? (event) => {
+								const activity = activityFromStreamEvent(
+									event,
+									{ runId: request.runId, path: request.path, attempt: request.attempt },
+									new Date().toISOString(),
+								)
+								if (activity) {
+									try {
+										activityBus.publish(activity)
+									} catch {
+										// Display must not fail the step whose stream this is.
+									}
+								}
+							}
+						: undefined,
+				)
 			} finally {
 				// The child read it at load, so the handoff has no readers left. One file per step per attempt
 				// would otherwise accumulate beside the user's own sessions for the life of the project.

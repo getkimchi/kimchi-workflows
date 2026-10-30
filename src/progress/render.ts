@@ -59,6 +59,8 @@ const ROW_GUTTER = GUTTER + 2
 const GAP = 2
 /** Below this the metadata column goes entirely, and the footer bar with it (progress §4.10). */
 const NARROW_WIDTH = 60
+/** The activity hint's whole-cell bound (inspection §14): one tool call, readable, never the grid's. */
+const ACTIVITY_HINT_MAX = 40
 /** Names never squeeze below this, however wide the metadata gets — a row of pure ellipsis says nothing. */
 const MIN_NAME_FIELD = 12
 /** How many segments a foreach track draws at most (progress §4.6): a 500-item run must not draw 500. */
@@ -297,6 +299,13 @@ function statusCell(row: ProgressRow, elapsedDelta: number): string {
 			? `repair ${node.repairs}`
 			: dotted([plural(node.repairs, "repair"), durationText(node, elapsedDelta)])
 	}
+
+	// What the step is doing right now (inspection §14) outranks where it is in its counters and how
+	// long it has been running — it is the question the panel previously could not answer at all — but
+	// never outranks a failure, a block, or a retry: those are the facts a user can act on. Settled rows
+	// cannot carry one (§4.8's settled-row rule), and the bound keeps one chatty tool from widening the
+	// status column past the grid's whole degradation ladder (§4.10).
+	if (node.state === "in_progress" && node.activityHint) return truncate(node.activityHint, ACTIVITY_HINT_MAX)
 
 	const counter = counterCell(node)
 	if (counter) return counter

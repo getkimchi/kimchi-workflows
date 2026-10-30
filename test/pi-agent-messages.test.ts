@@ -396,6 +396,22 @@ describe("createAssistantTurnReader", () => {
 		}
 	})
 
+	it("hands every parsed line to the stream hook — the inspection channel's window onto an isolated step", () => {
+		const seen: unknown[] = []
+		const reader = createAssistantTurnReader((event) => seen.push(event))
+		const toolLine = JSON.stringify({
+			type: "tool_execution_start",
+			toolCallId: "t1",
+			toolName: "bash",
+			args: { command: "npm test" },
+		})
+		reader.push(`${toolLine}\n{not json\n${end("assistant", "done", 3)}\n`)
+		reader.end()
+
+		// Both REAL events arrive in stream order, `message_end` included; the unparseable line never does.
+		expect(seen).toEqual([JSON.parse(toolLine), JSON.parse(end("assistant", "done", 3))])
+	})
+
 	it("keeps only the LAST assistant turn, not a list of the ones before it", () => {
 		// 20k earlier messages: the answer must be the last one whatever came before, and nothing here
 		// grows with the count (see pi-agent-background.test.ts for the measured version of that claim).
