@@ -724,6 +724,22 @@ run/path arguments keep the direct behaviour, and so does every non-TUI mode. Th
 tree can demand no path while the navigator is open — several steps running is
 what it is FOR. *(decision)*
 
+14.10. **The harness keybinding matcher takes BINDING NAMES, not key ids — and it
+must never be passed detached.** `matches(data, "up")` matches nothing:
+`up` is a key id, and the registry is keyed by binding name
+(`tui.select.up`, whose *default keys* are `up`…). The navigator was
+shipped calling it with ids, and every key — arrows, Enter, Escape —
+seemed dead while the code was in fact reaching the matcher. Passing
+`keybindings.matches` as a bare function reference is its own crash:
+the method reads `this.keysById`, so the receiver must be preserved
+(an arrow wrapper). The fix names the select set — up/down/confirm/
+cancel — whose defaults are arrows, Enter, and Escape+ctrl+c, and each
+helper also falls back to the raw byte and a vim key, so an overlay
+stays usable where a binding is absent or rebound. *(decision; found
+by a crash report and a dead-keys report, not by the suite — the test
+fake now mirrors the real shape: a class whose `matches` reads
+`this.keysById`, keyed by binding names)*
+
 ## Open questions
 
 *None outstanding.* What remains is implementation-level: the exact braille frame set,

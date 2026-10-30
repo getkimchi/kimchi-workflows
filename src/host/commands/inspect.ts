@@ -48,7 +48,7 @@ export interface InspectDeps {
 type CustomFactory = (
 	tui: { requestRender(): void },
 	theme: unknown,
-	keybindings: { matches(data: string, keyId: string): boolean },
+	keybindings: { matches(data: string, binding: string): boolean },
 	done: (result: unknown) => void,
 ) => OverlayComponent
 
@@ -475,7 +475,7 @@ async function showOverlay(
 			return inspectOverlay({
 				read: (width: number) => [...assemble(width)],
 				requestRender: () => requestRender?.(),
-				matches: (data, keyId) => keybindings.matches(data, keyId),
+				matches: (data, binding) => keybindings.matches(data, binding),
 				done: () => done(undefined),
 			})
 		})

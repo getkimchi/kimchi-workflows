@@ -115,10 +115,10 @@ afterEach(() => {
  * class instance is the regression guard: detached calls blow up right here in the test. */
 class FakeKeybindings {
 	private readonly keysById = new Map<string, string[]>([
-		["escape", ["\x1b"]],
-		["up", ["\x1b[A"]],
-		["down", ["\x1b[B"]],
-		["enter", ["\r"]],
+		["tui.select.up", ["\x1b[A"]],
+		["tui.select.down", ["\x1b[B"]],
+		["tui.select.confirm", ["\r"]],
+		["tui.select.cancel", ["\x1b", "\x03"]], // escape + ctrl+c, per pi-tui defaults
 	])
 
 	matches(data: string, keyId: string): boolean {

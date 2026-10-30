@@ -231,7 +231,7 @@ export async function showNavigator(args: {
 			(
 				tui: { requestRender(): void },
 				_theme: unknown,
-				keybindings: { matches(data: string, keyId: string): boolean },
+				keybindings: { matches(data: string, binding: string): boolean },
 				done: (result: unknown) => void,
 			): FocusedComponent => {
 				requestRender = () => tui.requestRender()
@@ -241,7 +241,7 @@ export async function showNavigator(args: {
 				// `matches` at all means "not bound", and the helpers fall back to comparing raw bytes.
 				const matches =
 					typeof keybindings.matches === "function"
-						? (data: string, keyId: string) => keybindings.matches(data, keyId)
+						? (data: string, binding: string) => keybindings.matches(data, binding)
 						: undefined
 				return {
 					render: (width: number): string[] => (mode === "transcript" ? transcriptPane(width) : listPane()),

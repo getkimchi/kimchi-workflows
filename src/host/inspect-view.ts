@@ -39,34 +39,39 @@ export interface OverlayComponent {
 	dispose?(): void
 }
 
-/** How the overlay decides a keypress closes it: Escape, or q. */
-export function isDismissKey(
-	data: string,
-	matches: (data: string, keyId: string) => boolean = defaultMatches,
-): boolean {
-	return matches(data, "escape") || data === "q" || data === "Q"
+/** The harness's keybindings contract, learned the hard way: `matches(data, binding)` takes a
+ * BINDING NAME ("tui.select.up"…), not a raw key id ("up"…) — a key id is never in the registry,
+ * so it matches nothing and every key seems dead. The names we need are the select set: up/down/
+ * confirm/cancel, whose defaults are the arrows, Enter, and Escape+ctrl+c. Each helper also falls
+ * back to the raw byte and a vim key, so an overlay stays usable even where the binding is absent
+ * or rebound. */
+export type BindingMatcher = (data: string, binding: string) => boolean
+
+/** How the overlay decides a keypress closes it: the cancel binding (Escape by default), or q. */
+export function isDismissKey(data: string, matches: BindingMatcher = defaultMatches): boolean {
+	return matches(data, "tui.select.cancel") || data === "q" || data === "Q" || data === "\x1b"
 }
 
 /** The navigator's cursor keys: up/down arrows or k/j, matched through the harness keybindings. */
-export function isUpKey(data: string, matches: (data: string, keyId: string) => boolean = defaultMatches): boolean {
-	return matches(data, "up") || data === "k"
+export function isUpKey(data: string, matches: BindingMatcher = defaultMatches): boolean {
+	return matches(data, "tui.select.up") || data === "k" || data === "\x1b[A"
 }
 
-export function isDownKey(data: string, matches: (data: string, keyId: string) => boolean = defaultMatches): boolean {
-	return matches(data, "down") || data === "j"
+export function isDownKey(data: string, matches: BindingMatcher = defaultMatches): boolean {
+	return matches(data, "tui.select.down") || data === "j" || data === "\x1b[B"
 }
 
-export function isEnterKey(data: string, matches: (data: string, keyId: string) => boolean = defaultMatches): boolean {
-	return matches(data, "enter")
+export function isEnterKey(data: string, matches: BindingMatcher = defaultMatches): boolean {
+	return matches(data, "tui.select.confirm") || data === "\r"
 }
 
 /** Whether `data` is the Escape key alone (the navigator's "go back" / close), via keybindings. */
-export function isEscapeKey(data: string, matches: (data: string, keyId: string) => boolean = defaultMatches): boolean {
-	return matches(data, "escape")
+export function isEscapeKey(data: string, matches: BindingMatcher = defaultMatches): boolean {
+	return matches(data, "tui.select.cancel") || data === "\x1b"
 }
 
-function defaultMatches(data: string, keyId: string): boolean {
-	return data === keyId
+function defaultMatches(data: string, binding: string): boolean {
+	return data === binding
 }
 
 /**
