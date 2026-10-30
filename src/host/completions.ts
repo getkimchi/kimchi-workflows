@@ -55,6 +55,7 @@ const VERBS: readonly Verb[] = [
 	{ name: "create", takesArgument: false, description: "generate a new workflow by interview" },
 	{ name: "list", takesArgument: false, description: "the workflows this project defines" },
 	{ name: "status", takesArgument: true, description: "show a run's tree — the executing one when bare" },
+	{ name: "inspect", takesArgument: true, description: "what a step is doing (or did) — live or recorded" },
 	{ name: "resume", takesArgument: true, description: "continue a blocked, crashed, or cancelled run" },
 	{ name: "cancel", takesArgument: true, description: "stop an executing or blocked run" },
 	{ name: "delete", takesArgument: true, description: "permanently remove a stopped run" },
@@ -113,6 +114,11 @@ async function argumentItems(
 			// No status filter: a run's tree is rebuilt from its log alone, so any recorded run can be shown,
 			// live or long finished (progress §11.4). The id is optional there — bare means the executing run —
 			// but a run that is not executing has no other way in, which is exactly what completing it buys.
+			return runItems(verb, typed, await sources.runs(), () => true)
+		case "inspect":
+			// Same shape as `status`: any recorded run can be inspected, and the executing one is what a
+			// bare `/workflow inspect` shows. Step paths are not completed — they belong to a run's own tree,
+			// which the completion seam has no way to load cheaply per keystroke (spec §14.6).
 			return runItems(verb, typed, await sources.runs(), () => true)
 		case "resume":
 			// Exactly the statuses `/workflow resume` accepts (spec §5.2/§6.2), asked of the router itself.

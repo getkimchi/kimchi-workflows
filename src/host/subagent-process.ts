@@ -102,9 +102,11 @@ export async function runSubagent(
 	prompt: string,
 	signal: AbortSignal | undefined,
 	env?: NodeJS.ProcessEnv,
+	/** Receives every parsed NDJSON event off the child's stdout — the inspection channel for an isolated step's live activity (step-activity.ts). */
+	onStreamEvent?: (event: unknown) => void,
 ): Promise<SubagentResult> {
 	const child = spawnSubagent(command, args, env)
-	const reader = createAssistantTurnReader()
+	const reader = createAssistantTurnReader(onStreamEvent)
 	let stderrTail = ""
 
 	// Listeners first, then everything that can produce activity: an already-aborted attempt kills the

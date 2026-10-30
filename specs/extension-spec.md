@@ -770,8 +770,10 @@ inline (§10.2). *(decision)*
 
 12.3. `/workflow run list` (§6.3) reflects each run's derived status (§5.3) and
 current step; per-run detail — step states by node path, event history, pending
-questions, failure reason — is available from the recorded events (§8.1).
-*(decision)*
+questions, failure reason — is available from the recorded events (§8.1), and per-
+STEP detail — the prompt, tool calls, and text an execution produced — from the
+transcript artifacts each execution leaves behind and `/workflow inspect`
+(progress-ui §14). *(decision)*
 
 ## 13. Testing
 

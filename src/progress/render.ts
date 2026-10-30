@@ -49,6 +49,14 @@ export interface RenderOptions {
 	 * id's trailing 8 characters, which is the same string.
 	 */
 	readonly runLabel?: string
+	/**
+	 * The panel's tree-row budget (progress §6.7): at or below it the tree renders whole; above it the
+	 * panel folds to its ONE-LINE summary — a widget gets no keyboard input (§6.6), so the fold
+	 * breathes with the tree instead of waiting for a keypress. Defaults to {@link DEFAULT_MAX_TREE_ROWS}.
+	 * `/workflow status` opts out (its whole point is the fully expanded tree); tests raise it to
+	 * assert tree layout below the fold.
+	 */
+	readonly maxTreeRows?: number
 }
 
 /** The frame's own left margin (progress §4.1) — no side borders, so this is the only horizontal inset. */
@@ -59,14 +67,100 @@ const ROW_GUTTER = GUTTER + 2
 const GAP = 2
 /** Below this the metadata column goes entirely, and the footer bar with it (progress §4.10). */
 const NARROW_WIDTH = 60
+/** The activity hint's whole-cell bound (inspection §14): one tool call, readable, never the grid's. */
+const ACTIVITY_HINT_MAX = 40
 /** Names never squeeze below this, however wide the metadata gets — a row of pure ellipsis says nothing. */
 const MIN_NAME_FIELD = 12
 /** How many segments a foreach track draws at most (progress §4.6): a 500-item run must not draw 500. */
 const TRACK_SEGMENTS = 10
 const ELLIPSIS = "…"
 
-/** PI's own default braille spinner (progress §4.4) — the only animation in the panel. */
+/** PI's own default braille spinner (progress §4.4) — the only animation in the panel, and the only
+ * animation in the FOLD: a tall run's one-line form keeps breathing at the same 120 ms (§6.7). */
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const
+
+/** The first in-progress node that has something to say, DEPTH-FIRST over the tree — the row
+ * list is not enough: a foreach folds its body to one row per ITEM, so the running STEP carrying
+ * the hints may have no row of its own. Constructs and bare items carry none by construction, so
+ * they are never the match. */
+function hintedNode(nodes: readonly ProgressNode[]): ProgressNode | undefined {
+	for (const node of nodes) {
+		if (node.state === "in_progress" && (node.messageHint !== undefined || node.activityHint !== undefined)) {
+			return node
+		}
+		const child = hintedNode(node.children)
+		if (child !== undefined) return child
+	}
+	return undefined
+}
+
+/**
+ * The folded one-line panel (progress §6.7): `⠋ fix-until-green · 2 of 5 · 01:12 · 12.4k tok`, and —
+ * while a step is running — WHAT it is doing: `⠋ dev · collect: read · src/engine/x.ts · 37 of 79 · …`.
+ *
+ * It carries the footer's facts (tally, cost) plus the header's (name, live clock) so nothing the
+ * panel was telling the user is lost to the fold — the TREE is what folds, not the run. The first
+ * running step's name and its live tool hint join those facts, because while folded the panel would
+ * otherwise answer "how far along" but not "what is happening now" — the one question the tree's
+ * in-progress rows exist to answer. The glyph is the RUN's state (the spinner while in progress, so
+ * the fold keeps breathing at 120 ms), and every live value stays whole-second (§4.8): a folded line
+ * inside one second is byte-identical.
+ */
+function foldedLine(view: ProgressView, rows: readonly ProgressRow[], options: RenderOptions): string {
+	const { width, theme } = options
+	const glyph =
+		view.status === "in_progress"
+			? (SPINNER[(options.frame ?? 0) % SPINNER.length] as string)
+			: view.status === "completed"
+				? "✓"
+				: view.status === "crashed"
+					? "✗"
+					: view.status === "cancelled"
+						? "■"
+						: "?"
+	const glyphColour: ProgressColour =
+		view.status === "in_progress"
+			? "accent"
+			: view.status === "completed"
+				? "success"
+				: view.status === "crashed"
+					? "error"
+					: "dim"
+	// The clock is the one LIVE value in the fold — whole seconds (§4.8), advanced by the frame delta.
+	const elapsed =
+		view.live && view.status === "in_progress" ? (view.elapsedMs ?? 0) + frameElapsed(options) : (view.elapsedMs ?? 0)
+	const rest = dotted([
+		`${view.stepsSettled} of ${view.stepsTotal}`,
+		formatClock(elapsed),
+		view.tokens > 0 ? `${formatTokens(view.tokens)} tok` : undefined,
+	])
+	// The first running step and its live tool hint — truncated FIRST when width is tight, because
+	// the run's identity and its facts are stable while the hint is the freshest, least structured one.
+	// Subagent-view parity: what the step last SAID outranks what tool it is running — the message
+	// persists while tools work and is replaced only by a newer text. Before any text, the tool hint.
+	// The pick prefers the row that HAS something to say, wherever it sits: the first in-progress row
+	// is often a CONSTRUCT or a bare foreach ITEM, which carry no hints — the hints live on the
+	// running STEP leaf underneath them (keyed by its dynamic path, e.g. `batch@7/review`). Falling
+	// back through any in-progress leaf to any in-progress row keeps a name on the line regardless.
+	const running = hintedNode(view.nodes) ?? rows.find((row) => row.node.state === "in_progress")?.node
+	const live = running?.messageHint ?? running?.activityHint
+	const hint =
+		running !== undefined
+			? dotted([running.name, live !== undefined ? truncate(live, ACTIVITY_HINT_MAX) : undefined])
+			: undefined
+	const budget = Math.max(1, width - GUTTER - 2 - rest.length - 1)
+	const nameWidth = hint !== undefined ? Math.max(3, Math.floor(budget * 0.4)) : budget
+	const name = truncate(view.workflowName, nameWidth)
+	const hintShown = hint !== undefined ? truncate(hint, Math.max(1, budget - name.length - 3)) : undefined
+	const lead =
+		hintShown !== undefined
+			? `${theme.fg("accent", name)}${theme.fg("text", ` · ${hintShown}`)}`
+			: theme.fg("accent", name)
+	return `${" ".repeat(GUTTER)}${theme.fg(glyphColour, glyph)} ${lead}${theme.fg("dim", ` ${rest}`)}`.replace(
+		/\s+$/,
+		"",
+	)
+}
 
 /** One glyph per `StepState` (progress §4.4). `crashed` splits on `optional`, which is the whole point of the flag. */
 const STATE_GLYPHS: Readonly<Record<Exclude<StepState, "in_progress">, readonly [string, ProgressColour]>> = {
@@ -109,14 +203,22 @@ interface Layout {
 	readonly tokenField: number
 }
 
+/** The default tree-row budget before the panel folds to its one-line summary (progress §6.7). */
+export const DEFAULT_MAX_TREE_ROWS = 4
+
 /**
  * Draw the panel: a blank line, the header rule, the tree, and the footer rule that IS the progress bar
  * (progress §4.1). `rows` comes from `collapse` — this module decides nothing about which rows exist,
- * only how they look.
+ * only how they look. A tree taller than the row budget (§6.7) draws as ONE folded line instead: the
+ * same run facts the footer would have carried, spinner and live clock included, so a tall run costs
+ * the panel nothing while everything stays reachable — the tree via `/workflow status` (§11.4).
  */
 export function render(view: ProgressView, rows: readonly ProgressRow[], options: RenderOptions): string[] {
 	const { width, theme } = options
 	const elapsedDelta = frameElapsed(options)
+	if (rows.length > (options.maxTreeRows ?? DEFAULT_MAX_TREE_ROWS)) {
+		return ["", foldedLine(view, rows, options), ""]
+	}
 	const cells = rows.map((row) => rowCells(row, options.frame ?? 0, elapsedDelta))
 	const layout = planLayout(cells, width)
 
@@ -297,6 +399,13 @@ function statusCell(row: ProgressRow, elapsedDelta: number): string {
 			? `repair ${node.repairs}`
 			: dotted([plural(node.repairs, "repair"), durationText(node, elapsedDelta)])
 	}
+
+	// What the step is doing right now (inspection §14) outranks where it is in its counters and how
+	// long it has been running — it is the question the panel previously could not answer at all — but
+	// never outranks a failure, a block, or a retry: those are the facts a user can act on. Settled rows
+	// cannot carry one (§4.8's settled-row rule), and the bound keeps one chatty tool from widening the
+	// status column past the grid's whole degradation ladder (§4.10).
+	if (node.state === "in_progress" && node.activityHint) return truncate(node.activityHint, ACTIVITY_HINT_MAX)
 
 	const counter = counterCell(node)
 	if (counter) return counter

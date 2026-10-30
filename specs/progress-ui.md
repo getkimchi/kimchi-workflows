@@ -413,6 +413,20 @@ focused component; a widget is not one), so there is no expand/collapse key. The
 fully expanded tree is reachable through `/workflow status` (§11.4) and through the
 `/workflow status` output (§11.4). *(decision)*
 
+6.7. **The panel folds to ONE line when its tree exceeds four rows** — the default tree-row
+budget (`DEFAULT_MAX_TREE_ROWS`, raised by tests, opted out of only by `/workflow status`, whose
+whole point is the full tree). The folded line carries the run's facts — `⠋ fix-until-green ·
+2 of 5 · 01:12 · 12.4k tok` — spinner animating at the same 120 ms, live clock whole-second, name
+truncated first — so the TREE is what folds, not the run. While a step is running, the fold also
+carries WHAT it is doing: the first running step's name and its live tool hint join the line
+(`⠋ dev · collect: read · src/engine/x.ts · 37 of 79 · …`) — truncated ahead of the name and the
+facts when width is tight, because while folded the panel would otherwise answer "how far along"
+but not "what is happening now". It breathes: constructs collapse as they
+settle (§6.1), so a tree that comes back within the budget renders whole again without anyone
+touching anything. This is §6.6's consequence made small: a widget can take no keypress, so the
+fold is either automatic or absent — and a tall panel is a cost the user pays on EVERY frame, which
+makes the fold the honest default. The tree remains one command away (§11.4). *(decision)*
+
 ## 7. Live surface
 
 7.1. **One widget, keyed `pi-workflows:progress`, placement `aboveEditor`**, installed
@@ -632,6 +646,131 @@ says it.
 
 13.7. **Emitting new engine events for the UI's benefit** — the existing stream is
 already sufficient (§3.2). Rendering must not become a reason to change the engine.
+
+## 14. Inspection — what a step is doing inside
+
+Companion feature to the tree: the panel answers *which step*, this answers *what that
+step is actually doing* — its prompt, tool calls, results, assistant text, and
+per-turn cost — live while it runs and after the fact. Before this, both execution
+modes were opaque in different ways: in-session prompts went out `display: false`
+(pi-agent.ts), and the isolated subprocess's NDJSON stream carried full tool events
+that the turn reader discarded, keeping only the final assistant message.
+
+14.1. **The engine is untouched.** Capture happens in the host layer, at the two
+places the facts already pass through: the shared PI listeners for an in-session
+turn (`tool_execution_start`/`_end`, `message_update` for a throttled text tail),
+attributed by the same `inFlight` guard the usage preview uses; and an `onEvent`
+hook on the subprocess stream reader for an isolated one. §13.7 stands by
+construction — nothing new is asked of `RunEvent`/`RunUpdate`. *(decision)*
+
+14.2. **One process-local activity bus** (`src/host/step-activity.ts`) carries the
+capture to whoever is watching: the progress sink (§14.4) and `/workflow inspect`
+(§14.5). It is fire-and-forget, bounded (a 200-entry ring per run, the 8 most recent
+runs), and cleared when a run's execution finishes — a display channel that can
+never fail a step, by the same rule §2.3 gives the sink. *(decision)*
+
+14.3. **Every step execution leaves a transcript** in PI session-entry shape, under
+the SAME naming rule the isolated path already used (`naming.ts`): a `resumable`
+step's keyed file, else the per-execution trace file. An isolated step's is its real
+subprocess session; an in-session step's is a sidecar appended message by message
+as its turn runs (`step-transcript.ts`) — one reader covers both modes, which is
+what makes live inspection and post-hoc inspection the same code path (§2.4's
+property, applied here). A write failure is reported once as a bus activity and
+never fails the turn. *(decision)*
+
+14.4. **The panel gains one rung, not a transcript.** An in-progress step's status
+cell shows its CURRENT tool call — `read · src/engine/step-runner.ts` — as transient
+state applied by `withActivity` (the `withUsagePreviews` shape), above counters and
+elapsed, below badges and blocked, bounded at 40 characters so one chatty tool cannot
+widen the grid (§4.10). A settled row can never carry one (the projection's own state
+is the gate), and the working message gains the tool where PI already draws the eye
+(§7.4). Headless (`json`/`print`) output is unchanged: those streams are contracts
+(§8.2), and the user chose to keep them so. *(decision)*
+
+14.5. **`/workflow inspect [run-id] [step-path]`** resolves exactly like `/workflow
+status` (§11.4's `resolveRunRef`), then targets a step: the executing one when bare
+and unique, an exact or prefix path match otherwise, ambiguity reported with
+candidates. The view is the transcript rendered by one pure function
+(`renderStepTranscript`) plus a two-line header; a step with no transcript — a
+function step, a session that never opened — falls back to the facts the log holds
+(lifecycle, retries, steers, `step-log` lines). *(decision)*
+
+14.6. **The live surface is `ctx.ui.custom()` — behind a runtime feature check.**
+It is the one PI surface with keyboard focus, so it is the one a transcript can be
+dismissed from (widgets never receive input, §6.6). §7.6.1's lesson applies as a
+guard rather than an avoidance: unlike the run summary, an inspection view may
+degrade on an old harness without failing its purpose — RPC gets the same lines as a
+`string[]` widget (`pi-workflows:inspect`, the second keyed slot), anything else a
+bounded notification with the transcript file named. *(decision)*
+
+14.7. **Live refresh is file-driven.** The bus event is only the poke that
+re-reads the transcript and requests a render; the file is the source of truth, so
+the view and the post-hoc read cannot drift. The view targets the step that was
+in progress when it opened and freezes on that step's final transcript when the
+run moves on — following the run's next step is deliberately not claimed. *(decision)*
+
+14.8. **A function-form `resumable` key is honestly underivable post-hoc** — it
+does not exist until the step runs. The command recovers the RESOLVED key from a
+recorded `agent-steer`/`agent-error` when one exists, and otherwise says so in the
+header rather than guessing at a file. *(decision)*
+
+14.9. **Bare `/workflow inspect` on a live TUI run opens the NAVIGATOR** — the
+panel's step list as a focused, navigable overlay: the same projection the panel
+draws, kept live by the bus's pokes plus a one-second poll (function steps settle
+without emitting activity). Up/down or j/k move between STEP rows (constructs show
+as structural, non-selectable rows); Enter opens the selected step's transcript in
+the same overlay; Escape goes back to the list, and out from the list. This is the
+subagent-view shape, and the honest companion to §6.6/§6.7: a widget can take no
+keys, so the pinned panel folds automatically — and a focused component takes keys,
+so the interactive tree lives here. The selection FOLLOWS the run's current step
+until the user moves it, then it is the user's until the view closes. Explicit
+run/path arguments keep the direct behaviour, and so does every non-TUI mode. The
+tree can demand no path while the navigator is open — several steps running is
+what it is FOR. *(decision)*
+
+14.10. **The harness keybinding matcher takes BINDING NAMES, not key ids — and it
+must never be passed detached.** `matches(data, "up")` matches nothing:
+`up` is a key id, and the registry is keyed by binding name
+(`tui.select.up`, whose *default keys* are `up`…). The navigator was
+shipped calling it with ids, and every key — arrows, Enter, Escape —
+seemed dead while the code was in fact reaching the matcher. Passing
+`keybindings.matches` as a bare function reference is its own crash:
+the method reads `this.keysById`, so the receiver must be preserved
+(an arrow wrapper). The fix names the select set — up/down/confirm/
+cancel — whose defaults are arrows, Enter, and Escape+ctrl+c, and each
+helper also falls back to the raw byte and a vim key, so an overlay
+stays usable where a binding is absent or rebound. *(decision; found
+by a crash report and a dead-keys report, not by the suite — the test
+fake now mirrors the real shape: a class whose `matches` reads
+`this.keysById`, keyed by binding names)*
+
+14.11. **The step view is COMPACT by default — detail is a bounded drill-down.**
+The full-transcript replay answered a question nobody asked at open time:
+"what is this step doing?" The default view is an ACTIVITY FEED — the
+prompt's first line, the tail of the tool activity (last 6 lines, with
+durations paired from the two entries' timestamps), the last 4 lines of
+the latest assistant text, and a counts footer that names the keys.
+`Enter` drills down to the full view, itself bounded (the prompt keeps
+its head at 10 lines, each assistant text its tail at 8) — detail stays
+reachable, walls don't. `Enter` again returns to the feed; Escape's
+meaning (back, or out) is never overloaded. Both surfaces share the
+rendering: the direct overlay and the navigator's transcript pane are
+the same view of the same sidecar, so live and post-hoc stay one code
+path. The panel's inline hint is deliberately untouched — it was already
+the right size. *(decision)*
+
+14.12. **The navigator's list scrolls inside a window, it never overflows
+the screen.** A long workflow (a foreach over many items, a deep
+construct tree) made the step list taller than the terminal —
+unnavigable, the rows past the bottom simply gone. The list now renders
+inside a window sized at 30% of the terminal's rows, capped at 10 and
+floored at 3 (`viewportBudget`, from `tui.terminal.rows` at open); the
+window scrolls to keep the cursor visible (the minimal scroll that
+makes the selection visible, applied on every move, follow, and
+refresh), pageUp/pageDown jump a window at a time through the select
+bindings, and a scroll line — `… 3 above · 12 below` — says what lies
+beyond the window. The transcript pane keeps its own bounds (§14.11's
+bounded blocks). *(decision)*
 
 ## Open questions
 

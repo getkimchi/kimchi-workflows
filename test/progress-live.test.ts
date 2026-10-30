@@ -165,8 +165,16 @@ describe("progress against a real engine run (progress §12.1)", () => {
 
 		const branch = collapse(view).find((row) => row.node.path === "decide")
 		expect(branch?.collapsed).toBe(true)
-		const line = render(view, collapse(view), { width: 76, theme: plainTheme }).find((row) => row.includes("decide"))
+		const line = render(view, collapse(view), { width: 76, theme: plainTheme, maxTreeRows: 10_000 }).find((row) =>
+			row.includes("decide"),
+		)
 		expect(line).toContain("✓ 1 of 2 arms")
+
+		// §6.7: the same tree over the default budget folds to its one-line summary — the run's
+		// facts survive the fold, the tree does not.
+		const folded = render(view, collapse(view), { width: 76, theme: plainTheme })
+		expect(folded).toHaveLength(3)
+		expect(folded[1]).toContain("13 of 13")
 	})
 
 	it("a real mid-run cut between iterations keeps the loop live rather than folding it", async () => {
@@ -183,7 +191,7 @@ describe("progress against a real engine run (progress §12.1)", () => {
 		expect(loop?.node.state).toBe("in_progress")
 		expect(loop?.collapsed).toBe(false)
 		expect(loop?.expanded).toBe(true)
-		const line = render(view, collapse(view), { width: 76, theme: plainTheme }).find((row) =>
+		const line = render(view, collapse(view), { width: 76, theme: plainTheme, maxTreeRows: 10_000 }).find((row) =>
 			row.includes("until-good"),
 		)
 		expect(line).toContain("↻ 2/10")

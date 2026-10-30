@@ -101,11 +101,14 @@ export async function handleStatus(
 	const view = project(buildOutline(workflow), events, (deps.now ?? (() => new Date()))())
 
 	// The tree, unstyled: `notify` takes a string, so the theme is the host's business and there is no
-	// width to discover — hence the explicit default. Unlike the live panel this is NOT collapsed by
-	// §6.1's rule... it is, in fact, exactly the same `collapse`, because a finished run's folded
-	// constructs are what makes a 40-step tree readable in a scrollback. `/workflow status` differs from
-	// the panel in being unbounded and re-readable, not in showing different rows.
-	const lines = render(view, collapse(view), { width: deps.width ?? 100, theme: PLAIN, runLabel: runIdHash(runId) })
+	// width to discover — hence the explicit default. Unlike the live panel (§6.7's fold), this is the
+	// FULLY EXPANDED tree — the panel is free to fold because this command exists (§6.6, §11.4).
+	const lines = render(view, collapse(view), {
+		width: deps.width ?? 100,
+		theme: PLAIN,
+		runLabel: runIdHash(runId),
+		maxTreeRows: Number.POSITIVE_INFINITY,
+	})
 	const failure =
 		view.status === "crashed" && view.failureReason
 			? workflowFailureLine({ path: view.failurePath, cause: view.failureReason })
