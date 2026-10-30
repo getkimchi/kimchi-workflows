@@ -17,6 +17,7 @@ import type { RunEvent } from "../src/engine/types.ts"
 import type { CommandCtx } from "../src/host/commands/context.ts"
 import { handleInspect } from "../src/host/commands/inspect.ts"
 import { completeWorkflowArgument } from "../src/host/completions.ts"
+import { viewportBudget } from "../src/host/inspect-navigator.ts"
 import { createMemoryStore } from "../src/host/memory-store.ts"
 import { traceSessionFile } from "../src/host/naming.ts"
 import type { ProgressCtx, ProgressMode } from "../src/host/progress-sink.ts"
@@ -38,7 +39,7 @@ const RUN_ID = "workflow-audit-1a2b3c4d"
 
 /** The overlay factory a fake `ui.custom` captured: what PI would mount and focus. */
 type TestFactory = (
-	tui: { requestRender(): void },
+	tui: { requestRender(): void; terminal?: { rows?: number } },
 	theme: unknown,
 	keybindings: { matches(data: string, keyId: string): boolean },
 	done: (result: unknown) => void,
@@ -255,7 +256,9 @@ async function liveRun() {
 function mount(factory: TestFactory) {
 	const rendered: string[][] = []
 	const close = pendingClose.shift()
-	const component = factory({ requestRender: () => {} }, {}, new FakeKeybindings(), () => close?.(undefined)) as {
+	const component = factory({ requestRender: () => {}, terminal: { rows: 24 } }, {}, new FakeKeybindings(), () =>
+		close?.(undefined),
+	) as {
 		render(width: number): string[]
 		handleInput?(data: string): void
 	}
@@ -460,6 +463,89 @@ describe("handleInspect — live (executing runs)", () => {
 })
 
 describe("the navigator (inspection §14.9): bare inspect on a live run", () => {
+	/** A run whose workflow has FOURTEEN steps — more than any honest window — with the first in flight. */
+	async function longRun() {
+		const dir = await mkdtemp(path.join(tmpdir(), "pi-workflows-inspect-"))
+		await prepareWorkflowPackageFixture({ directory: workflowsDir(dir) })
+		const file = path.join(dir, "big.workflow.ts")
+		const steps = Array.from({ length: 14 }, (_, index) => `s${String(index + 1).padStart(2, "0")}`)
+		const source = [
+			'import { createStep, createWorkflow } from "@kimchi-dev/kimchi-workflows";',
+			"",
+			'export default createWorkflow({ name: "big" })',
+			...steps.map((name) => `  .then(createStep({ name: "${name}", run: () => ({ ok: true }) }))`),
+			".commit();",
+		].join("\n")
+		await writeFile(file, source, "utf8")
+
+		const store = createMemoryStore()
+		const at = (offset: number) => new Date(Date.parse("2026-10-30T10:00:00.000Z") + offset).toISOString()
+		const events: RunEvent[] = [
+			{ type: "run-meta", runId: RUN_ID, workflowFilePath: file, at: at(0) },
+			{ type: "run-started", runId: RUN_ID, workflowName: "big", input: undefined, at: at(0) },
+			{ type: "step-started", runId: RUN_ID, path: "s01", input: undefined, at: at(100) },
+		]
+		for (const event of events) await store.appendEvent(event)
+		const sessionDir = path.join(dir, "session")
+		return { store, dir, sessionDir }
+	}
+
+	it("scrolls a long list inside its window — the cursor stays visible, pages jump (§14.12)", async () => {
+		const { store, dir, sessionDir } = await longRun()
+		const bus = createActivityBus()
+		const h = fakeCtx("tui", { cwd: dir, sessionDir })
+
+		const inspecting = handleInspect(
+			h.ctx,
+			store,
+			{ activeRunIds: () => [RUN_ID], activityBus: bus, width: 80 },
+			undefined,
+			undefined,
+		)
+		await vi.waitFor(() => expect(h.custom).toHaveLength(1), { timeout: 10_000 })
+		const { component, draw, last } = mount(h.custom[0] as TestFactory)
+
+		// The window is 30% of the 24-row terminal = 7 rows (§14.12): the first seven steps are on
+		// screen, the cursor is on the running one, and the scroll line says what is beyond.
+		draw()
+		expect(last().some((line) => line.includes("❯") && line.includes("s01"))).toBe(true)
+		expect(last().some((line) => line.includes("s07"))).toBe(true)
+		expect(last().some((line) => line.includes("s08"))).toBe(false)
+		expect(last().some((line) => line.includes("… 0 above · 7 below"))).toBe(true)
+
+		// PageDown jumps a window: the cursor lands on s08 and the window SCROLLS to keep it visible.
+		component.handleInput?.("\x1b[6~")
+		draw()
+		expect(last().some((line) => line.includes("❯") && line.includes("s08"))).toBe(true)
+		expect(last().some((line) => line.includes("s01"))).toBe(false) // scrolled away
+		expect(last().some((line) => line.includes("… 1 above · 6 below"))).toBe(true)
+
+		// j still moves one row at a time inside the scrolled window.
+		component.handleInput?.("j")
+		draw()
+		expect(last().some((line) => line.includes("❯") && line.includes("s09"))).toBe(true)
+
+		// PageUp jumps back a window, still keeping the cursor visible.
+		component.handleInput?.("\x1b[5~")
+		draw()
+		expect(last().some((line) => line.includes("❯") && line.includes("s02"))).toBe(true)
+		expect(last().some((line) => line.includes("… 1 above"))).toBe(true) // s01 sits one row above the window
+
+		component.handleInput?.("\x1b")
+		await inspecting
+	})
+})
+
+describe("viewportBudget (inspection §14.12)", () => {
+	it("is 30% of the terminal, capped at 10 rows, floored at 3", () => {
+		expect(viewportBudget(24)).toBe(7)
+		expect(viewportBudget(60)).toBe(10)
+		expect(viewportBudget(8)).toBe(3)
+		expect(viewportBudget(undefined)).toBe(10) // no terminal to ask — the cap
+	})
+})
+
+describe("the navigator compact step view", () => {
 	it("opens on the running step, moves on j/k, inspects on enter, and escapes back then out", async () => {
 		const { store, dir, sessionDir, writer } = await liveRun()
 		const bus = createActivityBus()

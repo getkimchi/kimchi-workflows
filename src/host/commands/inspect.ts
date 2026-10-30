@@ -46,7 +46,7 @@ export interface InspectDeps {
 
 /** The TUI overlay's factory arguments — structural, so a test satisfies it with fakes. */
 type CustomFactory = (
-	tui: { requestRender(): void },
+	tui: { requestRender(): void; terminal?: { rows?: number } },
 	theme: unknown,
 	keybindings: { matches(data: string, binding: string): boolean },
 	done: (result: unknown) => void,

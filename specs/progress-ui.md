@@ -417,7 +417,11 @@ fully expanded tree is reachable through `/workflow status` (§11.4) and through
 budget (`DEFAULT_MAX_TREE_ROWS`, raised by tests, opted out of only by `/workflow status`, whose
 whole point is the full tree). The folded line carries the run's facts — `⠋ fix-until-green ·
 2 of 5 · 01:12 · 12.4k tok` — spinner animating at the same 120 ms, live clock whole-second, name
-truncated first — so the TREE is what folds, not the run. It breathes: constructs collapse as they
+truncated first — so the TREE is what folds, not the run. While a step is running, the fold also
+carries WHAT it is doing: the first running step's name and its live tool hint join the line
+(`⠋ dev · collect: read · src/engine/x.ts · 37 of 79 · …`) — truncated ahead of the name and the
+facts when width is tight, because while folded the panel would otherwise answer "how far along"
+but not "what is happening now". It breathes: constructs collapse as they
 settle (§6.1), so a tree that comes back within the budget renders whole again without anyone
 touching anything. This is §6.6's consequence made small: a widget can take no keypress, so the
 fold is either automatic or absent — and a tall panel is a cost the user pays on EVERY frame, which
@@ -754,6 +758,19 @@ rendering: the direct overlay and the navigator's transcript pane are
 the same view of the same sidecar, so live and post-hoc stay one code
 path. The panel's inline hint is deliberately untouched — it was already
 the right size. *(decision)*
+
+14.12. **The navigator's list scrolls inside a window, it never overflows
+the screen.** A long workflow (a foreach over many items, a deep
+construct tree) made the step list taller than the terminal —
+unnavigable, the rows past the bottom simply gone. The list now renders
+inside a window sized at 30% of the terminal's rows, capped at 10 and
+floored at 3 (`viewportBudget`, from `tui.terminal.rows` at open); the
+window scrolls to keep the cursor visible (the minimal scroll that
+makes the selection visible, applied on every move, follow, and
+refresh), pageUp/pageDown jump a window at a time through the select
+bindings, and a scroll line — `… 3 above · 12 below` — says what lies
+beyond the window. The transcript pane keeps its own bounds (§14.11's
+bounded blocks). *(decision)*
 
 ## Open questions
 

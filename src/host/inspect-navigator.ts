@@ -18,7 +18,7 @@ import { buildOutline } from "../progress/outline.ts"
 import { project } from "../progress/project.ts"
 import type { ProgressNode } from "../progress/types.ts"
 import type { InspectDeps } from "./commands/inspect.ts"
-import { isDownKey, isEnterKey, isEscapeKey, isUpKey } from "./inspect-view.ts"
+import { isDownKey, isEnterKey, isEscapeKey, isPageDownKey, isPageUpKey, isUpKey } from "./inspect-view.ts"
 import { runIdHash } from "./naming.ts"
 import { runArtifactsDir } from "./project-dir.ts"
 import { projectRunEvents } from "./reconcile-runs.ts"
@@ -71,6 +71,14 @@ export function collectViewRows(nodes: readonly ProgressNode[], depth = 0, out: 
 	return out
 }
 
+/** The list window's height (progress §14.12): 30% of the terminal, capped at 10 rows — a long
+ * workflow scrolls inside its window instead of overflowing the screen. An unknown terminal (a
+ * harness that exposes no row count) is assumed mid-sized, which lands on the 10-row cap. */
+export function viewportBudget(termRows: number | undefined): number {
+	const rows = termRows ?? 34
+	return Math.max(3, Math.min(10, Math.floor((rows * 3) / 10)))
+}
+
 /** Static per-state glyphs — the list has no frame clock, so in-progress is a steady ●. */
 const ROW_GLYPHS: Readonly<Record<ProgressNode["state"], string>> = {
 	todo: "○",
@@ -121,6 +129,8 @@ export async function showNavigator(args: {
 	let touched = false // set by the first manual move: after that, the selection is the user's
 	let mode: "list" | "transcript" = "list"
 	let detail = false // the step view starts COMPACT (§14.11); Enter drills down, per step
+	let viewportTop = 0 // the first row the list window shows (§14.12 — the list scrolls, it never overflows)
+	let viewportRows = 10 // the window's height: 30% of the terminal, capped at 10 rows
 	let transcript: StepTranscriptLoad | undefined
 	let closed = false
 	let requestRender: (() => void) | undefined
@@ -136,6 +146,16 @@ export async function showNavigator(args: {
 		const running = rows.findIndex((row) => row.selectable && row.state === "in_progress")
 		if (running >= 0) selected = running
 		else if (selected < 0) selected = selectables()[0] ?? -1
+		clampViewport()
+	}
+
+	/** Keep the cursor inside the window — the minimal scroll that makes the selection visible. */
+	const clampViewport = (): void => {
+		const lastRow = Math.max(0, rows.length - viewportRows)
+		viewportTop = Math.min(lastRow, Math.max(0, viewportTop))
+		if (selected < 0) return
+		if (selected < viewportTop) viewportTop = selected
+		else if (selected >= viewportTop + viewportRows) viewportTop = selected - viewportRows + 1
 	}
 
 	const reloadTranscript = (): void => {
@@ -161,6 +181,7 @@ export async function showNavigator(args: {
 		})
 		rows = collectViewRows(project(outline, events, now()).nodes)
 		follow()
+		if (rows.length <= viewportTop + viewportRows) clampViewport() // items settled off-screen — pull in
 		if (mode === "transcript") reloadTranscript()
 		requestRender?.()
 	}
@@ -188,6 +209,7 @@ export async function showNavigator(args: {
 		if (target !== undefined && target !== selected) {
 			selected = target
 			touched = true // the selection is the user's now — no more following
+			clampViewport()
 			requestRender?.()
 		}
 	}
@@ -205,14 +227,20 @@ export async function showNavigator(args: {
 		const lines = [
 			"",
 			`  ${view.workflowName} · run ${runIdHash(runId)} · ${view.stepsSettled} of ${view.stepsTotal}`,
-			"  ↑↓/jk move · enter inspect · esc close",
+			"  ↑↓/jk move · pgup/pgdn page · enter inspect · esc close",
 			"",
 		]
-		for (const [index, row] of rows.entries()) {
+		clampViewport() // the render is the last honest chance to catch a resize or a rebuild
+		const window_ = rows.slice(viewportTop, viewportTop + viewportRows)
+		for (const [offset, row] of window_.entries()) {
+			const index = viewportTop + offset
 			const glyph = row.selectable ? (ROW_GLYPHS[row.state] as string) : CONSTRUCT_GLYPH
 			const cursor = index === selected ? "❯ " : "  "
 			lines.push(`${cursor}${"  ".repeat(row.depth)}${glyph} ${row.name}`)
 		}
+		const above = viewportTop
+		const below = rows.length - (viewportTop + window_.length)
+		if (above > 0 || below > 0) lines.push(`  … ${above} above · ${below} below`)
 		return lines
 	}
 
@@ -238,12 +266,13 @@ export async function showNavigator(args: {
 		await pokeRefresh() // the first fill happens before the first render
 		await ctx.ui.custom(
 			(
-				tui: { requestRender(): void },
+				tui: { requestRender(): void; terminal?: { rows?: number } },
 				_theme: unknown,
 				keybindings: { matches(data: string, binding: string): boolean },
 				done: (result: unknown) => void,
 			): FocusedComponent => {
 				requestRender = () => tui.requestRender()
+				viewportRows = viewportBudget(tui.terminal?.rows)
 				// `matches` is a method on the harness's Keybindings instance: pass the BARE function on and
 				// its receiver is gone (`this.keysById` is then undefined and every keypress crashes — the
 				// crash report that found this). An arrow wrapper keeps the receiver; a harness without
@@ -258,6 +287,8 @@ export async function showNavigator(args: {
 						if (mode === "list") {
 							if (isUpKey(data, matches)) move(-1)
 							else if (isDownKey(data, matches)) move(1)
+							else if (isPageUpKey(data, matches)) move(-viewportRows)
+							else if (isPageDownKey(data, matches)) move(viewportRows)
 							else if (isEnterKey(data, matches)) enterTranscript()
 							else if (isEscapeKey(data, matches)) done(undefined)
 						} else if (isEnterKey(data, matches)) {

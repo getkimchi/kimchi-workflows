@@ -80,14 +80,18 @@ const ELLIPSIS = "…"
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const
 
 /**
- * The folded one-line panel (progress §6.7): `⠋ fix-until-green · 2 of 5 · 01:12 · 12.4k tok`.
+ * The folded one-line panel (progress §6.7): `⠋ fix-until-green · 2 of 5 · 01:12 · 12.4k tok`, and —
+ * while a step is running — WHAT it is doing: `⠋ dev · collect: read · src/engine/x.ts · 37 of 79 · …`.
  *
  * It carries the footer's facts (tally, cost) plus the header's (name, live clock) so nothing the
- * panel was telling the user is lost to the fold — the TREE is what folds, not the run. The glyph is
- * the RUN's state (the spinner while in progress, so the fold keeps breathing at 120 ms), and every
- * live value stays whole-second (§4.8): a folded line inside one second is byte-identical.
+ * panel was telling the user is lost to the fold — the TREE is what folds, not the run. The first
+ * running step's name and its live tool hint join those facts, because while folded the panel would
+ * otherwise answer "how far along" but not "what is happening now" — the one question the tree's
+ * in-progress rows exist to answer. The glyph is the RUN's state (the spinner while in progress, so
+ * the fold keeps breathing at 120 ms), and every live value stays whole-second (§4.8): a folded line
+ * inside one second is byte-identical.
  */
-function foldedLine(view: ProgressView, options: RenderOptions): string {
+function foldedLine(view: ProgressView, rows: readonly ProgressRow[], options: RenderOptions): string {
 	const { width, theme } = options
 	const glyph =
 		view.status === "in_progress"
@@ -115,8 +119,22 @@ function foldedLine(view: ProgressView, options: RenderOptions): string {
 		formatClock(elapsed),
 		view.tokens > 0 ? `${formatTokens(view.tokens)} tok` : undefined,
 	])
-	const name = truncate(view.workflowName, Math.max(1, width - GUTTER - 2 - rest.length - 1))
-	return `${" ".repeat(GUTTER)}${theme.fg(glyphColour, glyph)} ${theme.fg("accent", name)}${theme.fg("dim", ` ${rest}`)}`.replace(
+	// The first running step and its live tool hint — truncated FIRST when width is tight, because
+	// the run's identity and its facts are stable while the hint is the freshest, least structured one.
+	const running = rows.find((row) => row.node.state === "in_progress")?.node
+	const hint =
+		running !== undefined
+			? dotted([running.name, running.activityHint ? truncate(running.activityHint, ACTIVITY_HINT_MAX) : undefined])
+			: undefined
+	const budget = Math.max(1, width - GUTTER - 2 - rest.length - 1)
+	const nameWidth = hint !== undefined ? Math.max(3, Math.floor(budget * 0.4)) : budget
+	const name = truncate(view.workflowName, nameWidth)
+	const hintShown = hint !== undefined ? truncate(hint, Math.max(1, budget - name.length - 3)) : undefined
+	const lead =
+		hintShown !== undefined
+			? `${theme.fg("accent", name)}${theme.fg("text", ` · ${hintShown}`)}`
+			: theme.fg("accent", name)
+	return `${" ".repeat(GUTTER)}${theme.fg(glyphColour, glyph)} ${lead}${theme.fg("dim", ` ${rest}`)}`.replace(
 		/\s+$/,
 		"",
 	)
@@ -177,7 +195,7 @@ export function render(view: ProgressView, rows: readonly ProgressRow[], options
 	const { width, theme } = options
 	const elapsedDelta = frameElapsed(options)
 	if (rows.length > (options.maxTreeRows ?? DEFAULT_MAX_TREE_ROWS)) {
-		return ["", foldedLine(view, options), ""]
+		return ["", foldedLine(view, rows, options), ""]
 	}
 	const cells = rows.map((row) => rowCells(row, options.frame ?? 0, elapsedDelta))
 	const layout = planLayout(cells, width)

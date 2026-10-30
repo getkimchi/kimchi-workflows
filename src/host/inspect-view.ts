@@ -65,6 +65,15 @@ export function isEnterKey(data: string, matches: BindingMatcher = defaultMatche
 	return matches(data, "tui.select.confirm") || data === "\r"
 }
 
+/** The list's page jumps (progress §14.12): pageUp/pageDown through the select bindings. */
+export function isPageUpKey(data: string, matches: BindingMatcher = defaultMatches): boolean {
+	return matches(data, "tui.select.pageUp") || data === "\x1b[5~"
+}
+
+export function isPageDownKey(data: string, matches: BindingMatcher = defaultMatches): boolean {
+	return matches(data, "tui.select.pageDown") || data === "\x1b[6~"
+}
+
 /** Whether `data` is the Escape key alone (the navigator's "go back" / close), via keybindings. */
 export function isEscapeKey(data: string, matches: BindingMatcher = defaultMatches): boolean {
 	return matches(data, "tui.select.cancel") || data === "\x1b"
