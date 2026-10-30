@@ -15,20 +15,36 @@
 import type { ProgressNode, ProgressView } from "./types.ts"
 
 /** Apply the latest tool activity for active steps, keyed by dynamic step path. */
-export function withActivity(view: ProgressView, hintByPath: ReadonlyMap<string, string>): ProgressView {
-	if (hintByPath.size === 0) return view
-	return { ...view, nodes: view.nodes.map((node) => withNode(node, hintByPath)) }
+export function withActivity(
+	view: ProgressView,
+	hintByPath: ReadonlyMap<string, string>,
+	messageByPath: ReadonlyMap<string, string> = new Map(),
+): ProgressView {
+	if (hintByPath.size === 0 && messageByPath.size === 0) return view
+	return {
+		...view,
+		nodes: view.nodes.map((node) => withNode(node, hintByPath, messageByPath)),
+	}
 }
 
-function withNode(node: ProgressNode, hintByPath: ReadonlyMap<string, string>): ProgressNode {
-	const children = node.children.map((child) => withNode(child, hintByPath))
+function withNode(
+	node: ProgressNode,
+	hintByPath: ReadonlyMap<string, string>,
+	messageByPath: ReadonlyMap<string, string>,
+): ProgressNode {
+	const children = node.children.map((child) => withNode(child, hintByPath, messageByPath))
 	const childrenChanged = children.some((child, index) => child !== node.children[index])
 	// The hint key is the dynamic node path exactly as the activity channel records it — indices
 	// included, so a fan-out's live items each carry their own.
-	const hint =
-		node.state === "in_progress" && (node.kind === "step" || node.kind === "foreach-item")
-			? hintByPath.get(node.path)
-			: undefined
-	if (!childrenChanged && hint === undefined) return node
-	return { ...node, ...(hint !== undefined ? { activityHint: hint } : {}), children }
+	// The message rides the same gate and the same key as the tool hint.
+	const applies = node.state === "in_progress" && (node.kind === "step" || node.kind === "foreach-item")
+	const hint = applies ? hintByPath.get(node.path) : undefined
+	const message = applies ? messageByPath.get(node.path) : undefined
+	if (!childrenChanged && hint === undefined && message === undefined) return node
+	return {
+		...node,
+		...(hint !== undefined ? { activityHint: hint } : {}),
+		...(message !== undefined ? { messageHint: message } : {}),
+		children,
+	}
 }

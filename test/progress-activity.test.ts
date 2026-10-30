@@ -53,6 +53,21 @@ describe("withActivity (inspection §14)", () => {
 		expect(hinted.nodes[0]?.activityHint).toBe("bash · npm test")
 	})
 
+	it("carries the last thing a step SAID beside its tool hint, on the same gate (§6.7's fold segment)", () => {
+		const view = baseView([stepNode({ path: "test", state: "in_progress" })])
+		const both = withActivity(
+			view,
+			new Map([["test", "bash · npm test"]]),
+			new Map([["test", "Reading the failures to find the root cause"]]),
+		)
+		expect(both.nodes[0]?.activityHint).toBe("bash · npm test") // the tree's status column
+		expect(both.nodes[0]?.messageHint).toBe("Reading the failures to find the root cause") // the fold's segment
+
+		const settled = baseView([stepNode({ path: "test", state: "completed" })])
+		const stale = withActivity(settled, new Map(), new Map([["test", "said while running"]]))
+		expect(stale.nodes[0]?.messageHint).toBeUndefined() // the state is the gate — settled rows carry nothing
+	})
+
 	it("never puts one on a settled, blocked, or unstarted row — the projection's state is the gate", () => {
 		const view = baseView([
 			stepNode({ path: "done", state: "completed" }),

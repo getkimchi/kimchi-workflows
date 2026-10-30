@@ -121,10 +121,13 @@ function foldedLine(view: ProgressView, rows: readonly ProgressRow[], options: R
 	])
 	// The first running step and its live tool hint — truncated FIRST when width is tight, because
 	// the run's identity and its facts are stable while the hint is the freshest, least structured one.
+	// Subagent-view parity: what the step last SAID outranks what tool it is running — the message
+	// persists while tools work and is replaced only by a newer text. Before any text, the tool hint.
 	const running = rows.find((row) => row.node.state === "in_progress")?.node
+	const live = running?.messageHint ?? running?.activityHint
 	const hint =
 		running !== undefined
-			? dotted([running.name, running.activityHint ? truncate(running.activityHint, ACTIVITY_HINT_MAX) : undefined])
+			? dotted([running.name, live !== undefined ? truncate(live, ACTIVITY_HINT_MAX) : undefined])
 			: undefined
 	const budget = Math.max(1, width - GUTTER - 2 - rest.length - 1)
 	const nameWidth = hint !== undefined ? Math.max(3, Math.floor(budget * 0.4)) : budget

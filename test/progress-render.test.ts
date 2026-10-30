@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import type { RunEvent } from "../src/engine/types.ts"
 import { createStep, createWorkflow } from "../src/flow/index.ts"
 import { collapse } from "../src/progress/collapse.ts"
+import { withActivity } from "../src/progress/activity.ts"
 import { buildOutline } from "../src/progress/outline.ts"
 import { project } from "../src/progress/project.ts"
 import { formatTokens, type RenderOptions, render } from "../src/progress/render.ts"
@@ -466,6 +467,25 @@ describe("the fold (progress §6.7): a tree taller than the budget draws as ONE 
 		const view = viewOf(fiveStepRun())
 		const spinning = render(view, collapse(view), { width: 72, theme: plainTheme, frame: 3 })
 		expect(spinning[1]).toContain("⠸") // frame 3 of the braille set — the fold keeps animating
+	})
+
+	it("the fold prefers what the running step last SAID to what tool it is running (§6.7)", () => {
+		const view = viewOf(fiveStepRun())
+		const both = withActivity(
+			view,
+			new Map([["plan", "bash · npm test"]]),
+			new Map([["plan", "Reading the failures"]]),
+		)
+		const folded = render(both, collapse(both), { width: 100, theme: plainTheme, frame: 0 })
+		expect(folded[1]).toContain("plan · Reading the failures")
+		expect(folded[1]).not.toContain("npm test") // the message outranks the tool — subagent-view parity
+	})
+
+	it("before any text, the fold falls back to the running step's tool hint", () => {
+		const view = viewOf(fiveStepRun())
+		const hinted = withActivity(view, new Map([["plan", "bash · npm test"]]))
+		const folded = render(hinted, collapse(hinted), { width: 100, theme: plainTheme, frame: 0 })
+		expect(folded[1]).toContain("plan · bash · npm test")
 	})
 
 	it("a host can raise the budget: the same five-row tree renders whole", () => {

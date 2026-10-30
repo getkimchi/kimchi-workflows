@@ -172,6 +172,13 @@ export interface ProgressNode {
 	 * can never carry one (a settled row never changes, §4.8).
 	 */
 	readonly activityHint?: string
+	/**
+	 * The last thing this in-progress step SAID — its newest assistant text, one bounded tail, in the
+	 * subagent-view shape: it persists while tools run and is replaced only by a newer text. Carried
+	 * beside `activityHint` because the two answer different questions ("what is it doing" vs "what
+	 * is it saying") — the tree's status column shows the former, the folded line the latter.
+	 */
+	readonly messageHint?: string
 }
 
 /**

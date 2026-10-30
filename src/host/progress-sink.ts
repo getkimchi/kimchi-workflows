@@ -110,6 +110,7 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
 	// projection exactly as usage previews are — never part of the durable log, and gated by the
 	// projection's own `in_progress` state so a settled row can never carry one.
 	const hintByPath = new Map<string, string>()
+	const messageByPath = new Map<string, string>() // the last thing each step SAID — the fold shows it
 	let noticedActivityFailure = false
 
 	// `json`/`print` have no UI at all (§7.2's third row): plain lines on stderr, and nothing else.
@@ -140,7 +141,9 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
 		const projected = project(outline, events, now())
 		// A terminal summary is durable history only. Normally the engine has already settled or cleared
 		// every preview; ignoring the maps here also protects the summary from a misbehaving host adapter.
-		const view = terminal ? projected : withActivity(withUsagePreviews(projected, usageByPath), hintByPath)
+		const view = terminal
+			? projected
+			: withActivity(withUsagePreviews(projected, usageByPath), hintByPath, messageByPath)
 		if (!terminal) {
 			surface?.update({ view, observedAtMs: monotonicNow() }, workingMessage(view))
 			return
@@ -162,6 +165,12 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
 							if (hintByPath.get(activity.path) === hint) return
 							hintByPath.set(activity.path, hint)
 							draw(false)
+						} else if (activity.kind === "assistant-text" && activity.summary) {
+							// The subagent-view segment (progress 6.7): the newest text stays on the fold while
+							// the step keeps working — replaced only by a newer text, never by a tool call.
+							if (messageByPath.get(activity.path) === activity.summary) return
+							messageByPath.set(activity.path, activity.summary)
+							draw(false)
 						} else if (activity.kind === "notice" && !noticedActivityFailure) {
 							noticedActivityFailure = true
 							ctx.ui.notify(`workflow: ${activity.summary ?? "live step inspection"}`, "warning")
@@ -182,7 +191,10 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
 				if (event.type === "agent-usage") usageByPath.delete(event.path)
 				// A new execution of a path starts with a clean slate — a loop's second iteration must not
 				// open showing the tool its first iteration ended on.
-				if (event.type === "step-started") hintByPath.delete(event.path)
+				if (event.type === "step-started") {
+					hintByPath.delete(event.path)
+					messageByPath.delete(event.path)
+				}
 				plain?.accept(event)
 				draw(isTerminal(event))
 			} catch (err) {
@@ -224,6 +236,7 @@ export function createProgressSink(options: ProgressSinkOptions): ProgressSink {
 		dispose(): void {
 			usageByPath.clear()
 			hintByPath.clear()
+			messageByPath.clear()
 			unsubscribeActivity?.()
 			try {
 				surface?.clear()
