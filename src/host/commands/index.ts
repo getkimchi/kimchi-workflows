@@ -22,6 +22,8 @@ export {
 } from "./attended.ts"
 export type { CommandCtx, Notify, NotifyCtx, StartAgent } from "./context.ts"
 export { describe, notifyResult, reportResult, runTracked } from "./context.ts"
+export type { InspectDeps } from "./inspect.ts"
+export { handleInspect } from "./inspect.ts"
 export { handleCancel, handleDelete } from "./lifecycle.ts"
 export { handleListRuns, handleListWorkflows } from "./list.ts"
 export { handleResume } from "./resume.ts"

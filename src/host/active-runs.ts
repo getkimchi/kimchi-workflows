@@ -28,7 +28,13 @@ export interface ActiveRuns {
 	find(runId: string): readonly ActiveRun[]
 }
 
-export function createActiveRuns(): ActiveRuns {
+/**
+ * Process-local run tracking. `onFinish` fires once per execution, after removal — the one chokepoint
+ * every execution passes through (runTracked's `finally`), which is what makes it the right place for
+ * a follower to drop per-run process state (the activity bus's ring, inspection §14) without each
+ * handler having to remember to.
+ */
+export function createActiveRuns(onFinish?: (runId: string) => void): ActiveRuns {
 	const active = new Set<ActiveRun>()
 
 	return {
@@ -88,6 +94,7 @@ export function createActiveRuns(): ActiveRuns {
 		},
 		finish(run) {
 			active.delete(run)
+			onFinish?.(run.runId)
 		},
 		find(runId) {
 			return [...active].filter((run) => run.runId === runId)

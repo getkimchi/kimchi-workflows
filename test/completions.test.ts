@@ -33,7 +33,7 @@ const labels = (items: { label: string }[] | null): string[] => (items ?? []).ma
 describe("verb slot", () => {
 	it("offers every verb on an empty argument, in the order §6 introduces them", async () => {
 		const items = await completeWorkflowArgument("", sourcesOf())
-		expect(labels(items)).toEqual(["run", "create", "list", "status", "resume", "cancel", "delete"])
+		expect(labels(items)).toEqual(["run", "create", "list", "status", "inspect", "resume", "cancel", "delete"])
 	})
 
 	it("inserts a trailing space for the verbs that take an argument, and none for those that do not", async () => {
@@ -43,6 +43,7 @@ describe("verb slot", () => {
 			"create",
 			"list",
 			"status ",
+			"inspect ",
 			"resume ",
 			"cancel ",
 			"delete ",
@@ -64,7 +65,13 @@ describe("verb slot", () => {
 		// `list` has the prefix, so the verbs merely containing an l (`cancel`, `delete`) stay out.
 		expect(labels(await completeWorkflowArgument("l", sourcesOf()))).toEqual(["list"])
 		// Nothing starts with an e, so every verb containing one is offered, in the verb table's order.
-		expect(labels(await completeWorkflowArgument("e", sourcesOf()))).toEqual(["create", "resume", "cancel", "delete"])
+		expect(labels(await completeWorkflowArgument("e", sourcesOf()))).toEqual([
+			"create",
+			"inspect",
+			"resume",
+			"cancel",
+			"delete",
+		])
 	})
 
 	it("reads no candidate source at all — a verb keystroke costs nothing (spec §14.6)", async () => {

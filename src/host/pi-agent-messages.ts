@@ -295,7 +295,10 @@ export interface AssistantTurnReader {
  * transcript interleaves `tool_call`/`turn_start`/… lines this reader has no need of, and a killed child
  * leaves a truncated final line.
  */
-export function createAssistantTurnReader(): AssistantTurnReader {
+export function createAssistantTurnReader(
+	/** Receives every parsed stream event, `message_end` included — the inspection channel's window onto an isolated step's execution (step-activity.ts). Skipped lines (non-JSON) never reach it. */
+	onEvent?: (event: unknown) => void,
+): AssistantTurnReader {
 	let pending = "" // the tail of the last chunk, up to the next newline — never a whole stream
 	let last: { text: string; usage?: TokenUsage } | undefined
 	// Replaced, never appended — last write wins, and one submission costs the same as any number.
@@ -314,6 +317,7 @@ export function createAssistantTurnReader(): AssistantTurnReader {
 		} catch {
 			return // a partial or non-JSON line, same tolerance parseNdjsonMessages has
 		}
+		onEvent?.(event)
 		if (!isMessageEndEvent(event)) return
 		const message = event.message as AgentMessages[number]
 		if (!isAssistantMessage(message)) return
