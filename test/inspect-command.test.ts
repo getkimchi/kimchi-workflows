@@ -53,6 +53,9 @@ interface FakeCtx {
 }
 
 /** A fake command context; TUI adds a capturable `ui.custom`, RPC does not have one. */
+/** The answers the ask flow's editor prompt returns, one per opening; empty means cancelled. */
+const editorAnswers: (string | undefined)[] = []
+
 function fakeCtx(mode: ProgressMode, options: { readonly cwd?: string; readonly sessionDir?: string } = {}): FakeCtx {
 	const notes: [string, string | undefined][] = []
 	const widgets: [string, unknown, unknown][] = []
@@ -65,6 +68,10 @@ function fakeCtx(mode: ProgressMode, options: { readonly cwd?: string; readonly 
 			notify: (message: string, type?: "info" | "warning" | "error") => void notes.push([message, type]),
 			setWidget: (key: string, content: unknown, options?: unknown) => void widgets.push([key, content, options]),
 			setWorkingMessage: () => {},
+			editor: (title: string): Promise<string | undefined> => {
+				notes.push([title, "editor"])
+				return Promise.resolve(editorAnswers.shift())
+			},
 			...(mode === "tui"
 				? {
 						custom: (factory: TestFactory): Promise<unknown> => {
@@ -108,6 +115,7 @@ async function recordedRun() {
 
 afterEach(() => {
 	pendingClose.length = 0
+	editorAnswers.length = 0
 })
 
 /** The harness's Keybindings shape, faithfully: `matches` reads per-id key lists off `this`.
@@ -256,8 +264,8 @@ async function liveRun() {
 function mount(factory: TestFactory) {
 	const rendered: string[][] = []
 	const close = pendingClose.shift()
-	const component = factory({ requestRender: () => {}, terminal: { rows: 24 } }, {}, new FakeKeybindings(), () =>
-		close?.(undefined),
+	const component = factory({ requestRender: () => {}, terminal: { rows: 24 } }, {}, new FakeKeybindings(), (result) =>
+		close?.(result),
 	) as {
 		render(width: number): string[]
 		handleInput?(data: string): void
@@ -531,6 +539,243 @@ describe("the navigator (inspection §14.9): bare inspect on a live run", () => 
 		expect(last().some((line) => line.includes("❯") && line.includes("s02"))).toBe(true)
 		expect(last().some((line) => line.includes("… 1 above"))).toBe(true) // s01 sits one row above the window
 
+		component.handleInput?.("\x1b")
+		await inspecting
+	})
+})
+
+describe("the navigator's actions (inspection §14.13)", () => {
+	it("asks the selected step: the overlay closes, the editor prompts, the answer is notified", async () => {
+		const { store, dir, sessionDir } = await liveRun()
+		const bus = createActivityBus()
+		const h = fakeCtx("tui", { cwd: dir, sessionDir })
+		const asked: { path: string; question: string }[] = []
+		editorAnswers.push("what did the audit find?")
+
+		const inspecting = handleInspect(
+			h.ctx,
+			store,
+			{
+				activeRunIds: () => [RUN_ID],
+				activityBus: bus,
+				width: 80,
+				askStep: async (args, question) => {
+					asked.push({ path: args.path, question })
+					return "It found two failing tests."
+				},
+			},
+			undefined,
+			undefined,
+		)
+		await vi.waitFor(() => expect(h.custom).toHaveLength(1), { timeout: 10_000 })
+		const { component, draw, last } = mount(h.custom[0] as TestFactory)
+		draw()
+		expect(last().some((line) => line.includes("a ask"))).toBe(true) // the hint names the key
+
+		component.handleInput?.("a") // ask the followed (running) step
+		await inspecting
+		expect(asked).toEqual([{ path: "collect", question: "what did the audit find?" }])
+		expect(h.notes.some(([message, type]) => message.includes("two failing tests") && type === "info")).toBe(true)
+	})
+
+	it("a cancelled ask prompt asks nothing", async () => {
+		const { store, dir, sessionDir } = await liveRun()
+		const bus = createActivityBus()
+		const h = fakeCtx("tui", { cwd: dir, sessionDir })
+		const asked: string[] = []
+		editorAnswers.push(undefined) // the editor was dismissed
+
+		const inspecting = handleInspect(
+			h.ctx,
+			store,
+			{
+				activeRunIds: () => [RUN_ID],
+				activityBus: bus,
+				width: 80,
+				askStep: async (_args, question) => {
+					asked.push(question)
+					return "unreachable"
+				},
+			},
+			undefined,
+			undefined,
+		)
+		await vi.waitFor(() => expect(h.custom).toHaveLength(1), { timeout: 10_000 })
+		const { component } = mount(h.custom[0] as TestFactory)
+		component.handleInput?.("a")
+		await inspecting
+		expect(asked).toEqual([])
+	})
+
+	it("cancels the run on the second x, and any other key disarms the first", async () => {
+		const { store, dir, sessionDir } = await liveRun()
+		const bus = createActivityBus()
+		const h = fakeCtx("tui", { cwd: dir, sessionDir })
+		const cancelled: string[] = []
+
+		const inspecting = handleInspect(
+			h.ctx,
+			store,
+			{
+				activeRunIds: () => [RUN_ID],
+				activityBus: bus,
+				width: 80,
+				cancelRun: async (runId) => {
+					cancelled.push(runId)
+				},
+			},
+			undefined,
+			undefined,
+		)
+		await vi.waitFor(() => expect(h.custom).toHaveLength(1), { timeout: 10_000 })
+		const { component, draw, last } = mount(h.custom[0] as TestFactory)
+
+		component.handleInput?.("x") // arm
+		draw()
+		expect(last().some((line) => line.includes("x again to cancel"))).toBe(true)
+		component.handleInput?.("j") // any other key disarms
+		draw()
+		expect(last().some((line) => line.includes("x again to cancel"))).toBe(false)
+		component.handleInput?.("x") // arm again
+		component.handleInput?.("x") // confirm
+		await inspecting
+		expect(cancelled).toEqual([RUN_ID])
+	})
+
+	it("offers resume only once the run has crashed under the view, then resumes it", async () => {
+		const { store, dir, sessionDir } = await liveRun()
+		const bus = createActivityBus()
+		const h = fakeCtx("tui", { cwd: dir, sessionDir })
+		const resumed: string[] = []
+		const at = (offset: number) => new Date(Date.parse("2026-10-30T10:00:00.000Z") + offset).toISOString()
+
+		const inspecting = handleInspect(
+			h.ctx,
+			store,
+			{
+				activeRunIds: () => [RUN_ID],
+				activityBus: bus,
+				width: 80,
+				resumeRun: async (runId) => {
+					resumed.push(runId)
+				},
+			},
+			undefined,
+			undefined,
+		)
+		await vi.waitFor(() => expect(h.custom).toHaveLength(1), { timeout: 10_000 })
+		const { component, draw, last } = mount(h.custom[0] as TestFactory)
+		draw()
+		expect(last().some((line) => line.includes("r resume"))).toBe(false) // live: no resume offered
+
+		// The run crashes while the view is open — the poll or a poke reprojects it.
+		await store.appendEvent({ type: "run-crashed", runId: RUN_ID, path: "collect", error: "boom", at: at(2600) })
+		bus.publish({
+			runId: RUN_ID,
+			path: "collect",
+			attempt: 1,
+			at: new Date().toISOString(),
+			kind: "tool-start",
+			toolName: "bash",
+			summary: "npm test",
+		})
+		await new Promise((resolve) => setTimeout(resolve, 50))
+		draw()
+		expect(last().some((line) => line.includes("r resume"))).toBe(true) // the hint now offers it
+
+		component.handleInput?.("r")
+		await inspecting
+		expect(resumed).toEqual([RUN_ID])
+	})
+
+	it("watches: the transcript pane advances to the run's current step until the user moves", async () => {
+		const { store, dir, sessionDir } = await liveRun()
+		const bus = createActivityBus()
+		const at = (offset: number) => new Date(Date.parse("2026-10-30T10:00:00.000Z") + offset).toISOString()
+		const h = fakeCtx("tui", { cwd: dir, sessionDir })
+
+		const inspecting = handleInspect(
+			h.ctx,
+			store,
+			{ activeRunIds: () => [RUN_ID], activityBus: bus, width: 80 },
+			undefined,
+			undefined,
+		)
+		await vi.waitFor(() => expect(h.custom).toHaveLength(1), { timeout: 10_000 })
+		const { component, draw, last } = mount(h.custom[0] as TestFactory)
+
+		component.handleInput?.("\r") // enter the transcript of the followed step (collect)
+		draw()
+		expect(last().some((line) => line.includes("step collect"))).toBe(true)
+		expect(last().some((line) => line.includes("watching"))).toBe(false) // not watching yet
+
+		component.handleInput?.("w") // watch
+		draw()
+		expect(last().some((line) => line.includes("watching"))).toBe(true)
+
+		// The run moves on to report: the pane follows it — no key touched.
+		await store.appendEvent({ type: "step-completed", runId: RUN_ID, path: "collect", output: undefined, at: at(2300) })
+		await store.appendEvent({ type: "step-started", runId: RUN_ID, path: "report", input: undefined, at: at(2400) })
+		bus.publish({
+			runId: RUN_ID,
+			path: "report",
+			attempt: 1,
+			at: new Date().toISOString(),
+			kind: "tool-start",
+			toolName: "bash",
+			summary: "npm test",
+		})
+		await new Promise((resolve) => setTimeout(resolve, 50))
+		draw()
+		expect(last().some((line) => line.includes("step report"))).toBe(true)
+
+		// A move is the user taking the wheel back: watch is off, the pane stops following.
+		component.handleInput?.("\x1b") // back to the list
+		draw()
+		component.handleInput?.("j") // a move
+		component.handleInput?.("\r") // enter the transcript of the user's step
+		draw()
+		await store.appendEvent({ type: "step-completed", runId: RUN_ID, path: "report", output: undefined, at: at(2800) })
+		bus.publish({
+			runId: RUN_ID,
+			path: "report",
+			attempt: 1,
+			at: new Date().toISOString(),
+			kind: "tool-start",
+			toolName: "bash",
+			summary: "npm test",
+		})
+		await new Promise((resolve) => setTimeout(resolve, 50))
+		draw()
+		expect(last().some((line) => line.includes("watching"))).toBe(false)
+
+		component.handleInput?.("\x1b") // transcript -> list
+		component.handleInput?.("\x1b") // list -> closed
+		await inspecting
+	})
+
+	it("the transcript pane's header carries the step's total recorded tokens", async () => {
+		const { store, dir, sessionDir } = await liveRun()
+		const bus = createActivityBus()
+		const at = (offset: number) => new Date(Date.parse("2026-10-30T10:00:00.000Z") + offset).toISOString()
+		await store.appendEvent({ type: "agent-usage", runId: RUN_ID, path: "collect", totalTokens: 5_200, at: at(2200) })
+		const h = fakeCtx("tui", { cwd: dir, sessionDir })
+
+		const inspecting = handleInspect(
+			h.ctx,
+			store,
+			{ activeRunIds: () => [RUN_ID], activityBus: bus, width: 80 },
+			undefined,
+			undefined,
+		)
+		await vi.waitFor(() => expect(h.custom).toHaveLength(1), { timeout: 10_000 })
+		const { component, draw, last } = mount(h.custom[0] as TestFactory)
+
+		component.handleInput?.("\r") // enter the running step's transcript
+		draw()
+		expect(last().some((line) => line.includes("step collect") && line.includes("5.2k tok"))).toBe(true)
+
+		component.handleInput?.("\x1b")
 		component.handleInput?.("\x1b")
 		await inspecting
 	})

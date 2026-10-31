@@ -16,8 +16,9 @@ import type { RunEvent } from "../engine/types.ts"
 import type { WorkflowDefinition } from "../flow/types.ts"
 import { buildOutline } from "../progress/outline.ts"
 import { project } from "../progress/project.ts"
+import { formatTokens } from "../progress/render.ts"
 import type { ProgressNode } from "../progress/types.ts"
-import type { InspectDeps } from "./commands/inspect.ts"
+import { type InspectDeps, stepByStaticPath } from "./commands/inspect.ts"
 import { isDownKey, isEnterKey, isEscapeKey, isPageDownKey, isPageUpKey, isUpKey } from "./inspect-view.ts"
 import { runIdHash } from "./naming.ts"
 import { runArtifactsDir } from "./project-dir.ts"
@@ -34,7 +35,18 @@ import type { RunStore } from "./types.ts"
 export interface NavigatorCtx {
 	readonly cwd: string
 	readonly sessionManager: { getSessionDir(): string }
-	readonly ui: { custom(factory: unknown, options?: unknown): Promise<unknown> }
+	readonly ui: {
+		custom(factory: unknown, options?: unknown): Promise<unknown>
+		/** The follow-up prompt (ask): the overlay is closed by the time it opens. */
+		editor(title: string, prefill?: string): Promise<string | undefined>
+		notify(message: string, level?: "info" | "warning" | "error"): void
+	}
+}
+
+/** What the overlay hands back on close: nothing, or one deferred action to run once it has settled. */
+export interface NavigatorResult {
+	readonly action?: "ask" | "cancel" | "resume"
+	readonly path?: string
 }
 
 /** What the command knows about a step that the navigator cannot derive on its own. */
@@ -132,6 +144,8 @@ export async function showNavigator(args: {
 	let viewportTop = 0 // the first row the list window shows (§14.12 — the list scrolls, it never overflows)
 	let viewportRows = 10 // the window's height: 30% of the terminal, capped at 10 rows
 	let transcript: StepTranscriptLoad | undefined
+	let armed = false // two-press cancel (14.13): the first x arms, the second confirms, any other key disarms
+	let watching = false // the transcript pane auto-advances to the run's current step until the user moves (14.13)
 	let closed = false
 	let requestRender: (() => void) | undefined
 	let refreshChain: Promise<void> = Promise.resolve()
@@ -180,6 +194,7 @@ export async function showNavigator(args: {
 			now: deps.now,
 		})
 		rows = collectViewRows(project(outline, events, now()).nodes)
+		if (watching) touched = false // watch overrides touched: the pane keeps advancing to the current step
 		follow()
 		if (rows.length <= viewportTop + viewportRows) clampViewport() // items settled off-screen — pull in
 		if (mode === "transcript") reloadTranscript()
@@ -203,12 +218,15 @@ export async function showNavigator(args: {
 	const move = (delta: number): void => {
 		const order = selectables()
 		if (order.length === 0) return
+		// A move is the user taking the wheel — even when the cursor cannot actually go further: a
+		// no-op j at the bottom still means "stop watching and stop following" (14.13).
+		touched = true
+		watching = false
 		const current = order.indexOf(selected)
 		const next = Math.min(order.length - 1, Math.max(0, (current === -1 ? 0 : current) + delta))
 		const target = order[next]
 		if (target !== undefined && target !== selected) {
 			selected = target
-			touched = true // the selection is the user's now — no more following
 			clampViewport()
 			requestRender?.()
 		}
@@ -224,10 +242,14 @@ export async function showNavigator(args: {
 
 	const listPane = (): string[] => {
 		const view = project(outline, events, now())
+		const resumable = view.status === "crashed" || view.status === "blocked"
+		const hint = armed
+			? "  x again to cancel this run · any other key disarms"
+			: `  ↑↓/jk move · pgup/pgdn page · enter inspect · a ask · x cancel${resumable ? " · r resume" : ""} · esc close`
 		const lines = [
 			"",
 			`  ${view.workflowName} · run ${runIdHash(runId)} · ${view.stepsSettled} of ${view.stepsTotal}`,
-			"  ↑↓/jk move · pgup/pgdn page · enter inspect · esc close",
+			hint,
 			"",
 		]
 		clampViewport() // the render is the last honest chance to catch a resize or a rebuild
@@ -248,9 +270,16 @@ export async function showNavigator(args: {
 		const row = selectedRow()
 		if (!row || !transcript) return ["", "  (no step selected)"]
 		const facts = stepFacts(row.path, events)
+		// The step's TOTAL cost across attempts, from the run's recorded usage — the subagent view's
+		// per-agent price tag. Previews are deliberately skipped: the final numbers are in the log.
+		const tokens = events.reduce(
+			(sum, event) => (event.type === "agent-usage" && event.path === row.path ? sum + event.totalTokens : sum),
+			0,
+		)
+		const cost = tokens > 0 ? ` · ${formatTokens(tokens)} tok` : ""
 		const header = [
-			`  step ${row.name} (${row.path}) · attempt ${facts.attempt}${facts.dynamic ? " · resume key dynamic" : ""}`,
-			`  ${detail ? "enter: summary" : "enter: full detail"} · esc back · transcript: ${transcript.ok ? transcript.file : "none recorded"}`,
+			`  step ${row.name} (${row.path}) · attempt ${facts.attempt}${facts.dynamic ? " · resume key dynamic" : ""}${cost}`,
+			`  ${watching ? "watching · " : ""}${detail ? "enter: summary" : "enter: full detail"} · w watch · esc back · transcript: ${transcript.ok ? transcript.file : "none recorded"}`,
 			"",
 		]
 		const body =
@@ -262,9 +291,10 @@ export async function showNavigator(args: {
 		return [...header, ...body]
 	}
 
+	let result: NavigatorResult | undefined
 	try {
 		await pokeRefresh() // the first fill happens before the first render
-		await ctx.ui.custom(
+		result = (await ctx.ui.custom(
 			(
 				tui: { requestRender(): void; terminal?: { rows?: number } },
 				_theme: unknown,
@@ -285,12 +315,44 @@ export async function showNavigator(args: {
 					render: (width: number): string[] => (mode === "transcript" ? transcriptPane(width) : listPane()),
 					handleInput: (data: string): void => {
 						if (mode === "list") {
+							// ANY key but x itself disarms a pending cancel — including handled ones (a move
+							// IS a decision to keep going), so the disarm runs before the chain, not as its else.
+							if (armed && data !== "x") {
+								armed = false
+								requestRender?.()
+							}
 							if (isUpKey(data, matches)) move(-1)
 							else if (isDownKey(data, matches)) move(1)
 							else if (isPageUpKey(data, matches)) move(-viewportRows)
 							else if (isPageDownKey(data, matches)) move(viewportRows)
 							else if (isEnterKey(data, matches)) enterTranscript()
-							else if (isEscapeKey(data, matches)) done(undefined)
+							else if (data === "a") {
+								const row = selectedRow()
+								if (row?.selectable) done({ action: "ask", path: row.path })
+							} else if (data === "x") {
+								// Two-press cancel: an armed key is one decision; an editor would be a text box for a yes/no.
+								if (armed) done({ action: "cancel" })
+								else {
+									armed = true
+									requestRender?.()
+								}
+							} else if (data === "r") {
+								const status = project(outline, events, now()).status
+								if (status === "crashed" || status === "blocked") done({ action: "resume" })
+							} else if (isEscapeKey(data, matches)) {
+								done(undefined)
+							} else if (armed) {
+								armed = false // any other key disarms
+								requestRender?.()
+							}
+						} else if (data === "w") {
+							watching = !watching
+							if (watching) {
+								touched = false
+								follow()
+								reloadTranscript()
+							}
+							requestRender?.()
 						} else if (isEnterKey(data, matches)) {
 							detail = !detail // the drill-down toggle — the pane header restates the keys
 							requestRender?.()
@@ -303,10 +365,51 @@ export async function showNavigator(args: {
 					dispose: () => {},
 				}
 			},
-		)
+		)) as NavigatorResult | undefined
 	} finally {
 		closed = true
 		unsubscribe?.()
 		clearInterval(poll)
 	}
+	if (result?.action === "ask" && result.path !== undefined) {
+		const row = rows.find((candidate) => candidate.path === result.path)
+		const facts = stepFacts(result.path, events)
+		const question = await ctx.ui.editor(`ask ${row?.name ?? result.path} — empty cancels`)
+		if (question?.trim() && deps.askStep) {
+			try {
+				const answer = await deps.askStep(
+					{
+						dir,
+						workflowName: workflow.name,
+						runId,
+						path: result.path,
+						attempt: facts.attempt,
+						...(facts.resumeKey ? { resumeKey: facts.resumeKey } : {}),
+						...(askModel(workflow, result.path) ? { model: askModel(workflow, result.path) } : {}),
+					},
+					question.trim(),
+				)
+				ctx.ui.notify(answer.length > ANSWER_MAX_CHARS ? `${answer.slice(0, ANSWER_MAX_CHARS)}…` : answer, "info")
+			} catch (error) {
+				// The ask is a display artifact by 7.6.1's rule: it degrades with a message, never takes the view down.
+				ctx.ui.notify(
+					`workflow: the follow-up failed: ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				)
+			}
+		}
+	} else if (result?.action === "cancel") {
+		await deps.cancelRun?.(runId)
+	} else if (result?.action === "resume") {
+		await deps.resumeRun?.(runId)
+	}
 }
+
+/** The model a step's follow-up should speak to — the model that built its conversation, when declared. */
+function askModel(workflow: WorkflowDefinition, nodePath: string): string | undefined {
+	const step = stepByStaticPath(workflow, nodePath)
+	return step?.kind === "agent" ? step.model : undefined
+}
+
+/** How much of a follow-up's answer the notify carries; the full text stays in the step's session file. */
+const ANSWER_MAX_CHARS = 1_500

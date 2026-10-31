@@ -35,6 +35,7 @@ import { bindProgress } from "./progress-sink.ts"
 import { runArtifactsDir } from "./project-dir.ts"
 import { createProcessExecutionOwner } from "./run-lease.ts"
 import { createActivityBus } from "./step-activity.ts"
+import { askStep } from "./step-ask.ts"
 import { registerStepOutputToolsFromEnv } from "./step-output-tools.ts"
 import { withTelemetry } from "./telemetry-bridge.ts"
 
@@ -136,6 +137,10 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 						{
 							activeRunIds: () => activeRuns.active.map((run) => run.runId),
 							activityBus,
+							// The navigator's deferred actions (§14.13): each runs after its overlay closed.
+							askStep: (args, question) => askStep(args, question),
+							cancelRun: (runId) => handleCancel(ctx, activeRuns, store, runId),
+							resumeRun: (runId) => handleResume(ctx, store, activeRuns, startAgent, runId, progressFor),
 						},
 						runRef || undefined,
 						stepPath,

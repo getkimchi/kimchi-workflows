@@ -30,6 +30,7 @@ import { runArtifactsDir } from "../project-dir.ts"
 import { projectRunEvents } from "../reconcile-runs.ts"
 import { loadRecordedWorkflow, workflowSourceOf } from "../recorded-workflow.ts"
 import { type ActivityBus, type StepActivity, terminalSafe } from "../step-activity.ts"
+import type { AskStepArgs } from "../step-ask.ts"
 import { loadStepTranscript, renderStepSummary, renderStepTranscript, stepTranscriptFile } from "../step-transcript.ts"
 import type { RunStore } from "../types.ts"
 import { type CommandCtx, describe, resolveRunRef } from "./context.ts"
@@ -42,6 +43,11 @@ export interface InspectDeps {
 	readonly now?: () => Date
 	/** The width the view is drawn to when the surface cannot report one (a notification). */
 	readonly width?: number
+	/** The navigator's deferred actions (inspection 14.13): a step follow-up, cancel, resume — all
+	 * optional, every surface works without them, and each runs after the overlay has closed. */
+	readonly askStep?: (args: AskStepArgs, question: string) => Promise<string>
+	readonly cancelRun?: (runId: string) => Promise<void>
+	readonly resumeRun?: (runId: string) => Promise<void>
 }
 
 /** The TUI overlay's factory arguments — structural, so a test satisfies it with fakes. */
@@ -348,7 +354,7 @@ function collectDefinitionSteps(
 	}
 }
 
-function stepByStaticPath(workflow: WorkflowDefinition, path: string): StepDefinition | undefined {
+export function stepByStaticPath(workflow: WorkflowDefinition, path: string): StepDefinition | undefined {
 	const steps = new Map<string, StepDefinition>()
 	collectDefinitionSteps(workflow.nodes, [], steps)
 	return steps.get(definitionKeyOf(path))

@@ -274,6 +274,19 @@ function claimResumeFile(file: string, request: AgentRequest): () => void {
  * and a garbled sidecar degrades a view, never a run. A cross-process lease is the fix if that bound
  * ever stops being acceptable.
  */
+/** Claim a session file for a one-off FOLLOW-UP turn (inspection §14.13): the same map the bridge's
+ * executions claim through, so an ask can never interleave with a running step's writes to the same
+ * file. The holder tag names itself in the block message, so the user knows what to wait for. */
+export function claimFollowUpFile(file: string): () => void {
+	if (liveResumeFiles.has(file)) {
+		throw new Error("workflow: that step's session file is in use by a running execution — ask again once it settles")
+	}
+	liveResumeFiles.set(file, "workflow-follow-up")
+	return () => {
+		if (liveResumeFiles.get(file) === "workflow-follow-up") liveResumeFiles.delete(file)
+	}
+}
+
 function claimSidecarFile(file: string, request: AgentRequest): (() => void) | null {
 	if (!request.resumeKey) return () => {}
 	if (liveResumeFiles.has(file)) return null

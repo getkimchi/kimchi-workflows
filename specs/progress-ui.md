@@ -772,6 +772,26 @@ bindings, and a scroll line — `… 3 above · 12 below` — says what lies
 beyond the window. The transcript pane keeps its own bounds (§14.11's
 bounded blocks). *(decision)*
 
+14.13. **The navigator is where keys meet the run — four subagent-view adoptions.**
+• **Ask** (`a` on a step): a follow-up question to a step's recorded
+conversation. The overlay closes, the editor prompts, and one spawned-worker
+turn runs against the step's own session file — the same file the
+navigator reads — so the question APPENDS to the conversation and a later
+resume continues with it (that is the resumable-step design, used from the
+other end). The answer is notified, bounded; the full text stays in the
+session file. The ask is never a step execution: no engine events, no bus,
+no run state, and the bridge's claim map keeps it off any file a running
+execution is writing.
+• **Cancel** (`x`, two-press arm/confirm): `/workflow cancel` for the
+viewed run. An armed key is one decision; any other key — including
+handled ones, a move IS a decision to keep going — disarms.
+• **Resume** (`r`): offered only once the run has crashed or blocked
+under the view — resume on a live or completed run is a footgun.
+• **Watch** (`w` in the transcript pane): the pane auto-advances to
+the run's current step until the user moves — and a move means intent,
+even a no-op one at the boundary. The pane header also carries the step's
+total recorded tokens, the subagent view's per-agent price tag. *(decision)*
+
 ## Open questions
 
 *None outstanding.* What remains is implementation-level: the exact braille frame set,
