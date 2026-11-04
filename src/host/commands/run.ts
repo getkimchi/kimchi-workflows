@@ -119,8 +119,13 @@ export async function resolveInitialInput(
  * `/workflow run <file-name|file.ts> [--input <json>|@<file>]` — start a workflow by its installed
  * filename identity or an explicit path, optionally seeded with initial input (spec §6.1).
  *
- * With no `inputArg`, behaviour is exactly what it was before `--input` existed: `undefined` initial
- * input, unchanged for every workflow that declares no top-level schema.
+ * With no `inputArg`, a workflow that declares no top-level schema keeps its pre-`--input` behaviour
+ * (`undefined` initial input). One that DOES declare a schema treats the omitted flag as `--input {}`:
+ * `undefined` can never satisfy a declared schema, so passing it through would only reach the engine's
+ * post-mint input crash — a failure the progress card cannot even render (no `run-started` event
+ * precedes it). Routing the empty payload through the same gate keeps the failure surface identical
+ * to a typed payload: all-optional schemas start cleanly, required fields are a notification and no
+ * run id is ever minted.
  */
 export async function handleRun(
 	ctx: CommandCtx,
@@ -146,6 +151,18 @@ export async function handleRun(
 	let initialInput: unknown
 	if (inputArg !== undefined) {
 		const resolved = await resolveInitialInput(ctx.cwd, inputArg, resolution.workflow)
+		if (!resolved.ok) {
+			ctx.ui.notify(`workflow: ${resolved.error}`, "error")
+			return
+		}
+		initialInput = resolved.value
+	} else if (resolution.workflow.inputSchema) {
+		// An omitted `--input` IS `--input {}` for a schema-declaring workflow: `undefined` can never pass
+		// validation, so forwarding it would only buy the engine's invisible post-mint crash (the crash
+		// event lands without a preceding `run-started`, which the status derivation and the progress card
+		// both treat as unstateable). The empty payload rides the same gate, so the error wording and the
+		// no-run-minted guarantee are exactly what a typed `--input {}` would produce.
+		const resolved = await resolveInitialInput(ctx.cwd, "{}", resolution.workflow)
 		if (!resolved.ok) {
 			ctx.ui.notify(`workflow: ${resolved.error}`, "error")
 			return

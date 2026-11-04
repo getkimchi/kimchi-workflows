@@ -60,6 +60,18 @@ function bareWorkflowSource(): string {
 	].join("\n")
 }
 
+/** A workflow whose declared schema accepts an empty object: every field is optional. */
+function optionalInputWorkflowSource(): string {
+	return [
+		`import { Type } from "typebox";`,
+		`import { createStep, createWorkflow } from "${flowImport}";`,
+		`const echo = createStep({ name: "echo", run: ({ ctx }) => ctx.getInitData() ?? null });`,
+		`export default createWorkflow({ name: "optional-input", input: Type.Object({ name: Type.Optional(Type.String()) }) })`,
+		`  .then(echo)`,
+		`  .commit();`,
+	].join("\n")
+}
+
 function semanticErrorWorkflowSource(name: string, evaluated: string): string {
 	return [
 		`import { writeFileSync } from "node:fs";`,
@@ -157,7 +169,39 @@ describe("/workflow run --input", () => {
 		expect(spy.notes[0]?.[0]).toMatch(/workflow "needs-input" input:/)
 	})
 
-	it("starts with undefined initial input when --input is omitted — unchanged from before the flag existed", async () => {
+	/**
+	 * A workflow that declares a schema gets `{}` when `--input` is omitted — `undefined` could never
+	 * pass validation, so the flag's absence means "empty object", validated through the same gate a
+	 * typed payload takes.
+	 */
+	it("defaults an omitted --input to {} for a workflow that declares an all-optional input schema", async () => {
+		const optionalFile = path.join(projectRoot, "optional-input.workflow.ts")
+		await writeFile(optionalFile, optionalInputWorkflowSource(), "utf8")
+
+		const spy = notifySpy()
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeActiveRuns(), noAgent, optionalFile)
+
+		const runs = await store.list()
+		expect(runs).toHaveLength(1)
+		expect(runs[0]?.status).toBe("completed")
+		const events = await store.loadEvents(runs[0]?.runId ?? "")
+		expect(events.find((e) => e.type === "run-started")).toMatchObject({ input: {} })
+		expect(spy.notes.some(([, type]) => type === "error")).toBe(false)
+	})
+
+	/** The engine's own check would crash post-mint — invisibly, since no `run-started` precedes it. */
+	it("rejects an omitted --input whose implicit {} fails the declared schema, before the run starts", async () => {
+		const spy = notifySpy()
+		// `needs-input` requires `name`; `{}` satisfies the JSON parser but not the schema.
+		await handleRun(fakeCtx(projectRoot, spy.notify), store, createFakeActiveRuns(), noAgent, file)
+
+		expect(await store.list()).toHaveLength(0)
+		expect(spy.notes).toHaveLength(1)
+		expect(spy.notes[0]?.[1]).toBe("error")
+		expect(spy.notes[0]?.[0]).toMatch(/workflow "needs-input" input:/)
+	})
+
+	it("starts with undefined initial input when --input is omitted and no schema is declared", async () => {
 		const bareFile = path.join(projectRoot, "bare.workflow.ts")
 		await writeFile(bareFile, bareWorkflowSource(), "utf8")
 
