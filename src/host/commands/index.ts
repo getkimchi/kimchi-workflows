@@ -4,6 +4,7 @@
  *   context    shared types, non-exclusive execution lifecycle, notification helpers
  *   attended   the inline Q&A loop every blocking command converges on (§10.2)
  *   run        starting runs: `run` and `create` (§6.1, §6.6)
+ *   exec       the batch entry point: one foreground run, an exit code, and `--result-out`
  *   resume     continuing a blocked/stopped run (§6.2)
  *   lifecycle  stopping and removing: `cancel` and `delete` (§6.4, §6.5)
  *   list       the two listings: workflows and runs (§6.7, §6.3)
@@ -22,11 +23,26 @@ export {
 } from "./attended.ts"
 export type { CommandCtx, Notify, NotifyCtx, StartAgent } from "./context.ts"
 export { describe, notifyResult, reportResult, runTracked } from "./context.ts"
+export type { ExecDeps, ParsedExecArgs, RunResultArtifact } from "./exec.ts"
+export {
+	exitCodeForStatus,
+	handleExec,
+	parseExecArgs,
+	plainProgressFor,
+	resultArtifact,
+	writeResultArtifact,
+} from "./exec.ts"
 export { handleCancel, handleDelete } from "./lifecycle.ts"
 export { handleListRuns, handleListWorkflows } from "./list.ts"
 export { handleResume } from "./resume.ts"
-export type { InitialInputResolution, ParsedRunArgs } from "./run.ts"
-export { handleCreate, handleRun, parseRunArgs, resolveInitialInput } from "./run.ts"
+export type {
+	ExecutedRun,
+	ExecuteRunHooks,
+	InitialInputResolution,
+	ParsedRunArgs,
+	ResolvedRunInvocation,
+} from "./run.ts"
+export { executeRun, handleCreate, handleRun, parseRunArgs, resolveInitialInput, resolveRunInvocation } from "./run.ts"
 export type { StatusDeps } from "./status.ts"
 export { handleStatus } from "./status.ts"
 export type { WorkflowWelcomeAction } from "./welcome.ts"

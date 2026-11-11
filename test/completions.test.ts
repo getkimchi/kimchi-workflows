@@ -33,13 +33,14 @@ const labels = (items: { label: string }[] | null): string[] => (items ?? []).ma
 describe("verb slot", () => {
 	it("offers every verb on an empty argument, in the order §6 introduces them", async () => {
 		const items = await completeWorkflowArgument("", sourcesOf())
-		expect(labels(items)).toEqual(["run", "create", "list", "status", "resume", "cancel", "delete"])
+		expect(labels(items)).toEqual(["run", "exec", "create", "list", "status", "resume", "cancel", "delete"])
 	})
 
 	it("inserts a trailing space for the verbs that take an argument, and none for those that do not", async () => {
 		const items = await completeWorkflowArgument("", sourcesOf())
 		expect(items?.map((item) => item.value)).toEqual([
 			"run ",
+			"exec ",
 			"create",
 			"list",
 			"status ",
@@ -63,8 +64,10 @@ describe("verb slot", () => {
 	it("falls back to substring only when nothing has the typed text as a prefix, keeping source order", async () => {
 		// `list` has the prefix, so the verbs merely containing an l (`cancel`, `delete`) stay out.
 		expect(labels(await completeWorkflowArgument("l", sourcesOf()))).toEqual(["list"])
-		// Nothing starts with an e, so every verb containing one is offered, in the verb table's order.
-		expect(labels(await completeWorkflowArgument("e", sourcesOf()))).toEqual(["create", "resume", "cancel", "delete"])
+		// `exec` has the e-prefix. Nothing starts with an a, so every verb containing one is offered,
+		// in the verb table's order.
+		expect(labels(await completeWorkflowArgument("e", sourcesOf()))).toEqual(["exec"])
+		expect(labels(await completeWorkflowArgument("a", sourcesOf()))).toEqual(["create", "status", "cancel"])
 	})
 
 	it("reads no candidate source at all — a verb keystroke costs nothing (spec §14.6)", async () => {
@@ -113,6 +116,29 @@ describe("run argument", () => {
 
 	it("says nothing when nothing matches", async () => {
 		expect(await completeWorkflowArgument("run nope", sourcesOf(["audit"]))).toBeNull()
+	})
+})
+
+// -- `exec <workflow>` — `run`'s argument, minus the reserved `list` -----------------------------------
+
+describe("exec argument", () => {
+	it("offers workflow identities sorted, with no reserved `list` row", async () => {
+		const items = await completeWorkflowArgument("exec ", sourcesOf(["review-loop", "audit"]))
+		expect(labels(items)).toEqual(["audit", "review-loop"])
+	})
+
+	it("assembles the whole argument string as the value", async () => {
+		const items = await completeWorkflowArgument("exec rev", sourcesOf(["review-loop"]))
+		expect(items).toEqual([{ value: "exec review-loop", label: "review-loop" }])
+	})
+
+	it("a workflow literally named `list` completes like any other — exec has no sub-verb to protect", async () => {
+		const items = await completeWorkflowArgument("exec li", sourcesOf(["list"]))
+		expect(items).toEqual([{ value: "exec list", label: "list" }])
+	})
+
+	it("says nothing when nothing matches", async () => {
+		expect(await completeWorkflowArgument("exec nope", sourcesOf(["audit"]))).toBeNull()
 	})
 })
 

@@ -19,11 +19,13 @@ import {
 	handleCancel,
 	handleCreate,
 	handleDelete,
+	handleExec,
 	handleListRuns,
 	handleListWorkflows,
 	handleResume,
 	handleRun,
 	handleStatus,
+	parseExecArgs,
 	parseRunArgs,
 } from "./commands/index.ts"
 import { createCompletionSources } from "./completion-sources.ts"
@@ -53,7 +55,7 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 
 	pi.registerCommand("workflow", {
 		// An extension cannot set an `argumentHint` (spec §14.9), so the description names the verbs.
-		description: "PI workflows: run | create | list | status | resume | cancel | delete",
+		description: "PI workflows: run | exec | create | list | status | resume | cancel | delete",
 		getArgumentCompletions: (argumentPrefix: string) => completeWorkflowArgument(argumentPrefix, completionSources),
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const trimmedArgs = args.trim()
@@ -94,6 +96,24 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 							"warning",
 						)
 					return void (await handleRun(ctx, store, activeRuns, startAgent, parsed.target, parsed.inputArg, progressFor))
+				}
+
+				case "exec": {
+					// Same raw-remainder rule as `run` (§6.1): an inline `--input` payload routinely contains
+					// spaces that the `rest` split above has already collapsed.
+					const parsed = parseExecArgs(trimmedArgs.slice(sub.length).trim())
+					if (parsed.error) return void ctx.ui.notify(`workflow: ${parsed.error}`, "error")
+					if (!parsed.target)
+						return void ctx.ui.notify(
+							"usage: /workflow exec <file-name|file.ts> [--result-out <path>] [--input <json>|@<file>]",
+							"warning",
+						)
+					// No `progressFor` here: exec renders its own plain stderr surface (commands/exec.ts).
+					return void (await handleExec(ctx, store, activeRuns, startAgent, {
+						target: parsed.target,
+						inputArg: parsed.inputArg,
+						resultOut: parsed.resultOut,
+					}))
 				}
 
 				case "create":
@@ -138,7 +158,7 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 
 				default:
 					ctx.ui.notify(
-						`workflow: unknown subcommand "${sub}". Try run | create | list | status | resume | cancel | delete.`,
+						`workflow: unknown subcommand "${sub}". Try run | exec | create | list | status | resume | cancel | delete.`,
 						"warning",
 					)
 			}

@@ -7,13 +7,13 @@
 import { readFile } from "node:fs/promises"
 import path from "node:path"
 import { runWorkflow } from "../../engine/run-workflow.ts"
-import type { WorkflowSource } from "../../engine/types.ts"
+import type { RunResult, WorkflowSource } from "../../engine/types.ts"
 import type { WorkflowDefinition } from "../../flow/types.ts"
 import { describeSchemaViolations } from "../../flow/validation.ts"
 import type { ActiveRuns } from "../active-runs.ts"
 import { createHostPort } from "../host-port.ts"
 import { mintRunId } from "../naming.ts"
-import { noProgressFor, type ProgressFor, progressCallbacks } from "../progress-sink.ts"
+import { noProgressFor, type ProgressFor, type ProgressSink, progressCallbacks } from "../progress-sink.ts"
 import { workflowsDir } from "../project-dir.ts"
 import { prepareProjectWorkflowPackage } from "../project-workflow-package.ts"
 import { BUILTIN_CREATE_WORKFLOW, workflowSourceLabel } from "../recorded-workflow.ts"
@@ -127,25 +127,35 @@ export async function resolveInitialInput(
  * to a typed payload: all-optional schemas start cleanly, required fields are a notification and no
  * run id is ever minted.
  */
-export async function handleRun(
-	ctx: CommandCtx,
-	store: RunStore,
-	activeRuns: ActiveRuns,
-	startAgent: StartAgent,
+/** A target that survived preparation, resolution, and input validation — everything `startRun`/`exec` need to enter the engine. */
+export interface ResolvedRunInvocation {
+	readonly workflow: WorkflowDefinition
+	readonly workflowSource: WorkflowSource
+	readonly initialInput: unknown
+}
+
+/**
+ * The shared front half of `/workflow run` and `/workflow exec`: prepare the project workflow
+ * package, resolve the target through the catalog, and validate the initial input — including the
+ * omitted-`--input`-means-`{}` rule for schema-declaring workflows (spec §6.1). Returns `undefined`
+ * after notifying the failure, so the caller's only decision is what its own surface charges for it
+ * (nothing for `run`, exit code 4 for `exec`).
+ */
+export async function resolveRunInvocation(
+	ctx: Pick<CommandCtx, "cwd" | "ui">,
 	target: string,
 	inputArg?: string,
-	progressFor: ProgressFor = noProgressFor,
-): Promise<void> {
+): Promise<ResolvedRunInvocation | undefined> {
 	try {
 		await prepareProjectWorkflowPackage({ projectRoot: ctx.cwd })
 	} catch (error) {
 		ctx.ui.notify(`workflow: could not prepare the project workflow package: ${describe(error)}`, "error")
-		return
+		return undefined
 	}
 	const resolution = await resolveWorkflow(ctx.cwd, target)
 	if (!resolution.ok) {
 		ctx.ui.notify(resolution.error, "error")
-		return
+		return undefined
 	}
 
 	let initialInput: unknown
@@ -153,7 +163,7 @@ export async function handleRun(
 		const resolved = await resolveInitialInput(ctx.cwd, inputArg, resolution.workflow)
 		if (!resolved.ok) {
 			ctx.ui.notify(`workflow: ${resolved.error}`, "error")
-			return
+			return undefined
 		}
 		initialInput = resolved.value
 	} else if (resolution.workflow.inputSchema) {
@@ -165,19 +175,33 @@ export async function handleRun(
 		const resolved = await resolveInitialInput(ctx.cwd, "{}", resolution.workflow)
 		if (!resolved.ok) {
 			ctx.ui.notify(`workflow: ${resolved.error}`, "error")
-			return
+			return undefined
 		}
 		initialInput = resolved.value
 	}
 
+	return { workflow: resolution.workflow, workflowSource: { kind: "file", path: resolution.filePath }, initialInput }
+}
+
+export async function handleRun(
+	ctx: CommandCtx,
+	store: RunStore,
+	activeRuns: ActiveRuns,
+	startAgent: StartAgent,
+	target: string,
+	inputArg?: string,
+	progressFor: ProgressFor = noProgressFor,
+): Promise<void> {
+	const resolved = await resolveRunInvocation(ctx, target, inputArg)
+	if (!resolved) return
 	await startRun(
 		ctx,
 		store,
 		activeRuns,
 		startAgent,
-		resolution.workflow,
-		{ kind: "file", path: resolution.filePath },
-		initialInput,
+		resolved.workflow,
+		resolved.workflowSource,
+		resolved.initialInput,
 		progressFor,
 	)
 }
@@ -210,6 +234,69 @@ export async function handleCreate(
 	)
 }
 
+/** The outcome of one engine pass, with the sink still attached (spec §7, §8.9). The CALLER owns `progress` disposal. */
+export interface ExecutedRun {
+	readonly runId: string
+	readonly progress: ProgressSink
+	readonly result: RunResult
+}
+
+/** Optional observation points for callers that must react while the run is still in flight. */
+export interface ExecuteRunHooks {
+	/** Called as soon as the run-id is minted — before the first event — so a signal handler can target it. */
+	onRunId?: (runId: string) => void
+}
+
+/**
+ * The shared run lifecycle for `/workflow run`, `/workflow create`, and `/workflow exec`
+ * (spec §7, §8.9): mint the id, record provenance, drive the engine once under the tracked-execution
+ * lease. Everything AFTER the engine returns — the attended Q&A loop, exit codes, result artifacts —
+ * is each surface's own; that is why the sink is handed back undisposed.
+ */
+export async function executeRun(
+	store: RunStore,
+	activeRuns: ActiveRuns,
+	startAgent: StartAgent,
+	workflow: WorkflowDefinition,
+	workflowSource: WorkflowSource,
+	initialInput: unknown,
+	progressFor: ProgressFor,
+	hooks: ExecuteRunHooks = {},
+): Promise<ExecutedRun> {
+	// Mint the run-id up front so provenance is persisted *at run start* (spec §8.9); the engine stays
+	// file-unaware and simply uses the injected id.
+	//
+	// A slug (`workflow-<name>-<8 hex>`, naming.ts) rather than a UUID, because this id is now the whole
+	// user-facing identity: it names the log, it is embedded in every step session file, and it is what
+	// `resume`/`cancel`/`delete` take back. "Which of these is my deploy run" has to be answerable from a
+	// directory listing. The store's own log is what a candidate is checked against — a name shared by
+	// many runs plus 32 random bits does collide eventually, and a collision would silently append one
+	// run's events onto another's.
+	const runId = await mintRunId(workflow.name, async (candidate) => (await store.loadEvents(candidate)).length > 0)
+	hooks.onRunId?.(runId)
+
+	// One sink for the whole invocation: a blocked `run` keeps its widget while its questionnaire
+	// renders inline (progress §7.5) — the attended loop is several engine calls, not one — and `exec`
+	// wants its last plain line written before the artifact lands.
+	const sourceLabel = workflowSourceLabel(workflowSource)
+	const progress = progressFor(workflow, runId, sourceLabel)
+	const result = await runTracked(activeRuns, runId, store, async (signal, execution) => {
+		// The adapter's own event (spec §8.9), not the engine's: `run-started` is emitted by the engine,
+		// which is deliberately unaware of provenance, so where this run came FROM is recorded separately —
+		// before the first engine event, so a crash mid-run still leaves a resumable log.
+		await store.appendEvent({ type: "run-meta", runId, workflowSource, at: new Date().toISOString() })
+		const host = createHostPort(store, {
+			generateRunId: () => runId,
+			startAgent,
+			executionId: execution.lease.executionId,
+			acceptEvent: () => execution.acceptsEvents(),
+			...progressCallbacks(progress),
+		})
+		return runWorkflow(workflow, initialInput, host, { signal })
+	})
+	return { runId, progress, result }
+}
+
 /** Shared run lifecycle for `/workflow run` and `/workflow create` (spec §7, §8.9, §10.2). */
 async function startRun(
 	ctx: CommandCtx,
@@ -221,38 +308,16 @@ async function startRun(
 	initialInput: unknown,
 	progressFor: ProgressFor,
 ): Promise<void> {
-	// Mint the run-id up front so provenance is persisted *at run start* (spec §8.9); the engine stays
-	// file-unaware and simply uses the injected id.
-	//
-	// A slug (`workflow-<name>-<8 hex>`, naming.ts) rather than a UUID, because this id is now the whole
-	// user-facing identity: it names the log, it is embedded in every step session file, and it is what
-	// `resume`/`cancel`/`delete` take back. "Which of these is my deploy run" has to be answerable from a
-	// directory listing. The store's own log is what a candidate is checked against — a name shared by
-	// many runs plus 32 random bits does collide eventually, and a collision would silently append one
-	// run's events onto another's.
-	const runId = await mintRunId(workflow.name, async (candidate) => (await store.loadEvents(candidate)).length > 0)
-
-	// One sink for the whole invocation, disposed only when the command returns — NOT when the engine
-	// call does. A blocked run keeps its widget while its questionnaire renders inline (progress §7.5):
-	// the panel is what tells a user which step of what is asking, and the attended loop below is
-	// several engine calls, not one.
-	const sourceLabel = workflowSourceLabel(workflowSource)
-	const progress = progressFor(workflow, runId, sourceLabel)
+	const { runId, progress, result } = await executeRun(
+		store,
+		activeRuns,
+		startAgent,
+		workflow,
+		workflowSource,
+		initialInput,
+		progressFor,
+	)
 	try {
-		const result = await runTracked(activeRuns, runId, store, async (signal, execution) => {
-			// The adapter's own event (spec §8.9), not the engine's: `run-started` is emitted by the engine,
-			// which is deliberately unaware of provenance, so where this run came FROM is recorded separately —
-			// before the first engine event, so a crash mid-run still leaves a resumable log.
-			await store.appendEvent({ type: "run-meta", runId, workflowSource, at: new Date().toISOString() })
-			const host = createHostPort(store, {
-				generateRunId: () => runId,
-				startAgent,
-				executionId: execution.lease.executionId,
-				acceptEvent: () => execution.acceptsEvents(),
-				...progressCallbacks(progress),
-			})
-			return runWorkflow(workflow, initialInput, host, { signal })
-		})
 		// Attended flow: if the run blocked, render the questionnaire inline and loop until it settles.
 		if (result.status === "blocked") {
 			await handleAttendedInput(
