@@ -8,8 +8,9 @@ import type { RunResult } from "../src/engine/types.ts"
 import type { CommandCtx, StartAgent } from "../src/host/commands/index.ts"
 import {
 	exitCodeForStatus,
-	handleExec,
-	parseExecArgs,
+	handleBatchRun,
+	handleRun,
+	parseRunArgs,
 	resultArtifact,
 	writeResultArtifact,
 } from "../src/host/commands/index.ts"
@@ -41,8 +42,8 @@ const noAgent: StartAgent = () => {
 	throw new Error("no agent expected")
 }
 
-/** Captured exit codes and stderr lines, handed to `handleExec` as its process seams. */
-function execDeps() {
+/** Captured exit codes and stderr lines, handed to `handleBatchRun` as its process seams. */
+function batchDeps() {
 	const exits: number[] = []
 	const warnings: string[] = []
 	const lines: string[] = []
@@ -125,11 +126,11 @@ describe("exitCodeForStatus", () => {
 	})
 })
 
-// -- parseExecArgs -----------------------------------------------------------------------------------
+// -- parseRunArgs' --result-out arm: one grammar for the slash command and the CLI --------------------
 
-describe("parseExecArgs", () => {
+describe("parseRunArgs --result-out", () => {
 	it("takes a bare target", () => {
-		expect(parseExecArgs("review-loop")).toEqual({
+		expect(parseRunArgs("review-loop")).toEqual({
 			target: "review-loop",
 			inputArg: undefined,
 			resultOut: undefined,
@@ -138,7 +139,7 @@ describe("parseExecArgs", () => {
 	})
 
 	it("parses --result-out before --input, keeping the JSON payload verbatim", () => {
-		expect(parseExecArgs('review-loop --result-out /out/result.json --input {"branch": "release notes"}')).toEqual({
+		expect(parseRunArgs('review-loop --result-out /out/result.json --input {"branch": "release notes"}')).toEqual({
 			target: "review-loop",
 			inputArg: '{"branch": "release notes"}',
 			resultOut: "/out/result.json",
@@ -147,7 +148,7 @@ describe("parseExecArgs", () => {
 	})
 
 	it("parses a quoted --result-out path containing spaces", () => {
-		expect(parseExecArgs('review-loop --result-out "my dir/result.json"')).toEqual({
+		expect(parseRunArgs('review-loop --result-out "my dir/result.json"')).toEqual({
 			target: "review-loop",
 			inputArg: undefined,
 			resultOut: "my dir/result.json",
@@ -156,7 +157,7 @@ describe("parseExecArgs", () => {
 	})
 
 	it("extracts --result-out wherever it sits, leaving --input's payload verbatim", () => {
-		const parsed = parseExecArgs("review-loop --input {} --result-out /out/x.json")
+		const parsed = parseRunArgs("review-loop --input {} --result-out /out/x.json")
 		expect(parsed).toEqual({
 			target: "review-loop",
 			inputArg: "{}",
@@ -166,15 +167,15 @@ describe("parseExecArgs", () => {
 	})
 
 	it("does not mistake a workflow name containing the flag substring for the flag", () => {
-		expect(parseExecArgs("my--input-migrator")).toMatchObject({ target: "my--input-migrator", error: undefined })
-		expect(parseExecArgs("ship--result-out-fast")).toMatchObject({ target: "ship--result-out-fast", error: undefined })
+		expect(parseRunArgs("my--input-migrator")).toMatchObject({ target: "my--input-migrator", error: undefined })
+		expect(parseRunArgs("ship--result-out-fast")).toMatchObject({ target: "ship--result-out-fast", error: undefined })
 	})
 
 	it("rejects a valueless --result-out and a duplicated one", () => {
-		expect(parseExecArgs("review-loop --result-out")).toMatchObject({
+		expect(parseRunArgs("review-loop --result-out")).toMatchObject({
 			error: "--result-out requires a value: <path>",
 		})
-		expect(parseExecArgs("review-loop --result-out /a.json --result-out /b.json")).toMatchObject({
+		expect(parseRunArgs("review-loop --result-out /a.json --result-out /b.json")).toMatchObject({
 			error: "duplicate --result-out",
 		})
 	})
@@ -185,7 +186,7 @@ describe("parseExecArgs", () => {
 describe("writeResultArtifact", () => {
 	let dir: string
 	beforeEach(async () => {
-		dir = await mkdtemp(path.join(tmpdir(), "workflow-exec-artifact-"))
+		dir = await mkdtemp(path.join(tmpdir(), "workflow-batch-artifact-"))
 	})
 	afterEach(async () => {
 		await rm(dir, { recursive: true, force: true })
@@ -235,18 +236,18 @@ describe("writeResultArtifact", () => {
 	})
 })
 
-// -- handleExec end to end ---------------------------------------------------------------------------
+// -- handleBatchRun end to end -----------------------------------------------------------------------
 
-describe("handleExec", () => {
+describe("handleBatchRun", () => {
 	let projectRoot: string
 	let store: RunStore
 
 	beforeEach(async () => {
-		projectRoot = await mkdtemp(path.join(tmpdir(), "workflow-exec-"))
+		projectRoot = await mkdtemp(path.join(tmpdir(), "workflow-batch-"))
 		await mkdir(path.join(projectRoot, "sessions", "workflow"), { recursive: true })
 		await prepareWorkflowPackageFixture({ directory: workflowsDir(projectRoot) })
 		store = createFsStore(path.join(projectRoot, "sessions", "workflow"))
-		vi.stubEnv("PI_CODING_AGENT_DIR", await mkdtemp(path.join(tmpdir(), "workflow-exec-agent-")))
+		vi.stubEnv("PI_CODING_AGENT_DIR", await mkdtemp(path.join(tmpdir(), "workflow-batch-agent-")))
 		vi.stubEnv("KIMCHI_CODING_AGENT_DIR", process.env.PI_CODING_AGENT_DIR)
 	})
 
@@ -264,9 +265,9 @@ describe("handleExec", () => {
 	it("runs a workflow to completion and exits 0, reporting via notify and plain stderr lines", async () => {
 		await install("needs-input.workflow.ts", echoInputWorkflowSource())
 		const spy = notifySpy()
-		const { deps, exits, lines } = execDeps()
+		const { deps, exits, lines } = batchDeps()
 
-		const code = await handleExec(
+		const code = await handleBatchRun(
 			fakeCtx(projectRoot, spy.notify),
 			store,
 			createFakeActiveRuns(),
@@ -292,9 +293,9 @@ describe("handleExec", () => {
 	it("omitted --input means {} for a schema-declaring workflow, rejected by the shared gate as exit 4", async () => {
 		await install("needs-input.workflow.ts", echoInputWorkflowSource())
 		const spy = notifySpy()
-		const { deps, exits } = execDeps()
+		const { deps, exits } = batchDeps()
 
-		const code = await handleExec(
+		const code = await handleBatchRun(
 			fakeCtx(projectRoot, spy.notify),
 			store,
 			createFakeActiveRuns(),
@@ -317,9 +318,9 @@ describe("handleExec", () => {
 	it("a bare workflow with no --input completes with exit 0", async () => {
 		await install("bare.workflow.ts", bareWorkflowSource())
 		const spy = notifySpy()
-		const { deps, exits } = execDeps()
+		const { deps, exits } = batchDeps()
 
-		const code = await handleExec(
+		const code = await handleBatchRun(
 			fakeCtx(projectRoot, spy.notify),
 			store,
 			createFakeActiveRuns(),
@@ -338,9 +339,9 @@ describe("handleExec", () => {
 
 	it("an unknown workflow exits 4 and starts nothing", async () => {
 		const spy = notifySpy()
-		const { deps, exits } = execDeps()
+		const { deps, exits } = batchDeps()
 
-		const code = await handleExec(
+		const code = await handleBatchRun(
 			fakeCtx(projectRoot, spy.notify),
 			store,
 			createFakeActiveRuns(),
@@ -362,9 +363,9 @@ describe("handleExec", () => {
 	it("a blocked run is reported as blocked and exits 2 — no attended questionnaire under exec", async () => {
 		await install("blocks.workflow.ts", blockingWorkflowSource())
 		const spy = notifySpy()
-		const { deps, exits, lines } = execDeps()
+		const { deps, exits, lines } = batchDeps()
 
-		const code = await handleExec(
+		const code = await handleBatchRun(
 			fakeCtx(projectRoot, spy.notify),
 			store,
 			createFakeActiveRuns(),
@@ -386,9 +387,9 @@ describe("handleExec", () => {
 	it("a crashing step exits 4 and the run is recorded crashed", async () => {
 		await install("crashes.workflow.ts", crashingWorkflowSource())
 		const spy = notifySpy()
-		const { deps, exits } = execDeps()
+		const { deps, exits } = batchDeps()
 
-		const code = await handleExec(
+		const code = await handleBatchRun(
 			fakeCtx(projectRoot, spy.notify),
 			store,
 			createFakeActiveRuns(),
@@ -409,10 +410,10 @@ describe("handleExec", () => {
 	it("--result-out writes the run's terminal artifact, creating parent directories", async () => {
 		await install("needs-input.workflow.ts", echoInputWorkflowSource())
 		const spy = notifySpy()
-		const { deps, exits } = execDeps()
+		const { deps, exits } = batchDeps()
 		const resultOut = path.join(projectRoot, "out", "nested", "result.json")
 
-		const code = await handleExec(
+		const code = await handleBatchRun(
 			fakeCtx(projectRoot, spy.notify),
 			store,
 			createFakeActiveRuns(),
@@ -441,9 +442,9 @@ describe("handleExec", () => {
 		const blocker = path.join(projectRoot, "blocker")
 		await writeFile(blocker, "a regular file", "utf8")
 		const spy = notifySpy()
-		const { deps, exits, warnings } = execDeps()
+		const { deps, exits, warnings } = batchDeps()
 
-		const code = await handleExec(
+		const code = await handleBatchRun(
 			fakeCtx(projectRoot, spy.notify),
 			store,
 			createFakeActiveRuns(),
@@ -464,9 +465,9 @@ describe("handleExec", () => {
 	it("a relative --result-out resolves against the invocation cwd", async () => {
 		await install("bare.workflow.ts", bareWorkflowSource())
 		const spy = notifySpy()
-		const { deps } = execDeps()
+		const { deps } = batchDeps()
 
-		await handleExec(
+		await handleBatchRun(
 			fakeCtx(projectRoot, spy.notify),
 			store,
 			createFakeActiveRuns(),
@@ -487,10 +488,10 @@ describe("handleExec", () => {
 		const marker = path.join(projectRoot, "after-ran.txt")
 		await install("slow.workflow.ts", slowWorkflowSource(marker))
 		const spy = notifySpy()
-		const { deps, exits, warnings } = execDeps()
+		const { deps, exits, warnings } = batchDeps()
 		const signals = new EventEmitter()
 
-		const pending = handleExec(
+		const pending = handleBatchRun(
 			fakeCtx(projectRoot, spy.notify),
 			store,
 			createFakeActiveRuns(),
@@ -524,10 +525,10 @@ describe("handleExec", () => {
 	it("SIGTERM before the run starts exits 3 with nothing recorded", async () => {
 		await install("bare.workflow.ts", bareWorkflowSource())
 		const spy = notifySpy()
-		const { deps, exits, warnings } = execDeps()
+		const { deps, exits, warnings } = batchDeps()
 		const signals = new EventEmitter()
 
-		const pending = handleExec(
+		const pending = handleBatchRun(
 			fakeCtx(projectRoot, spy.notify),
 			store,
 			createFakeActiveRuns(),
@@ -546,5 +547,81 @@ describe("handleExec", () => {
 		expect(exits).toEqual([3])
 		expect(warnings.some((line) => line.includes("SIGTERM before the run started"))).toBe(true)
 		expect(await store.list()).toHaveLength(0)
+	})
+})
+
+// -- `/workflow run --result-out`: the in-session arm of the same artifact ------------------------------
+
+describe("handleRun with --result-out", () => {
+	let projectRoot: string
+	let store: RunStore
+
+	beforeEach(async () => {
+		projectRoot = await mkdtemp(path.join(tmpdir(), "workflow-run-result-out-"))
+		await mkdir(path.join(projectRoot, "sessions", "workflow"), { recursive: true })
+		await prepareWorkflowPackageFixture({ directory: workflowsDir(projectRoot) })
+		store = createFsStore(path.join(projectRoot, "sessions", "workflow"))
+		vi.stubEnv("PI_CODING_AGENT_DIR", await mkdtemp(path.join(tmpdir(), "workflow-run-result-out-agent-")))
+		vi.stubEnv("KIMCHI_CODING_AGENT_DIR", process.env.PI_CODING_AGENT_DIR)
+	})
+
+	afterEach(async () => {
+		vi.unstubAllEnvs()
+		await rm(projectRoot, { recursive: true, force: true })
+	})
+
+	async function install(name: string, source: string): Promise<string> {
+		const file = path.join(workflowsDir(projectRoot), name)
+		await writeFile(file, source, "utf8")
+		return file
+	}
+
+	it("writes the terminal artifact for a settled run, resolved against ctx.cwd", async () => {
+		await install("needs-input.workflow.ts", echoInputWorkflowSource())
+		const spy = notifySpy()
+
+		await handleRun(
+			fakeCtx(projectRoot, spy.notify),
+			store,
+			createFakeActiveRuns(),
+			noAgent,
+			"needs-input",
+			'{"name": "Ada"}',
+			undefined, // no progress surface needed for the artifact path
+			path.join("rel", "result.json"),
+		)
+
+		const artifact = JSON.parse(await readFile(path.join(projectRoot, "rel", "result.json"), "utf8"))
+		const [run] = await store.list()
+		expect(run?.status).toBe("completed")
+		expect(artifact.runId).toBe(run?.runId)
+		expect(artifact.workflowName).toBe("needs-input")
+		expect(artifact.status).toBe("completed")
+		expect(artifact.output).toEqual({ name: "Ada" })
+		expect(artifact.steps).toEqual({ echo: { name: "Ada" } })
+	})
+
+	it("an artifact write failure warns but changes nothing about the run's outcome", async () => {
+		await install("bare.workflow.ts", bareWorkflowSource())
+		const blocker = path.join(projectRoot, "blocker")
+		await writeFile(blocker, "a regular file", "utf8")
+		const spy = notifySpy()
+
+		await handleRun(
+			fakeCtx(projectRoot, spy.notify),
+			store,
+			createFakeActiveRuns(),
+			noAgent,
+			"bare",
+			undefined,
+			undefined,
+			path.join(blocker, "result.json"),
+		)
+
+		const [run] = await store.list()
+		expect(run?.status).toBe("completed")
+		expect(
+			spy.notes.some(([message, type]) => type === "warning" && message.includes("could not write the result file")),
+		).toBe(true)
 	})
 })

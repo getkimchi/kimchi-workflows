@@ -42,6 +42,10 @@ export type PendingHumanInput = PendingAsk | PendingInteraction
  * Rendering is intentionally outside `runTracked`: a blocked run owns no active execution while a
  * dialog/editor is open. Responses always target the exact path whose input
  * was displayed, including when several concurrent steps are blocked.
+ *
+ * Returns the run's settled terminal result, or `undefined` when the loop left it blocked — a
+ * dismissed dialog, an unrenderable interaction, or a resume failure. Callers persisting something
+ * against a terminal state (the `--result-out` artifact) must not treat those exits as one.
  */
 export async function handleAttendedInput(
 	ctx: CommandCtx,
@@ -53,12 +57,12 @@ export async function handleAttendedInput(
 	runId: string,
 	initialInput: PendingHumanInput | undefined,
 	progress: ProgressSink = inertProgress,
-): Promise<void> {
+): Promise<RunResult | undefined> {
 	let pending = initialInput
 	for (;;) {
 		if (!pending) {
 			ctx.ui.notify(`workflow: run ${runId} is blocked but has no recorded human-input request.`, "warning")
-			return
+			return undefined
 		}
 
 		const targetPath = pending.path
@@ -129,7 +133,7 @@ export async function handleAttendedInput(
 			continue
 		}
 		reportResult(ctx, workflowName, result, progress.reportedOutcome())
-		return
+		return result
 	}
 }
 

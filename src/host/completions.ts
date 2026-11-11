@@ -52,7 +52,6 @@ interface Verb {
 /** The verb slot (spec §14.4), in the order §6 introduces them. */
 const VERBS: readonly Verb[] = [
 	{ name: "run", takesArgument: true, description: "start a workflow, or `run list` for recorded runs" },
-	{ name: "exec", takesArgument: true, description: "run a workflow to completion and exit with a status code" },
 	{ name: "create", takesArgument: false, description: "generate a new workflow by interview" },
 	{ name: "list", takesArgument: false, description: "the workflows this project defines" },
 	{ name: "status", takesArgument: true, description: "show a run's tree — the executing one when bare" },
@@ -110,9 +109,6 @@ async function argumentItems(
 	switch (verb) {
 		case "run":
 			return workflowItems(verb, typed, await sources.workflows(), true)
-		case "exec":
-			// Same argument as `run` minus the reserved `list` — `exec` has no sub-verb of its own.
-			return workflowItems(verb, typed, await sources.workflows(), false)
 		case "status":
 			// No status filter: a run's tree is rebuilt from its log alone, so any recorded run can be shown,
 			// live or long finished (progress §11.4). The id is optional there — bare means the executing run —

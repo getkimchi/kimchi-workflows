@@ -22,13 +22,16 @@ import { resolveWorkflow } from "../workflow-catalog.ts"
 import { handleAttendedInput, humanInputOf } from "./attended.ts"
 import { type CommandCtx, describe, reportResult, runTracked, type StartAgent } from "./context.ts"
 import { preflightCreateWorkflow } from "./create-preflight.ts"
+import { writeRunResultArtifact } from "./result-artifact.ts"
 
-/** A parsed `/workflow run` argument line (spec §6.1): the target, plus `--input`'s raw, unparsed payload. */
+/** A parsed `run` argument line (spec §6.1): the target, the optional `--result-out` path, and `--input`'s raw, unparsed payload. */
 export interface ParsedRunArgs {
 	readonly target: string | undefined
 	/** Everything after `--input`, verbatim: either inline JSON or `@<path>`. `undefined` when the flag was absent. */
 	readonly inputArg: string | undefined
-	/** Set only when `--input` was typed with nothing after it — a syntax error, not a resolution failure. */
+	/** The `--result-out` path when the flag was present (result-artifact.ts), `undefined` otherwise. */
+	readonly resultOut: string | undefined
+	/** Set only when a flag was typed with nothing after it, or duplicated — a syntax error, not a resolution failure. */
 	readonly error: string | undefined
 }
 
@@ -40,7 +43,15 @@ export interface ParsedRunArgs {
 const INPUT_FLAG_RE = /(^|\s)--input(\s|$)/
 
 /**
- * Parse `/workflow run <file-name|file.ts> [--input <json>|@<file>]` (spec §6.1).
+ * `--result-out` must be its own token, exactly like `--input` (INPUT_FLAG_RE). The value is
+ * the next token — quoted when it contains spaces, so `--result-out "my dir/result.json"` survives.
+ */
+const RESULT_OUT_FLAG_RE = /(^|\s)--result-out(\s+("((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(\S+)))?/
+
+/**
+ * Parse `run <file-name|file.ts> [--input <json>|@<file>] [--result-out <path>]` (spec §6.1). One
+ * grammar for both surfaces: the in-session `/workflow run` and the headless CLI's
+ * `kimchi workflow run`.
  *
  * `--input`'s own payload is deliberately NOT tokenized the way the rest of `/workflow`'s arguments
  * are (`extension.ts` splits on `/\s+/` for every other subcommand): a JSON object routinely contains
@@ -48,17 +59,47 @@ const INPUT_FLAG_RE = /(^|\s)--input(\s|$)/
  * collapsed repeated whitespace the payload may have meant literally. So the caller hands this the RAW
  * text after `run` (whitespace-trimmed at the ends only), and everything from `--input` to the end of
  * the line is taken verbatim as the payload.
+ *
+ * `--result-out` is extracted FIRST, wherever it sits on the line, because its own value ends at the
+ * next whitespace; the remainder keeps the target/`--input` grammar above intact. Keeping `--input`
+ * last is still the sane habit: its payload runs to the end of the line, and a payload containing the
+ * literal flag text would be disturbed by the extraction.
  */
 export function parseRunArgs(raw: string): ParsedRunArgs {
 	const trimmed = raw.trim()
-	const match = INPUT_FLAG_RE.exec(trimmed)
-	if (!match) return { target: trimmed || undefined, inputArg: undefined, error: undefined }
+	const withResultOut = RESULT_OUT_FLAG_RE.exec(trimmed)
+
+	// Groups: 1 = leading whitespace, 2 = the whole ` value` tail, 4/6 = quoted inners, 7 = the bare token.
+	let remainder = trimmed
+	let resultOut: string | undefined
+	if (withResultOut) {
+		const value = withResultOut[4] ?? withResultOut[6] ?? withResultOut[7] ?? ""
+		remainder = (
+			trimmed.slice(0, withResultOut.index) + trimmed.slice(withResultOut.index + withResultOut[0].length)
+		).trim()
+		if (!value) {
+			return {
+				target: undefined,
+				inputArg: undefined,
+				resultOut: undefined,
+				error: "--result-out requires a value: <path>",
+			}
+		}
+		if (RESULT_OUT_FLAG_RE.test(remainder)) {
+			return { target: undefined, inputArg: undefined, resultOut: undefined, error: "duplicate --result-out" }
+		}
+		resultOut = value
+	}
+
+	const match = INPUT_FLAG_RE.exec(remainder)
+	if (!match) return { target: remainder || undefined, inputArg: undefined, resultOut, error: undefined }
 
 	const flagStart = match.index + (match[1]?.length ?? 0)
-	const target = trimmed.slice(0, flagStart).trim() || undefined
-	const inputArg = trimmed.slice(flagStart + "--input".length).trim()
-	if (!inputArg) return { target, inputArg: undefined, error: "--input requires a value: inline JSON, or @<file>" }
-	return { target, inputArg, error: undefined }
+	const target = remainder.slice(0, flagStart).trim() || undefined
+	const inputArg = remainder.slice(flagStart + "--input".length).trim()
+	if (!inputArg)
+		return { target, inputArg: undefined, resultOut, error: "--input requires a value: inline JSON, or @<file>" }
+	return { target, inputArg, resultOut, error: undefined }
 }
 
 /** What `--input` resolved to (spec §6.1), or why it could not — bad JSON, an unreadable file, or a
@@ -191,6 +232,7 @@ export async function handleRun(
 	target: string,
 	inputArg?: string,
 	progressFor: ProgressFor = noProgressFor,
+	resultOut?: string,
 ): Promise<void> {
 	const resolved = await resolveRunInvocation(ctx, target, inputArg)
 	if (!resolved) return
@@ -203,6 +245,7 @@ export async function handleRun(
 		resolved.workflowSource,
 		resolved.initialInput,
 		progressFor,
+		resultOut,
 	)
 }
 
@@ -248,10 +291,10 @@ export interface ExecuteRunHooks {
 }
 
 /**
- * The shared run lifecycle for `/workflow run`, `/workflow create`, and `/workflow exec`
- * (spec §7, §8.9): mint the id, record provenance, drive the engine once under the tracked-execution
- * lease. Everything AFTER the engine returns — the attended Q&A loop, exit codes, result artifacts —
- * is each surface's own; that is why the sink is handed back undisposed.
+ * The shared run lifecycle for `/workflow run`, `/workflow create`, and the headless CLI's batch
+ * `kimchi workflow run` (spec §7, §8.9): mint the id, record provenance, drive the engine once under
+ * the tracked-execution lease. Everything AFTER the engine returns — the attended Q&A loop, exit
+ * codes, result artifacts — is each surface's own; that is why the sink is handed back undisposed.
  */
 export async function executeRun(
 	store: RunStore,
@@ -307,6 +350,7 @@ async function startRun(
 	workflowSource: WorkflowSource,
 	initialInput: unknown,
 	progressFor: ProgressFor,
+	resultOut?: string,
 ): Promise<void> {
 	const { runId, progress, result } = await executeRun(
 		store,
@@ -319,8 +363,9 @@ async function startRun(
 	)
 	try {
 		// Attended flow: if the run blocked, render the questionnaire inline and loop until it settles.
+		let settled: RunResult | undefined
 		if (result.status === "blocked") {
-			await handleAttendedInput(
+			settled = await handleAttendedInput(
 				ctx,
 				store,
 				activeRuns,
@@ -333,6 +378,14 @@ async function startRun(
 			)
 		} else {
 			reportResult(ctx, workflow.name, result, progress.reportedOutcome())
+			settled = result
+		}
+		// `--result-out`: the artifact lands only on a SETTLED result — a dismissed questionnaire leaves
+		// the run blocked for a later `/workflow resume`, and there is no terminal state to record yet. A
+		// failed write warns and changes nothing about the run's outcome (result-artifact.ts).
+		if (resultOut !== undefined && settled !== undefined) {
+			const failure = await writeRunResultArtifact(store, ctx.cwd, resultOut, runId, workflow.name, settled)
+			if (failure) ctx.ui.notify(`workflow: ${failure}`, "warning")
 		}
 	} finally {
 		progress.dispose()

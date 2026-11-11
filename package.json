@@ -42,7 +42,7 @@
 	"publishConfig": {
 		"access": "public"
 	},
-	"//exports": "The public surface, and the only names anything outside this repo may import. The package root IS the authoring API — that is what a workflow file imports; `./flow` names the same module for symmetry with the other layers. Directory paths (`./src/...`, `./dist/...`) are deliberately NOT exported: the layout is ours to change.",
+	"//exports": "The public surface, and the only names anything outside this repo may import. The package root IS the authoring API — that is what a workflow file imports; `./flow` names the same module for symmetry with the other layers. `./cli` is the headless CLI host (`kimchi workflow run`), imported as compiled JS by harness dispatch rather than jiti-loaded from `src` the way the bin and PI do. Directory paths (`./src/...`, `./dist/...`) are deliberately NOT exported: the layout is ours to change.",
 	"exports": {
 		".": {
 			"types": "./dist/flow/index.d.ts",
@@ -59,6 +59,10 @@
 		"./host": {
 			"types": "./dist/host/index.d.ts",
 			"default": "./dist/host/index.js"
+		},
+		"./cli": {
+			"types": "./dist/host/cli.d.ts",
+			"default": "./dist/host/cli.js"
 		},
 		"./extension": {
 			"types": "./dist/host/extension.d.ts",
