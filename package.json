@@ -42,6 +42,12 @@
 	"publishConfig": {
 		"access": "public"
 	},
+	"//kimchi": "Subcommands the harness gains when this package is installed via `kimchi install` — kimchi-dev:src/commands/package-commands.ts reads this map and lazily imports each module (which must export run(args) => Promise<number>, pointing at runnable JS, i.e. dist/).",
+	"kimchi": {
+		"commands": {
+			"workflow": "./dist/host/cli.js"
+		}
+	},
 	"//exports": "The public surface, and the only names anything outside this repo may import. The package root IS the authoring API — that is what a workflow file imports; `./flow` names the same module for symmetry with the other layers. `./cli` is the headless CLI host (`kimchi workflow run`), imported as compiled JS by harness dispatch rather than jiti-loaded from `src` the way the bin and PI do. Directory paths (`./src/...`, `./dist/...`) are deliberately NOT exported: the layout is ours to change.",
 	"exports": {
 		".": {
