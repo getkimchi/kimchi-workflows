@@ -168,7 +168,7 @@ export async function resolveInitialInput(
  * to a typed payload: all-optional schemas start cleanly, required fields are a notification and no
  * run id is ever minted.
  */
-/** A target that survived preparation, resolution, and input validation — everything `startRun`/`exec` need to enter the engine. */
+/** A target that survived preparation, resolution, and input validation — everything the in-session `startRun` and the batch host need to enter the engine. */
 export interface ResolvedRunInvocation {
 	readonly workflow: WorkflowDefinition
 	readonly workflowSource: WorkflowSource
@@ -176,11 +176,11 @@ export interface ResolvedRunInvocation {
 }
 
 /**
- * The shared front half of `/workflow run` and `/workflow exec`: prepare the project workflow
+ * The shared front half of `/workflow run` and the batch CLI's `run`: prepare the project workflow
  * package, resolve the target through the catalog, and validate the initial input — including the
  * omitted-`--input`-means-`{}` rule for schema-declaring workflows (spec §6.1). Returns `undefined`
  * after notifying the failure, so the caller's only decision is what its own surface charges for it
- * (nothing for `run`, exit code 4 for `exec`).
+ * (nothing for `/workflow run`, exit code 4 for the batch CLI).
  */
 export async function resolveRunInvocation(
 	ctx: Pick<CommandCtx, "cwd" | "ui">,

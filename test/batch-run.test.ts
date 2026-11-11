@@ -360,7 +360,7 @@ describe("handleBatchRun", () => {
 		expect(await store.list()).toHaveLength(0)
 	})
 
-	it("a blocked run is reported as blocked and exits 2 — no attended questionnaire under exec", async () => {
+	it("a blocked run is reported as blocked and exits 2 — no attended questionnaire in the batch host", async () => {
 		await install("blocks.workflow.ts", blockingWorkflowSource())
 		const spy = notifySpy()
 		const { deps, exits, lines } = batchDeps()
