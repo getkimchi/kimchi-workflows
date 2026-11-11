@@ -180,17 +180,6 @@ function setProcessExitCode(code: number): void {
  * progress, notifications, warnings, usage — is stderr; stdout carries NOTHING a scheduler could
  * mistake for output.
  */
-/**
- * Package-command contract (kimchi-dev `src/commands/package-commands.ts`): when the package is
- * installed into the harness agent dir, its `kimchi.commands.workflow` manifest points here and
- * the dispatcher calls `run(args)` with the post-command argv (`["run", "<name>", ...]`).
- * Same exit-code contract as {@link main} — `run` is the boundary name, `main` remains the
- * testable host with injectable deps.
- */
-export async function run(args: string[]): Promise<number> {
-	return main(args)
-}
-
 export async function main(args: readonly string[], deps: CliDeps = {}): Promise<number> {
 	const exit = deps.exit ?? setProcessExitCode
 	const stderr = deps.stderr ?? stderrLine
