@@ -138,17 +138,20 @@ export type PiInvocationResolver = (args: readonly string[]) => { command: strin
  *      basename is not a generic runtime name → respawn `process.execPath` directly.
  *   3. Last resort — matches the previous hardcoded behaviour: literal `"pi"` on `PATH`.
  */
-export function resolvePiInvocation(args: readonly string[]): { command: string; args: readonly string[] } {
-	const currentScript = process.argv[1]
+export function resolvePiInvocation(
+	args: readonly string[],
+	currentScript: string | undefined = process.argv[1],
+	execPath: string = process.execPath,
+): { command: string; args: readonly string[] } {
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/")
 	if (currentScript && !isBunVirtualScript && existsSync(currentScript)) {
-		return { command: process.execPath, args: [currentScript, ...args] }
+		return { command: execPath, args: [currentScript, ...args] }
 	}
 
-	const execName = path.basename(process.execPath).toLowerCase()
+	const execName = path.basename(execPath).toLowerCase()
 	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName)
 	if (!isGenericRuntime) {
-		return { command: process.execPath, args }
+		return { command: execPath, args }
 	}
 
 	return { command: "pi", args }
@@ -567,6 +570,30 @@ export function createPiAgentBridge(
 }
 
 /**
+ * An agent starter that routes EVERY step turn through the background-subagent path — one harness
+ * subprocess (`--mode json -p`) per turn. This is what a host with no chat session drives agent
+ * steps with: the headless CLI (`src/host/cli.ts`) has no shared session listeners to correlate an
+ * in-session turn against, so every step takes the same one-shot-subprocess route `background`
+ * steps take inside a live harness (spec §2.2/§9.2).
+ *
+ * `modelRegistry` is optional: without one (the headless CLI has no registry of its own) a
+ * workflow-pinned model is passed to the child as `--model provider/id` unvalidated — the child is
+ * a full harness with the registry this parent lacks, and it rejects an unknown model itself.
+ */
+export function createSubprocessAgentStarter(
+	sessionsDir: string,
+	options: {
+		readonly modelRegistry?: ModelRegistry
+		readonly invocationResolver?: PiInvocationResolver
+		readonly spawnSubagent?: SubagentSpawner
+	} = {},
+): AgentStarter {
+	const invocationResolver = options.invocationResolver ?? resolvePiInvocation
+	const spawnSubagent = options.spawnSubagent ?? subagentSpawner
+	return (request) => backgroundSession(options.modelRegistry, request, invocationResolver, spawnSubagent, sessionsDir)
+}
+
+/**
  * A background subagent's session (spec §2.2): one `pi --mode json -p` subprocess per
  * `sendAndAwaitEnd` call. A second call is ordinary, not exceptional — a steering repair (spec §9.2)
  * spawns another process against the SAME `--session` file, which the CLI resumes, so the correction
@@ -576,7 +603,7 @@ export function createPiAgentBridge(
  * background request (see AgentRequest's doc, engine/types.ts) so there is nothing to seed it with.
  */
 function backgroundSession(
-	modelRegistry: ModelRegistry,
+	modelRegistry: ModelRegistry | undefined,
 	request: AgentRequest,
 	invocationResolver: PiInvocationResolver,
 	spawnSubagent: SubagentSpawner,
@@ -613,9 +640,10 @@ function backgroundSession(
 				...(request.outputSchema ? inheritedExtensionArgs() : []),
 			]
 			if (request.model) {
-				// Resolved (and rejected) up front, same as the interactive path: a typo'd model should fail
-				// clearly here rather than surface as an opaque nonzero exit from the child process.
-				if (!resolveModel(modelRegistry, request.model)) {
+				// Resolved (and rejected) up front when a registry exists: a typo'd model should fail clearly
+				// here rather than surface as an opaque nonzero exit from the child process. A registry-less
+				// host (the headless CLI) defers that validation to the child, which IS a harness with one.
+				if (modelRegistry && !resolveModel(modelRegistry, request.model)) {
 					throw new Error(`unknown model "${request.model}" (expected provider/modelId)`)
 				}
 				args.push("--model", request.model)

@@ -108,7 +108,7 @@ async function argumentItems(
 ): Promise<CompletionItem[] | null> {
 	switch (verb) {
 		case "run":
-			return workflowItems(verb, typed, await sources.workflows())
+			return workflowItems(verb, typed, await sources.workflows(), true)
 		case "status":
 			// No status filter: a run's tree is rebuilt from its log alone, so any recorded run can be shown,
 			// live or long finished (progress §11.4). The id is optional there — bare means the executing run —
@@ -131,8 +131,14 @@ async function argumentItems(
  * The set is deduplicated so a `list.workflow.ts` cannot shadow the reserved word. No descriptions —
  * completion deliberately avoids importing project modules; explicit catalog views load descriptions.
  */
-function workflowItems(verb: string, typed: string, workflows: readonly string[]): CompletionItem[] | null {
-	const candidates = [...new Set([RESERVED_RUN_LIST, ...[...workflows].sort()])]
+function workflowItems(
+	verb: string,
+	typed: string,
+	workflows: readonly string[],
+	reservedList: boolean,
+): CompletionItem[] | null {
+	const sorted = [...workflows].sort()
+	const candidates = [...new Set(reservedList ? [RESERVED_RUN_LIST, ...sorted] : sorted)]
 	return popup(matching(candidates, typed, (name) => name).map((name) => ({ value: `${verb} ${name}`, label: name })))
 }
 

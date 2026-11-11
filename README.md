@@ -134,7 +134,7 @@ Once the extension is registered, these are available in any Kimchi session:
 | `/workflow` | Open the terminal-native Kimchi Workflows quick-pick and choose a workflow to run or create. In headless modes, list the project's workflows. |
 | `/workflow list` | List the project's workflows: name, file, and description. |
 | `/workflow create` | Turn your goal into an approved behavioral plan, a runnable workflow, and a happy-path test. |
-| `/workflow run <file-name\|file.ts>` | Start a run by `.workflow.ts` filename (without the suffix), or by an explicit TypeScript path. Other runs may execute concurrently. |
+| `/workflow run <file-name\|file.ts> [--input <json>\|@<file>] [--result-out <path>]` | Start a run by `.workflow.ts` filename (without the suffix), or by an explicit TypeScript path. Other runs may execute concurrently. `--input` seeds the initial payload (inline JSON, or `@file`); `--result-out` writes the run's terminal JSON artifact when the invocation settles (a failed write only warns, the run's outcome stands). |
 | `/workflow run list` | List runs: id, workflow name, status, current step, pending questions, started/completed times. |
 | `/workflow resume [run-id]` | Continue a `blocked` / `crashed` / `cancelled` run from its last checkpoint. |
 | `/workflow cancel [run-id]` | Durably stop a run: its executing runner records `cancelled` before aborting, or any runner may cancel an ownerless blocked run. Resumable either way. |
@@ -143,6 +143,35 @@ Once the extension is registered, these are available in any Kimchi session:
 > **Opening the picker or listing imports every workflow.** `/workflow` and `/workflow list` load descriptions by importing each module, which executes project code — the same trust boundary `.kimchi/extensions/` sits behind. Completion and `/workflow run <file-name>` enumerate filenames without importing unrelated modules. Keep workflow modules free of import-time side effects: define the workflow, export it, do nothing else.
 
 An executing run can be cancelled only by the process that owns its live lease. A command from another process is refused with the owner host and PID; it is not forwarded through a mailbox. Read-only `run list` and `status` commands project a same-host owner that is provably dead as `crashed` without changing the JSONL. A later `resume`, `cancel`, or `delete` of that run persists the crash and retires its stale lease before continuing. Cross-host ownership remains conservative because local code cannot verify the remote process.
+
+### Batch mode: `kimchi workflow run`
+
+`run` is one verb with two invocation modes. In a chat session, `/workflow run` is interactive — a
+`blocked` run opens the inline questionnaire. The batch surface runs the same workflow to a terminal
+state in the foreground, with no chat session:
+
+```sh
+kimchi workflow run <file-name|file.ts> [--input <json>|@<file>] [--result-out <path>]
+```
+
+(Outside Kimchi, the package's own `kimchi-workflows` bin provides the same `run` command, driving
+steps through a `pi` on PATH.)
+
+- **The exit status is the contract**: `0` completed, `2` blocked (a human question with nobody to
+  answer it), `3` cancelled (SIGINT/SIGTERM or engine cancel), `4` crashed or never started (unknown
+  workflow, rejected `--input`, malformed command line). A scheduler needs nothing but `$?`.
+- **stdout stays machine-clean.** Progress is plain lines on stderr; `--result-out <path>` writes
+  the terminal JSON artifact (`runId`, `workflowName`, `status`, `output`, per-step `steps`) — the
+  same artifact `/workflow run --result-out` writes in-session.
+- **Agent steps run as harness subprocesses**, the same mechanism `background` steps use in-session,
+  so model and credential configuration is the harness's own: under `kimchi workflow run` the user's
+  Kimchi providers, API keys, and org policy apply (auth.json, `KIMCHI_API_KEY`, or the standard
+  provider env vars such as `OPENAI_API_KEY`/`ANTHROPIC_API_KEY`). A workflow-pinned model is passed
+  to the child as `--model provider/id`.
+- **Runs are durable and resumable.** The run's event log and step sessions land in
+  `<project>/.kimchi/workflows/runs`, so `/workflow resume <run-id>` can pick a blocked or cancelled
+  batch run up in a chat session. SIGINT/SIGTERM take the durable graceful-cancel path: the
+  resumption checkpoint lands before the process exits 3.
 
 ---
 

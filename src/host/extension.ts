@@ -90,10 +90,19 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 					if (parsed.error) return void ctx.ui.notify(`workflow: ${parsed.error}`, "error")
 					if (!parsed.target)
 						return void ctx.ui.notify(
-							"usage: /workflow run <file-name|file.ts> [--input <json>|@<file>]  |  /workflow run list",
+							"usage: /workflow run <file-name|file.ts> [--input <json>|@<file>] [--result-out <path>]  |  /workflow run list",
 							"warning",
 						)
-					return void (await handleRun(ctx, store, activeRuns, startAgent, parsed.target, parsed.inputArg, progressFor))
+					return void (await handleRun(
+						ctx,
+						store,
+						activeRuns,
+						startAgent,
+						parsed.target,
+						parsed.inputArg,
+						progressFor,
+						parsed.resultOut,
+					))
 				}
 
 				case "create":

@@ -278,13 +278,19 @@ describe("/workflow run --input", () => {
  */
 describe("parseRunArgs", () => {
 	it("reads a bare target with no --input", () => {
-		expect(parseRunArgs("my-workflow")).toEqual({ target: "my-workflow", inputArg: undefined, error: undefined })
+		expect(parseRunArgs("my-workflow")).toEqual({
+			target: "my-workflow",
+			inputArg: undefined,
+			resultOut: undefined,
+			error: undefined,
+		})
 	})
 
 	it("keeps a JSON object's internal spaces intact rather than collapsing them", () => {
 		expect(parseRunArgs('my-workflow --input {"a": 1, "b": 2}')).toEqual({
 			target: "my-workflow",
 			inputArg: '{"a": 1, "b": 2}',
+			resultOut: undefined,
 			error: undefined,
 		})
 	})
@@ -293,6 +299,7 @@ describe("parseRunArgs", () => {
 		expect(parseRunArgs("my-workflow --input @payload.json")).toEqual({
 			target: "my-workflow",
 			inputArg: "@payload.json",
+			resultOut: undefined,
 			error: undefined,
 		})
 	})
@@ -308,11 +315,17 @@ describe("parseRunArgs", () => {
 		expect(parseRunArgs("my--input-migrator.workflow.ts")).toEqual({
 			target: "my--input-migrator.workflow.ts",
 			inputArg: undefined,
+			resultOut: undefined,
 			error: undefined,
 		})
 	})
 
 	it("treats a bare --input (no target before it) as a usage error the caller must catch", () => {
-		expect(parseRunArgs("--input {}")).toEqual({ target: undefined, inputArg: "{}", error: undefined })
+		expect(parseRunArgs("--input {}")).toEqual({
+			target: undefined,
+			inputArg: "{}",
+			resultOut: undefined,
+			error: undefined,
+		})
 	})
 })

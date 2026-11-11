@@ -63,8 +63,10 @@ describe("verb slot", () => {
 	it("falls back to substring only when nothing has the typed text as a prefix, keeping source order", async () => {
 		// `list` has the prefix, so the verbs merely containing an l (`cancel`, `delete`) stay out.
 		expect(labels(await completeWorkflowArgument("l", sourcesOf()))).toEqual(["list"])
-		// Nothing starts with an e, so every verb containing one is offered, in the verb table's order.
-		expect(labels(await completeWorkflowArgument("e", sourcesOf()))).toEqual(["create", "resume", "cancel", "delete"])
+		// `delete` has the de-prefix. Nothing starts with an a, so every verb containing one is offered,
+		// in the verb table's order.
+		expect(labels(await completeWorkflowArgument("de", sourcesOf()))).toEqual(["delete"])
+		expect(labels(await completeWorkflowArgument("a", sourcesOf()))).toEqual(["create", "status", "cancel"])
 	})
 
 	it("reads no candidate source at all — a verb keystroke costs nothing (spec §14.6)", async () => {
