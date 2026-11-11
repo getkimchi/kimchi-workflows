@@ -318,9 +318,9 @@ export async function executeRun(
 	const runId = await mintRunId(workflow.name, async (candidate) => (await store.loadEvents(candidate)).length > 0)
 	hooks.onRunId?.(runId)
 
-	// One sink for the whole invocation: a blocked `run` keeps its widget while its questionnaire
-	// renders inline (progress §7.5) — the attended loop is several engine calls, not one — and `exec`
-	// wants its last plain line written before the artifact lands.
+	// One sink for the whole invocation: a blocked `/workflow run` keeps its widget while its questionnaire
+	// renders inline (progress §7.5) — the attended loop is several engine calls, not one — and the batch
+	// host wants its last plain line written before the artifact lands.
 	const sourceLabel = workflowSourceLabel(workflowSource)
 	const progress = progressFor(workflow, runId, sourceLabel)
 	const result = await runTracked(activeRuns, runId, store, async (signal, execution) => {
